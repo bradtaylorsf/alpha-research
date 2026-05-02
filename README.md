@@ -78,6 +78,12 @@ research logs <job-id>             # print existing events.jsonl entries
 research logs <job-id> -f          # follow appended events
 research logs <job-id> --level ERROR
 
+research stop <job-id>             # graceful: drop STOP flag, daemon finishes current task
+research stop <job-id> --kill      # hard: SIGTERM then SIGKILL after 10s, unlinks daemon.pid
+
+research resume <job-id>           # respawn the daemon; restores from last checkpoint
+research resume <job-id> --force   # resume even when job is completed/failed
+
 research search "<query>"          # FTS5 over findings + sources (cross-job)
 research search "<query>" --job <job-id>     # scope to one job
 research search "<query>" --kind findings    # findings only (default: both)
@@ -118,6 +124,19 @@ On clean shutdown (including SIGTERM/SIGINT) the daemon's atexit hook
 removes `daemon.pid`. `daemon.is_daemon_alive(<id>)` checks liveness via
 `kill -0` plus a `/proc/<pid>/cmdline` peek on Linux, so a recycled PID
 won't false-positive.
+
+`research stop --graceful` (the default) atomically writes a `STOP` flag
+under `jobs/<id>/`; the daemon's between-task watcher picks it up, lets
+the in-flight task finish, runs a final synthesis pass, then exits. The
+command returns immediately with `Stop requested; daemon will finish
+current task and synthesize.` `research stop --kill` SIGTERMs the PID,
+escalates to SIGKILL after 10 s, and unlinks `daemon.pid` so a follow-up
+`research resume` won't trip the alive-check. `research resume <id>`
+refuses if a live daemon is already running (PID file present and the
+process responds to `kill -0`), or if the job is in a terminal
+`completed`/`failed` state — pass `--force` to override the latter.
+Otherwise it spawns a fresh daemon, which restores from the last
+checkpoint at startup.
 
 ## Troubleshooting
 
