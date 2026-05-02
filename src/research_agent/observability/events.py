@@ -41,6 +41,7 @@ EventKind = Literal[
     "llm_call",
     "tool_call",
     "checkpoint",
+    "prompt_loaded",
     "error",
     "warning",
 ]
