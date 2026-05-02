@@ -211,12 +211,14 @@ class Router:
     ) -> Any:
         """Run ``agent.run(*args, **kwargs)`` for ``tier`` with full bookkeeping.
 
-        - precheck/charge the budget for cloud tiers
+        - precheck the budget for cloud tiers; ``charge`` is the single
+          writer of the cloud ``llm_calls`` row + ``jobs.cost_so_far_usd``
+        - for local tiers the router writes the ledger row directly with
+          cost ``0.0`` (no budget enforcement)
         - enforce the per-tier ``timeout_s`` via :func:`asyncio.wait_for`
         - on :class:`openai.RateLimitError` for a cloud tier with a configured
           ``fallback_model``, retry once on the fallback model
-        - write one row to ``llm_calls`` and emit one ``llm_call`` event
-          regardless of provider (so the ledger covers local calls too)
+        - emit exactly one ``llm_call`` event regardless of provider
 
         Local-tier failures are *not* silently rerouted to cloud (per §16);
         the original exception propagates to the caller.
@@ -247,15 +249,19 @@ class Router:
 
         latency_ms = int((time.perf_counter() - t0) * 1000)
         usage = _extract_usage(result, latency_ms)
-        # Cost computation lives in a later issue; the ledger schema already
-        # has the column, so we record 0.0 for now and let `BudgetTracker`
-        # handle the running total once pricing lands.
-        cost_usd = 0.0
 
         if is_cloud:
-            self.budget.charge(tier, provider, model_name, usage, cost_usd)
+            cost_usd = self.budget.charge(tier, provider, model_name, usage)
+        else:
+            cost_usd = 0.0
+            self._record_local_call(
+                tier=tier,
+                provider=provider,
+                model=model_name,
+                usage=usage,
+            )
 
-        self._record_call(
+        self._emit_llm_call_event(
             tier=tier,
             provider=provider,
             model=model_name,
@@ -286,16 +292,15 @@ class Router:
             return self.job.db_path
         return db.DEFAULT_DB_PATH
 
-    def _record_call(
+    def _record_local_call(
         self,
         *,
         tier: str,
         provider: str,
         model: str,
         usage: TokenUsage,
-        cost_usd: float,
-        fallback_used: bool,
     ) -> None:
+        """Write the ``llm_calls`` row for a local-tier call (cost = 0)."""
         ts = int(time.time())
         job_id = self.job.id if self.job is not None else None
         db_path = self._resolve_db_path()
@@ -319,36 +324,47 @@ class Router:
                         usage.output_tokens,
                         usage.cached_tokens,
                         usage.latency_ms,
-                        cost_usd,
+                        0.0,
                         usage.finish_reason,
                     ),
                 )
         finally:
             conn.close()
 
-        if self.job is not None:
-            payload = {
-                "tier": tier,
-                "provider": provider,
-                "model": model,
-                "latency_ms": usage.latency_ms,
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "cost_usd": cost_usd,
-                "finish_reason": usage.finish_reason,
-                "fallback_used": fallback_used,
-            }
-            # Round-trip through json so the payload always contains JSON-safe
-            # primitives — `emit` re-serializes in the SQL mirror.
-            payload = json.loads(json.dumps(payload, default=str))
-            emit(
-                self.job,
-                "INFO",
-                "router",
-                "llm_call",
-                payload,
-                db_path=db_path,
-            )
+    def _emit_llm_call_event(
+        self,
+        *,
+        tier: str,
+        provider: str,
+        model: str,
+        usage: TokenUsage,
+        cost_usd: float,
+        fallback_used: bool,
+    ) -> None:
+        if self.job is None:
+            return
+        payload = {
+            "tier": tier,
+            "provider": provider,
+            "model": model,
+            "latency_ms": usage.latency_ms,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cost_usd": cost_usd,
+            "finish_reason": usage.finish_reason,
+            "fallback_used": fallback_used,
+        }
+        # Round-trip through json so the payload always contains JSON-safe
+        # primitives — `emit` re-serializes in the SQL mirror.
+        payload = json.loads(json.dumps(payload, default=str))
+        emit(
+            self.job,
+            "INFO",
+            "router",
+            "llm_call",
+            payload,
+            db_path=self._resolve_db_path(),
+        )
 
 
 __all__ = [
