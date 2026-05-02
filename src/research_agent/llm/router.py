@@ -9,6 +9,18 @@ Per §16 the router never silently falls back from a local tier to a cloud
 tier — that would let a paid call slip in disguised as a free one. Cloud
 tiers can fall back to a configured ``fallback_model`` (still cloud) on
 :class:`openai.RateLimitError`.
+
+LM Studio model swaps stall requests for 30–60s (§6.3 #1). To keep a
+hanging local model from blocking a job, every lmstudio call is wrapped in
+``asyncio.wait_for(timeout=tier.timeout_s)``; on the first ``TimeoutError``
+the router waits 5s and retries once. A second timeout marks the tier
+``degraded`` for 10 minutes — subsequent calls within that window route to
+the tier's configured ``fallback_tier`` (cloud), each emitting a WARN event
+plus a per-call cost figure so the operator can see what's being charged.
+After the window expires the router retries local; on success the tier is
+marked recovered (INFO event). When no ``fallback_tier`` is configured the
+second TimeoutError propagates — the §16 anti-pattern is silent reroutes,
+not loud ones.
 """
 
 from __future__ import annotations
@@ -58,6 +70,15 @@ EXPECTED_TIERS: tuple[str, ...] = (
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 LMSTUDIO_DEFAULT_BASE_URL = "http://localhost:1234/v1"
+
+# Default cool-down between the first lmstudio TimeoutError and the retry.
+# Module-level so tests can monkeypatch ``Router.retry_sleep_s`` to 0 without
+# patching the global :func:`asyncio.sleep`.
+LMSTUDIO_RETRY_SLEEP_S = 5.0
+# How long an lmstudio tier stays marked ``degraded`` after two consecutive
+# timeouts. Within this window calls reroute to the configured ``fallback_tier``
+# instead of hitting LM Studio again.
+LMSTUDIO_DEGRADED_WINDOW_S = 600.0
 
 
 def load_models_config(path: Path | str = "config/models.yaml") -> dict[str, Any]:
@@ -257,6 +278,14 @@ class Router:
         self.db_path = Path(db_path) if db_path is not None else None
         self.cache = cache
         self._model_cache: dict[str, OpenAIModel] = {}
+        # Per-tier "degraded until" deadlines for lmstudio tiers. Populated
+        # only after two consecutive timeouts; cleared after a successful
+        # local call once the window has expired. Public for tests/inspection.
+        self._tier_degraded_until: dict[str, float] = {}
+        # Settable per-instance so tests can drop the sleep to zero without
+        # monkeypatching the global asyncio loop.
+        self.retry_sleep_s: float = LMSTUDIO_RETRY_SLEEP_S
+        self.degraded_window_s: float = LMSTUDIO_DEGRADED_WINDOW_S
 
     # ---- Provider wiring ---------------------------------------------------
 
@@ -287,6 +316,19 @@ class Router:
             fallback_model_name,
             provider=OpenAIProvider(base_url=OPENROUTER_BASE_URL, api_key=api_key),
         )
+        return Agent(model)
+
+    def _make_fallback_tier_agent(self, fallback_tier: str) -> Agent:
+        """Construct a one-shot Agent bound to the model behind ``fallback_tier``.
+
+        Used when an lmstudio tier is degraded and the router needs to dispatch
+        the call against the configured cloud equivalent. Built on every reroute
+        rather than memoized so a swap of the underlying ``OpenAIModel`` (e.g.
+        in tests via :meth:`unittest.mock.patch.object`) takes effect immediately.
+        """
+        if fallback_tier not in self.tiers:
+            raise KeyError(f"fallback_tier {fallback_tier!r} not present in router config")
+        model = _build_model_for_tier(fallback_tier, self.tiers[fallback_tier])
         return Agent(model)
 
     # ---- Call wrapper ------------------------------------------------------
@@ -320,7 +362,26 @@ class Router:
         model_name = spec["model"]
         timeout_s = spec.get("timeout_s")
         is_cloud = provider == "openrouter"
+        is_local = provider == "lmstudio"
         fallback_used = False
+
+        # Skip local entirely while the tier is in its degraded window —
+        # rerouting earliest avoids burning another timeout cycle on a swap
+        # that's known to be in flight. Without a configured fallback we fall
+        # through and try local; the §16 rule is *no silent reroutes*, not *no
+        # local attempts at all*.
+        if is_local:
+            until = self._tier_degraded_until.get(tier)
+            if until is not None and time.time() < until:
+                fallback_tier = spec.get("fallback_tier")
+                if fallback_tier:
+                    return await self._reroute_to_fallback_tier(
+                        original_tier=tier,
+                        fallback_tier=fallback_tier,
+                        args=args,
+                        kwargs=kwargs,
+                        cache_enabled=cache_enabled,
+                    )
 
         cache_key: str | None = None
         if cache_enabled and self.cache is not None:
@@ -358,6 +419,46 @@ class Router:
             result = await self._run_with_timeout(fallback_agent, timeout_s, args, kwargs)
             fallback_used = True
             model_name = fallback_model
+        except TimeoutError:
+            if not is_local:
+                raise
+            # First timeout: cool off briefly (LM Studio often finishes the
+            # swap inside a few seconds) and try once more.
+            await asyncio.sleep(self.retry_sleep_s)
+            try:
+                result = await self._run_with_timeout(agent, timeout_s, args, kwargs)
+            except TimeoutError:
+                # Second timeout: mark the tier degraded and either reroute or
+                # propagate the timeout (no silent fallback when fallback_tier
+                # is intentionally omitted, e.g. embeddings).
+                until_ts = time.time() + self.degraded_window_s
+                self._tier_degraded_until[tier] = until_ts
+                fallback_tier = spec.get("fallback_tier")
+                self._emit_lmstudio_degraded(
+                    tier=tier,
+                    fallback_tier=fallback_tier,
+                    until_ts=until_ts,
+                )
+                if fallback_tier:
+                    return await self._reroute_to_fallback_tier(
+                        original_tier=tier,
+                        fallback_tier=fallback_tier,
+                        args=args,
+                        kwargs=kwargs,
+                        cache_enabled=cache_enabled,
+                    )
+                raise
+        else:
+            # Local call succeeded after a previous degradation expired —
+            # only emit recovery for *expired* windows so a fall-through
+            # (degraded but no fallback_tier) doesn't masquerade as recovery
+            # mid-window. The pop guarantees a single recovered event per
+            # degrade/recover cycle.
+            if is_local:
+                until = self._tier_degraded_until.get(tier)
+                if until is not None and time.time() >= until:
+                    self._tier_degraded_until.pop(tier, None)
+                    self._emit_lmstudio_recovered(tier=tier)
 
         latency_ms = int((time.perf_counter() - t0) * 1000)
         usage = _extract_usage(result, latency_ms)
@@ -404,6 +505,39 @@ class Router:
         if timeout_s is None:
             return await agent.run(*args, **kwargs)
         return await asyncio.wait_for(agent.run(*args, **kwargs), timeout=timeout_s)
+
+    async def _reroute_to_fallback_tier(
+        self,
+        *,
+        original_tier: str,
+        fallback_tier: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        cache_enabled: bool,
+    ) -> Any:
+        """Run the call on ``fallback_tier`` and emit a per-call WARN.
+
+        Re-enters :meth:`call` so the cloud tier still goes through its own
+        budget / cache / ledger / ``llm_call`` event flow exactly as if the
+        caller had invoked it directly. The extra ``lmstudio_rerouted`` WARN
+        is the §16 "loud, not silent" signal — it carries the original tier
+        the caller asked for plus the cost the reroute incurred so an
+        operator tailing logs sees both halves.
+        """
+        if cache_enabled:
+            kwargs = {**kwargs, "cache": True}
+        fallback_agent = self._make_fallback_tier_agent(fallback_tier)
+        # Snapshot before/after spent so cache hits show $0 reroute cost
+        # while real cloud charges show their incremental cost.
+        before_spent = self.budget.spent
+        result = await self.call(fallback_tier, fallback_agent, *args, **kwargs)
+        cost_usd = max(0.0, self.budget.spent - before_spent)
+        self._emit_lmstudio_rerouted(
+            original_tier=original_tier,
+            fallback_tier=fallback_tier,
+            cost_usd=cost_usd,
+        )
+        return result
 
     # ---- Ledger + event ----------------------------------------------------
 
@@ -490,10 +624,68 @@ class Router:
             db_path=self._resolve_db_path(),
         )
 
+    def _emit_lmstudio_degraded(
+        self,
+        *,
+        tier: str,
+        fallback_tier: str | None,
+        until_ts: float,
+    ) -> None:
+        if self.job is None:
+            return
+        emit(
+            self.job,
+            "WARN",
+            "router",
+            "lmstudio_degraded",
+            {
+                "tier": tier,
+                "fallback_tier": fallback_tier,
+                "until_ts": int(until_ts),
+            },
+            db_path=self._resolve_db_path(),
+        )
+
+    def _emit_lmstudio_recovered(self, *, tier: str) -> None:
+        if self.job is None:
+            return
+        emit(
+            self.job,
+            "INFO",
+            "router",
+            "lmstudio_recovered",
+            {"tier": tier},
+            db_path=self._resolve_db_path(),
+        )
+
+    def _emit_lmstudio_rerouted(
+        self,
+        *,
+        original_tier: str,
+        fallback_tier: str,
+        cost_usd: float,
+    ) -> None:
+        if self.job is None:
+            return
+        emit(
+            self.job,
+            "WARN",
+            "router",
+            "lmstudio_rerouted",
+            {
+                "original_tier": original_tier,
+                "fallback_tier": fallback_tier,
+                "cost_usd": cost_usd,
+            },
+            db_path=self._resolve_db_path(),
+        )
+
 
 __all__ = [
     "EXPECTED_TIERS",
     "LMSTUDIO_DEFAULT_BASE_URL",
+    "LMSTUDIO_DEGRADED_WINDOW_S",
+    "LMSTUDIO_RETRY_SLEEP_S",
     "OPENROUTER_BASE_URL",
     "Router",
     "Tier",

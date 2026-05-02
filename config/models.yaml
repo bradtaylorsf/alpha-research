@@ -10,6 +10,7 @@ tiers:
     provider: lmstudio
     model: qwen3-4b-instruct-q4_k_m
     timeout_s: 30
+    fallback_tier: frontier_speed
     purpose: |
       Classification, deduplication, language detection, simple
       relevance scoring. ~100 tok/s on M-series.
@@ -18,6 +19,7 @@ tiers:
     provider: lmstudio
     model: qwen3-32b-instruct-q6_k
     timeout_s: 90
+    fallback_tier: frontier_speed
     purpose: |
       Research worker default. Query rewriting, source extraction,
       per-source summarization, finding generation.
@@ -26,6 +28,7 @@ tiers:
     provider: lmstudio
     model: deepseek-r1-distill-32b-q6_k
     timeout_s: 300
+    fallback_tier: frontier
     purpose: |
       Complex extraction, hypothesis ranking, contradiction detection.
       Use sparingly.
@@ -34,8 +37,12 @@ tiers:
     provider: lmstudio
     model: qwen3-vl-8b-instruct
     timeout_s: 60
+    fallback_tier: frontier_speed
     purpose: PDF page screenshots, chart reading.
 
+  # `embeddings` intentionally omits `fallback_tier`: no cloud tier in this
+  # config exposes an embeddings-shaped endpoint, so a swap stall here must
+  # surface as a hard error rather than silently rerouting to a chat model.
   embeddings:
     provider: lmstudio
     model: qwen3-embedding-4b
