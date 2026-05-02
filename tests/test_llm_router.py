@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import openai
 import pytest
 import yaml
 from openai import RateLimitError
@@ -18,6 +19,7 @@ from research_agent.llm.router import (
     LMSTUDIO_DEFAULT_BASE_URL,
     OPENROUTER_BASE_URL,
     Router,
+    _is_retryable,
     load_models_config,
 )
 from research_agent.storage import db
@@ -79,7 +81,13 @@ def make_router(models_config: dict[str, Any], db_path: Path):
                 db_path=db_path,
             )
         )
-        return Router(models_config, b, job=job, db_path=db_path)
+        router = Router(models_config, b, job=job, db_path=db_path)
+        # Default tests off the OpenRouter retry loop so transient failure
+        # tests don't burn two minutes of wall clock per attempt.
+        router.openrouter_retry_min_delay = 0.0
+        router.openrouter_retry_max_delay = 0.0
+        router.openrouter_retry_stop_delay = 0.0
+        return router
 
     return _factory
 
@@ -403,6 +411,11 @@ async def test_ratelimit_falls_back_to_fallback_model_for_cloud(
         db_path=db_path,
     )
     router = Router(models_config, budget, job=job, db_path=db_path)
+    # Disable the OpenRouter retry loop so the rate-limit fallback test
+    # doesn't loop for two minutes before the fallback_model path runs.
+    router.openrouter_retry_min_delay = 0.0
+    router.openrouter_retry_max_delay = 0.0
+    router.openrouter_retry_stop_delay = 0.0
 
     fallback_agent = _FakeAgent(result=_FakeResult())
     monkeypatch.setattr(
@@ -914,6 +927,12 @@ def _make_lmstudio_router(
     budget = _RecordingBudget(cost_per_call=0.42, db_path=db_path, job_id=job.id)
     router = Router(cfg, budget, job=job, db_path=db_path)  # type: ignore[arg-type]
     router.retry_sleep_s = 0.0
+    # Reroute target is a cloud tier — keep its retry loop short so a
+    # transient cloud failure inside a degrade-and-reroute test doesn't
+    # stall for two minutes.
+    router.openrouter_retry_min_delay = 0.0
+    router.openrouter_retry_max_delay = 0.0
+    router.openrouter_retry_stop_delay = 0.0
     return router, budget
 
 
@@ -1086,3 +1105,198 @@ async def test_first_timeout_then_retry_succeeds_does_not_degrade(
     assert "fast" not in router._tier_degraded_until
     assert _read_events_by_kind(job, "lmstudio_degraded") == []
     assert _read_events_by_kind(job, "lmstudio_rerouted") == []
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter network-blip handling (#37)
+# ---------------------------------------------------------------------------
+
+
+def _api_status_error(status: int) -> openai.APIStatusError:
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(status, request=request)
+    return openai.APIStatusError("boom", response=response, body=None)
+
+
+def _bad_request_error() -> openai.BadRequestError:
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(400, request=request)
+    return openai.BadRequestError("bad request", response=response, body=None)
+
+
+def _api_connection_error() -> openai.APIConnectionError:
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    return openai.APIConnectionError(request=request)
+
+
+def _fast_retry_router(
+    models_config: dict[str, Any],
+    db_path: Path,
+    job: Job,
+) -> tuple[Router, _RecordingBudget]:
+    """Build a router with retry collapsed to ~zero so retry tests are <1s."""
+    budget = _RecordingBudget(cost_per_call=0.0, db_path=db_path, job_id=job.id)
+    router = Router(models_config, budget, job=job, db_path=db_path)  # type: ignore[arg-type]
+    # Allow several retries inside a tight wall-clock window so tests can
+    # observe the loop iterating without actually waiting.
+    router.openrouter_retry_min_delay = 0.0
+    router.openrouter_retry_max_delay = 0.0
+    router.openrouter_retry_stop_delay = 0.5
+    return router, budget
+
+
+def test_is_retryable_classifies_transient_vs_terminal() -> None:
+    # Transient — should retry.
+    assert _is_retryable(_rate_limit_error()) is True
+    assert _is_retryable(_api_status_error(503)) is True
+    assert _is_retryable(_api_status_error(500)) is True
+    assert _is_retryable(_api_connection_error()) is True
+    assert _is_retryable(httpx.ConnectError("nope")) is True
+    assert _is_retryable(httpx.ReadTimeout("slow")) is True
+
+    # Terminal — must not retry.
+    assert _is_retryable(_bad_request_error()) is False
+    assert _is_retryable(_api_status_error(404)) is False
+    assert _is_retryable(_api_status_error(401)) is False
+    assert _is_retryable(_api_status_error(422)) is False
+    assert _is_retryable(RuntimeError("nope")) is False
+
+
+@pytest.mark.asyncio
+async def test_openrouter_retries_on_connect_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    models_config: dict[str, Any],
+    db_path: Path,
+    job: Job,
+) -> None:
+    """Two transient httpx.ConnectError followed by success → one charged call."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    router, budget = _fast_retry_router(models_config, db_path, job)
+
+    agent = _FakeAgent(
+        result=_FakeResult(),
+        raises=[httpx.ConnectError("blip 1"), httpx.ConnectError("blip 2")],
+    )
+    result = await router.call("frontier_speed", agent, "summarize")
+
+    assert result is agent.result
+    # Three .run() invocations: two failures + one success.
+    assert len(agent.calls) == 3
+    # Single ledger row for the eventual success (no charge for failed attempts).
+    assert len(budget.charge_calls) == 1
+
+    llm_calls = _read_events_by_kind(job, "llm_call")
+    assert len(llm_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_openrouter_retries_on_503_until_stop_delay(
+    monkeypatch: pytest.MonkeyPatch,
+    models_config: dict[str, Any],
+    db_path: Path,
+    job: Job,
+) -> None:
+    """Continuous 503s → retry until stop_after_delay fires, then APIStatusError propagates."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    router, budget = _fast_retry_router(models_config, db_path, job)
+
+    class _Always503Agent:
+        """Pydantic AI agent stand-in that always raises an APIStatusError(503)."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            raise _api_status_error(503)
+
+    agent = _Always503Agent()
+    with pytest.raises(openai.APIStatusError) as excinfo:
+        await router.call("frontier_speed", agent, "summarize")
+    assert excinfo.value.status_code == 503
+
+    # The loop must have actually retried (otherwise we'd have a single
+    # attempt and the retry contract isn't met).
+    assert agent.calls >= 2
+    # No success → no charge, no llm_call event.
+    assert budget.charge_calls == []
+    assert _read_events_by_kind(job, "llm_call") == []
+
+
+@pytest.mark.asyncio
+async def test_openrouter_retries_on_rate_limit_until_fallback_kicks_in(
+    monkeypatch: pytest.MonkeyPatch,
+    models_config: dict[str, Any],
+    db_path: Path,
+    job: Job,
+) -> None:
+    """RateLimitError survives retries, then the fallback_model branch runs once."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    router, budget = _fast_retry_router(models_config, db_path, job)
+
+    # Override fallback_model construction so we can observe a single call on it.
+    fallback_agent = _FakeAgent(result=_FakeResult(output="fb"))
+    monkeypatch.setattr(router, "_make_fallback_agent", lambda *_a, **_k: fallback_agent)
+
+    class _AlwaysRateLimitedAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            raise _rate_limit_error()
+
+    primary = _AlwaysRateLimitedAgent()
+    result = await router.call("frontier", primary, "synthesize")
+
+    assert result is fallback_agent.result
+    # Primary was retried at least twice (proves the retry loop ran) before
+    # the stop_delay fired and the fallback path kicked in.
+    assert primary.calls >= 2
+    assert len(fallback_agent.calls) == 1
+    # Fallback charged exactly once.
+    assert len(budget.charge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_openrouter_does_not_retry_on_bad_request(
+    monkeypatch: pytest.MonkeyPatch,
+    models_config: dict[str, Any],
+    db_path: Path,
+    job: Job,
+) -> None:
+    """A 400 BadRequestError is terminal — propagates after a single attempt."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    router, budget = _fast_retry_router(models_config, db_path, job)
+
+    agent = _FakeAgent(raises=[_bad_request_error()])
+
+    with pytest.raises(openai.BadRequestError):
+        await router.call("frontier_speed", agent, "summarize")
+
+    # Exactly one attempt — no retry.
+    assert len(agent.calls) == 1
+    assert budget.charge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_lmstudio_path_is_not_wrapped_in_openrouter_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    models_config: dict[str, Any],
+    db_path: Path,
+    job: Job,
+) -> None:
+    """A transient httpx error on a local tier must propagate (no cloud retry)."""
+    monkeypatch.delenv("LMSTUDIO_BASE_URL", raising=False)
+    router, budget = _fast_retry_router(models_config, db_path, job)
+
+    agent = _FakeAgent(raises=[httpx.ConnectError("local blip")])
+
+    with pytest.raises(httpx.ConnectError):
+        await router.call("general", agent, "x")
+
+    # Exactly one attempt — local-tier failures are not silently retried by
+    # the OpenRouter retry wrapper. The §16 rule is loud failures, not silent
+    # reroutes.
+    assert len(agent.calls) == 1
+    assert budget.charge_calls == []

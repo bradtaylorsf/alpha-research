@@ -260,6 +260,32 @@ def write_synthesis(
     return version
 
 
+def write_synthesis_partial(job: Job, content: str, model: str) -> int:
+    """Write ``synthesis/<next_version>.partial.md`` for a failed synthesis.
+
+    Used when a synthesis call exhausts retries: the (possibly empty) partial
+    output is salvaged so the next attempt can include it as context. No DB
+    row and no JSON sidecar are written — the partial file lives outside the
+    canonical ``syntheses`` table on purpose so a future successful run can
+    claim the same version number.
+    """
+    if not isinstance(content, str):
+        raise ValueError(f"content must be a string; got {type(content).__name__}")
+    if not isinstance(model, str) or not model:
+        raise ValueError("model must be a non-empty string")
+
+    conn = db.connect(job.db_path)
+    try:
+        version = _next_version(conn, "syntheses", job.id)
+    finally:
+        conn.close()
+
+    md_rel = f"synthesis/{version:04d}.partial.md"
+    md_body = content if (not content or content.endswith("\n")) else content + "\n"
+    _atomic_write_text(job.root / md_rel, md_body)
+    return version
+
+
 def write_critique(
     job: Job,
     *,
@@ -366,4 +392,5 @@ __all__ = [
     "write_plan",
     "write_report",
     "write_synthesis",
+    "write_synthesis_partial",
 ]

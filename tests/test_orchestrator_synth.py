@@ -352,6 +352,45 @@ def test_final_synthesis_uses_larger_top_n_and_final_flag(
     assert len(payload["findings"]) <= FINAL_TOP_N
 
 
+def test_synthesize_retry_exhaustion_writes_partial_and_emits_failed(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    """Terminal retry exhaustion → partial md + ``synthesis_failed`` ERROR event."""
+    _seed_findings(job, [0.6])
+    router = _StubRouter(
+        side_effect={
+            "frontier": [RuntimeError("openrouter: connection reset after 6 retries")],
+        },
+    )
+
+    out = asyncio.run(synthesize(job, plan, router=router))
+
+    # SynthesisOutput marks the failure shape so the loop can distinguish it.
+    assert out.truncated is True
+    assert out.model == "synthesis_failed"
+    assert out.cost_usd is None
+
+    # Partial md exists at the synthesis/<v>.partial.md path (no DB row written).
+    partial = job.root / f"synthesis/{out.version:04d}.partial.md"
+    assert partial.exists()
+    # Non-streaming call path — the partial is empty but its presence lets
+    # the next attempt know a prior failure happened.
+    assert partial.read_text(encoding="utf-8") == ""
+
+    rows = _read_synthesis_rows(db_path, job.id)
+    assert rows == [], "partial writes must not insert a syntheses row"
+
+    events = _read_event_rows(db_path, job.id)
+    failed = [e for e in events if e["kind"] == "synthesis_failed"]
+    assert len(failed) == 1
+    assert failed[0]["level"] == "ERROR"
+    payload = json.loads(failed[0]["payload_json"])
+    assert payload["tier"] == "frontier"
+    assert "connection reset" in payload["reason"]
+    assert payload["attempt_count"] == 1
+    assert payload["partial_path"].endswith(".partial.md")
+
+
 def test_synthesize_emits_synthesis_written_event(job: Job, db_path: Path, plan: Plan) -> None:
     _seed_findings(job, [0.8])
     router = _StubRouter()
