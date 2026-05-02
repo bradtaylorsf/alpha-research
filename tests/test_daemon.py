@@ -641,3 +641,197 @@ async def test_ensure_openrouter_reachable_requires_api_key(
 
     with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
         await daemon.ensure_openrouter_reachable(_StubRouter(), deadline_s=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Foreground progress bar (issue #41)
+# ---------------------------------------------------------------------------
+
+
+class _FakeProgress:
+    """In-memory stand-in for ``rich.progress.Progress`` used by daemon tests."""
+
+    def __init__(self) -> None:
+        self.tasks: dict[int, dict[str, Any]] = {}
+        self._next_id = 1
+        self.updates: list[tuple[int, dict[str, Any]]] = []
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self) -> _FakeProgress:
+        self.entered = True
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.exited = True
+
+    def add_task(self, name: str, *, total: int | None = None, completed: int = 0) -> int:
+        tid = self._next_id
+        self._next_id += 1
+        self.tasks[tid] = {"name": name, "total": total, "completed": completed}
+        return tid
+
+    def update(self, task_id: int, **kwargs: Any) -> None:
+        self.tasks[task_id].update(kwargs)
+        self.updates.append((task_id, dict(kwargs)))
+
+
+class _TtyStream:
+    """Stand-in stdout that reports ``isatty() == True``."""
+
+    def isatty(self) -> bool:
+        return True
+
+    def write(self, _: str) -> int:
+        return 0
+
+    def flush(self) -> None:
+        return None
+
+
+class _NonTtyStream:
+    def isatty(self) -> bool:
+        return False
+
+
+def test_should_show_foreground_progress_respects_tty_and_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RESEARCH_DAEMON_PROGRESS", raising=False)
+    assert daemon._should_show_foreground_progress(_TtyStream()) is True
+    assert daemon._should_show_foreground_progress(_NonTtyStream()) is False
+
+    monkeypatch.setenv("RESEARCH_DAEMON_PROGRESS", "0")
+    assert daemon._should_show_foreground_progress(_TtyStream()) is False
+
+
+@pytest.mark.asyncio
+async def test_foreground_progress_dormant_for_non_tty(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-TTY stdout (the spawn_daemon path) → no Progress is ever created."""
+    monkeypatch.delenv("RESEARCH_DAEMON_PROGRESS", raising=False)
+    factory_calls = {"n": 0}
+
+    def _factory() -> _FakeProgress:
+        factory_calls["n"] += 1
+        return _FakeProgress()
+
+    should_stop = asyncio.Event()
+    should_stop.set()  # ensure the task exits even if it somehow enters the loop
+
+    await daemon._foreground_progress_task(
+        seeded_job,
+        should_stop,
+        stream=_NonTtyStream(),
+        progress_factory=_factory,
+    )
+    assert factory_calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_foreground_progress_dormant_when_env_zero(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator opt-out via RESEARCH_DAEMON_PROGRESS=0 keeps the bar quiet."""
+    monkeypatch.setenv("RESEARCH_DAEMON_PROGRESS", "0")
+    factory_calls = {"n": 0}
+
+    def _factory() -> _FakeProgress:
+        factory_calls["n"] += 1
+        return _FakeProgress()
+
+    should_stop = asyncio.Event()
+    should_stop.set()
+
+    await daemon._foreground_progress_task(
+        seeded_job,
+        should_stop,
+        stream=_TtyStream(),
+        progress_factory=_factory,
+    )
+    assert factory_calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_foreground_progress_updates_as_tasks_transition(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When stdout is a TTY, the bar tracks done/total of the latest plan version."""
+    monkeypatch.delenv("RESEARCH_DAEMON_PROGRESS", raising=False)
+    fake = _FakeProgress()
+
+    # Seed two pending and one done task on the seeded plan version (1).
+    conn = db.connect(seeded_job.db_path)
+    try:
+        with conn:
+            now = int(time.time())
+            conn.execute(
+                "INSERT INTO tasks"
+                " (job_id, plan_version, kind, payload_json, status,"
+                " started_at, finished_at, retry_count)"
+                " VALUES (?, 1, 'web_search', '{}', 'done', ?, ?, 0)",
+                (seeded_job.id, now - 30, now - 10),
+            )
+            conn.execute(
+                "INSERT INTO tasks"
+                " (job_id, plan_version, kind, payload_json, status, retry_count)"
+                " VALUES (?, 1, 'web_search', '{}', 'pending', 0)",
+                (seeded_job.id,),
+            )
+            conn.execute(
+                "INSERT INTO tasks"
+                " (job_id, plan_version, kind, payload_json, status, retry_count)"
+                " VALUES (?, 1, 'web_search', '{}', 'pending', 0)",
+                (seeded_job.id,),
+            )
+    finally:
+        conn.close()
+
+    should_stop = asyncio.Event()
+
+    async def _flip_after_first_tick() -> None:
+        # Wait for the initial tick + a follow-up; the wait_for(timeout=)
+        # branch lets the task settle into a steady state.
+        await asyncio.sleep(0.05)
+        # Mark another task done.
+        conn = db.connect(seeded_job.db_path)
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT id FROM tasks WHERE job_id = ? AND status = 'pending'"
+                    " ORDER BY id LIMIT 1",
+                    (seeded_job.id,),
+                ).fetchone()
+                if row is not None:
+                    conn.execute(
+                        "UPDATE tasks SET status = 'done',"
+                        " started_at = ?, finished_at = ? WHERE id = ?",
+                        (int(time.time()) - 5, int(time.time()), int(row["id"])),
+                    )
+        finally:
+            conn.close()
+        await asyncio.sleep(0.05)
+        should_stop.set()
+
+    flip = asyncio.create_task(_flip_after_first_tick())
+    await daemon._foreground_progress_task(
+        seeded_job,
+        should_stop,
+        stream=_TtyStream(),
+        progress_factory=lambda: fake,
+        interval_s=0.02,
+    )
+    await flip
+
+    assert fake.entered and fake.exited
+    assert len(fake.tasks) == 1
+    # Initial state: 1 done out of 3.
+    first_update = fake.updates[0]
+    assert first_update[1]["total"] == 3
+    assert first_update[1]["completed"] == 1
+    # By the time should_stop fires, the bar saw the second done transition.
+    assert any(u[1]["completed"] >= 2 for u in fake.updates)
+    final = fake.updates[-1]
+    assert final[1]["completed"] == 2
+    assert final[1]["total"] == 3

@@ -350,6 +350,127 @@ def test_status_renders_panel_for_pending_job(isolated_jobs_repo: Path):
     assert "Plan version" in out
     assert "0" in out
     assert "$2.50" in out
+    # Phase-7 polish (#41): the panel always exposes ETA + current-task lines.
+    assert "ETA" in out
+    assert "Current" in out
+
+
+def _seed_tasks_for_status(
+    db_path: Path,
+    job_id: str,
+    *,
+    plan_version: int = 1,
+    done_specs: list[tuple[int, int]] | None = None,
+    running_kind: str | None = None,
+    running_started_at: int | None = None,
+    pending_count: int = 0,
+) -> None:
+    """Insert synthetic ``tasks`` rows so ``load_status_data`` has stuff to chew."""
+    conn = db.connect(db_path)
+    try:
+        with conn:
+            for started_at, finished_at in done_specs or []:
+                conn.execute(
+                    "INSERT INTO tasks"
+                    " (job_id, plan_version, kind, payload_json, status,"
+                    " started_at, finished_at, retry_count)"
+                    " VALUES (?, ?, ?, ?, 'done', ?, ?, 0)",
+                    (job_id, plan_version, "web_search", "{}", started_at, finished_at),
+                )
+            if running_kind is not None:
+                conn.execute(
+                    "INSERT INTO tasks"
+                    " (job_id, plan_version, kind, payload_json, status, started_at, retry_count)"
+                    " VALUES (?, ?, ?, ?, 'running', ?, 0)",
+                    (job_id, plan_version, running_kind, "{}", running_started_at),
+                )
+            for _ in range(pending_count):
+                conn.execute(
+                    "INSERT INTO tasks"
+                    " (job_id, plan_version, kind, payload_json, status, retry_count)"
+                    " VALUES (?, ?, ?, ?, 'pending', 0)",
+                    (job_id, plan_version, "web_search", "{}"),
+                )
+    finally:
+        conn.close()
+
+
+def test_status_renders_eta_and_current_task(isolated_jobs_repo: Path):
+    """ETA derived from finished-task durations × pending count, plus current-task line."""
+    job = _make_synthetic_job(isolated_jobs_repo, goal="ETA target", cost=0.0)
+    db_path = isolated_jobs_repo / "data" / "index.sqlite"
+
+    now = int(time.time())
+    # Three completed tasks at 30s each → avg 30s; two pending → ETA ~60s = "1m".
+    done_specs = [
+        (now - 1000, now - 970),
+        (now - 900, now - 870),
+        (now - 800, now - 770),
+    ]
+    _seed_tasks_for_status(
+        db_path,
+        job.id,
+        done_specs=done_specs,
+        running_kind="web_fetch",
+        running_started_at=now - 18,
+        pending_count=2,
+    )
+
+    data = render.load_status_data(job, db_path=db_path)
+    assert data["eta_seconds"] == pytest.approx(60.0)
+    assert data["current_task"] is not None
+    assert data["current_task"]["kind"] == "web_fetch"
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["status", job.id])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    # ETA renders as "~1m" via _humanize_duration; current task as the
+    # task-kind plus an age suffix.
+    assert "~1m" in out
+    assert "web_fetch" in out
+    # Counter row uses the canonical pending/running/done/failed shape.
+    assert "pending=2" in out
+    assert "done=3" in out
+
+
+def test_status_idle_when_no_running_task(isolated_jobs_repo: Path):
+    """No running rows → panel renders the explicit ``(idle)`` line."""
+    job = _make_synthetic_job(isolated_jobs_repo, goal="idle target")
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["status", job.id])
+    assert result.exit_code == 0, result.stdout
+    assert "(idle)" in result.stdout
+
+
+def test_status_color_theme_matches_list(isolated_jobs_repo: Path):
+    """The status badge uses the same _STATUS_STYLE markup as `research list`."""
+    import io
+
+    from rich.console import Console
+
+    job = _make_synthetic_job(isolated_jobs_repo, goal="theme target", status="running")
+
+    data = render.load_status_data(job)
+    panel = render.render_status_panel(
+        job,
+        plan_version=data["plan_version"],
+        task_counts=data["task_counts"],
+        cost=data["cost"],
+        recent_events=data["recent_events"],
+        budget_cap=data["budget_cap"],
+        eta_seconds=data["eta_seconds"],
+        current_task=data["current_task"],
+    )
+    # Render through a forced-terminal Console so SGR escape codes hit the buffer.
+    buf = io.StringIO()
+    Console(file=buf, force_terminal=True, color_system="truecolor", width=200).print(panel)
+    rendered = buf.getvalue()
+    assert "running" in rendered
+    # _STATUS_STYLE['running'] = 'green' → the ANSI 32 sequence must appear,
+    # matching the same theme `research list` uses for running jobs.
+    assert "\x1b[32m" in rendered
 
 
 def test_status_unknown_job_errors(isolated_jobs_repo: Path):

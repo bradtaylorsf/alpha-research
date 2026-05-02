@@ -41,6 +41,20 @@ def _humanize_age(now_epoch: int, then_epoch: int | None) -> str:
     return f"{delta // 86400}d"
 
 
+def _humanize_duration(seconds: float | int | None) -> str:
+    """Format a positive duration as ``Xs`` / ``Ym`` / ``Zh`` (closest unit)."""
+    if seconds is None:
+        return "—"
+    delta = max(0, int(seconds))
+    if delta < 60:
+        return f"{delta}s"
+    if delta < 3600:
+        return f"{delta // 60}m"
+    if delta < 86400:
+        return f"{delta // 3600}h"
+    return f"{delta // 86400}d"
+
+
 def _truncate(text: str, limit: int = _GOAL_TRUNCATE) -> str:
     if len(text) <= limit:
         return text
@@ -94,8 +108,11 @@ def jobs_to_json(jobs: list[dict[str, Any]]) -> str:
     return json.dumps(jobs, indent=2, sort_keys=True, default=str)
 
 
+_ETA_SAMPLE_LIMIT = 5
+
+
 def load_status_data(job: Job, *, db_path: Path | None = None) -> dict[str, Any]:
-    """Pull plan version, task counts, cost, and last 10 events for a job."""
+    """Pull plan version, task counts, cost, ETA, current task, and recent events."""
     path = db_path if db_path is not None else job.db_path
     conn = db.connect(path)
     try:
@@ -118,6 +135,44 @@ def load_status_data(job: Job, *, db_path: Path | None = None) -> dict[str, Any]
         cost_val = cost_row["cost_so_far_usd"] if cost_row else None
         cost = float(cost_val) if cost_val else 0.0
 
+        # Rolling-average ETA from the last few finished tasks. We need both
+        # started_at and finished_at populated to derive a duration; tasks
+        # missing either are skipped.
+        duration_rows = conn.execute(
+            "SELECT started_at, finished_at FROM tasks"
+            " WHERE job_id = ? AND status = 'done'"
+            " AND started_at IS NOT NULL AND finished_at IS NOT NULL"
+            " ORDER BY finished_at DESC LIMIT ?",
+            (job.id, _ETA_SAMPLE_LIMIT),
+        ).fetchall()
+        eta_seconds: float | None = None
+        if duration_rows:
+            durations = [
+                max(0, int(r["finished_at"]) - int(r["started_at"])) for r in duration_rows
+            ]
+            avg = sum(durations) / len(durations)
+            pending = task_counts.get("pending", 0)
+            if pending > 0 and avg > 0:
+                eta_seconds = avg * pending
+
+        current_row = conn.execute(
+            "SELECT id, kind, started_at FROM tasks"
+            " WHERE job_id = ? AND status = 'running'"
+            " ORDER BY started_at DESC LIMIT 1",
+            (job.id,),
+        ).fetchone()
+        current_task: dict[str, Any] | None = None
+        if current_row is not None:
+            current_task = {
+                "id": int(current_row["id"]),
+                "kind": str(current_row["kind"]),
+                "started_at": (
+                    int(current_row["started_at"])
+                    if current_row["started_at"] is not None
+                    else None
+                ),
+            }
+
         event_rows = conn.execute(
             "SELECT ts, level, actor, kind, payload_json FROM events"
             " WHERE job_id = ? ORDER BY ts DESC LIMIT 10",
@@ -136,12 +191,34 @@ def load_status_data(job: Job, *, db_path: Path | None = None) -> dict[str, Any]
     finally:
         conn.close()
 
+    intake = job.intake or {}
+    budget_cap = intake.get("budget_cap_usd")
+
     return {
         "plan_version": plan_version,
         "task_counts": task_counts,
         "cost": cost,
+        "budget_cap": budget_cap,
+        "eta_seconds": eta_seconds,
+        "current_task": current_task,
         "recent_events": recent_events,
     }
+
+
+def _format_task_counts(task_counts: dict[str, int]) -> str:
+    """Render the canonical pending/running/done/failed counter row.
+
+    Always emits all four buckets so the layout doesn't shift between ticks
+    of ``--watch``. Running and failed counts get color cues that match the
+    job-list theme.
+    """
+    pending = int(task_counts.get("pending", 0))
+    running = int(task_counts.get("running", 0))
+    done = int(task_counts.get("done", 0))
+    failed = int(task_counts.get("failed", 0))
+    running_cell = f"[{_STATUS_STYLE['running']}]running={running}[/{_STATUS_STYLE['running']}]"
+    failed_cell = f"[{_STATUS_STYLE['failed']}]failed={failed}[/{_STATUS_STYLE['failed']}]"
+    return f"pending={pending} {running_cell} done={done} {failed_cell}"
 
 
 def render_status_panel(
@@ -150,26 +227,35 @@ def render_status_panel(
     task_counts: dict[str, int],
     cost: float,
     recent_events: list[dict[str, Any]],
+    *,
+    budget_cap: float | None = None,
+    eta_seconds: float | None = None,
+    current_task: dict[str, Any] | None = None,
+    now: int | None = None,
 ) -> Panel:
     """Render the detail panel for `research status <job-id>`."""
     intake = job.intake or {}
+    now_epoch = int(now) if now is not None else int(time.time())
+    cap_for_display = budget_cap if budget_cap is not None else intake.get("budget_cap_usd")
+
     summary_lines = [
         f"[bold]Status:[/bold] {_status_cell(job.status)}",
         f"[bold]Goal:[/bold] {job.goal}",
         f"[bold]Domain:[/bold] {job.domain or '—'}",
         f"[bold]Plan version:[/bold] {plan_version}",
-        f"[bold]Cost so far:[/bold] {_format_cost(cost)}",
-        (
-            f"[bold]Budget cap:[/bold] {_format_cost(intake.get('budget_cap_usd'))} | "
-            f"[bold]Time cap (h):[/bold] {intake.get('time_cap_hours') or '—'}"
-        ),
+        f"[bold]Cost so far:[/bold] {_format_cost(cost)} / {_format_cost(cap_for_display)}",
+        f"[bold]Time cap (h):[/bold] {intake.get('time_cap_hours') or '—'}",
+        f"[bold]Tasks:[/bold] {_format_task_counts(task_counts)}",
+        f"[bold]ETA:[/bold] ~{_humanize_duration(eta_seconds)}",
     ]
 
-    if task_counts:
-        counts_str = ", ".join(f"{k}={v}" for k, v in sorted(task_counts.items()))
+    if current_task is not None:
+        kind = current_task.get("kind") or "?"
+        started_at = current_task.get("started_at")
+        age = _humanize_age(now_epoch, started_at) if started_at is not None else "—"
+        summary_lines.append(f"[bold]Current:[/bold] {kind} (running {age})")
     else:
-        counts_str = "(none)"
-    summary_lines.append(f"[bold]Task counts:[/bold] {counts_str}")
+        summary_lines.append("[bold]Current:[/bold] (idle)")
 
     summary = "\n".join(summary_lines)
 
