@@ -174,3 +174,10 @@ and runs the synchronous `arxiv` lib through `asyncio.to_thread`.
 a per-source breakdown grouped by `fetched_via` (`rss` vs `scrape`), and
 the top 5 hits. RSS is preferred; sites without a public feed get a
 per-source CSS selector recipe under `scrape:`. No paid news APIs.
+
+## End-to-end testing
+
+The Phase 4 "done when" gate is exercised manually — too heavy and too
+cost-bearing for CI. See `tests/integration/test_phase4_e2e.md` for the
+playbook (canonical fixture goal, driver script, AC verification commands,
+and a triage table for common failures).
