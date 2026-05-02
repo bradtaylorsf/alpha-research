@@ -12,14 +12,32 @@ from research_agent.storage.jobs import (
     Job,
     list_jobs,
 )
+from research_agent.storage.markdown import (
+    write_finding,
+    write_plan,
+    write_report,
+    write_synthesis,
+)
+from research_agent.storage.sources import (
+    clean_content,
+    content_sha256,
+    write_source,
+)
 
 __all__ = [
     "DEFAULT_DB_PATH",
     "DEFAULT_JOBS_ROOT",
     "Job",
     "SCHEMA_SQL",
+    "clean_content",
     "connect",
     "connect_for_checkpoints",
+    "content_sha256",
     "list_jobs",
     "migrate",
+    "write_finding",
+    "write_plan",
+    "write_report",
+    "write_source",
+    "write_synthesis",
 ]
