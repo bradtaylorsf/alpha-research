@@ -24,6 +24,36 @@ def _smoke_web_search(query: str) -> list[SearchResult]:
     return asyncio.run(_run())
 
 
+def _smoke_local_corpus(corpus_path: str) -> str:
+    """Smoke wrapper: index ``corpus_path`` into a one-shot smoke job and report counts.
+
+    Creates a fresh job under ``jobs/`` whose goal references the corpus
+    path so repeated runs use distinct job ids (avoiding ``FileExistsError``
+    when re-running the same smoke command in a clean repo).
+    """
+    from datetime import UTC, datetime
+
+    from research_agent.storage import db
+    from research_agent.storage.jobs import Job
+    from research_agent.tools import local_corpus
+
+    db.migrate().close()
+
+    stamp = datetime.now(UTC).strftime("%H%M%S")
+    intake = {"goal": f"smoke local_corpus {stamp}", "domain": "smoke"}
+    job = Job.create(intake)
+    summary = local_corpus.index(corpus_path, job)
+    return (
+        f"job: {job.id}\n"
+        f"corpus: {corpus_path}\n"
+        f"files_indexed: {summary['files_indexed']}\n"
+        f"files_skipped: {summary['files_skipped']}\n"
+        f"chunks_indexed: {summary['chunks_indexed']}\n"
+        f"chunks_skipped: {summary['chunks_skipped']}\n"
+        f"embed_dim: {summary['embed_dim']}"
+    )
+
+
 def _smoke_web_fetch(url: str) -> str:
     """Smoke wrapper for web_fetch: print word count, path, preview, archive URL.
 
@@ -66,6 +96,7 @@ def _smoke_web_fetch(url: str) -> str:
 TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "web_search": _smoke_web_search,
     "web_fetch": _smoke_web_fetch,
+    "local_corpus": _smoke_local_corpus,
 }
 
 __all__ = ["TOOL_REGISTRY", "SearchResult", "Source", "SourceKind"]

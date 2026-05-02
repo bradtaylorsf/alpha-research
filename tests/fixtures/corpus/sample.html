@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Sample HTML article</title>
+  <style>body { font-family: sans-serif; }</style>
+  <script>console.log("boilerplate that should be stripped");</script>
+</head>
+<body>
+  <header>
+    <nav>Home · About · Contact</nav>
+  </header>
+  <main>
+    <article>
+      <h1>Sample HTML article for the local corpus indexer</h1>
+      <p>
+        This article has just enough body text to exceed the small-fixture
+        threshold the indexer uses to decide whether to fall back from
+        BeautifulSoup to the heavier <code>unstructured.partition.html</code>
+        path. The default fixture sticks to the bs4 path; the unstructured
+        fallback is exercised by a separate, mocked unit test.
+      </p>
+      <p>
+        Each paragraph contributes roughly the same number of whitespace
+        tokens so the chunker has multiple candidate chunks to work with
+        when the chunk-size cap is lowered for a test.
+      </p>
+      <p>
+        A third paragraph rounds out the document so that the cleaned text
+        comfortably clears the minimum-length heuristic the extractor uses
+        before deciding the bs4 output is good enough to keep.
+      </p>
+    </article>
+  </main>
+  <footer>
+    <p>&copy; 2026 Alpha Research</p>
+  </footer>
+</body>
+</html>
