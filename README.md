@@ -90,6 +90,11 @@ research search "<query>" --job <job-id>     # scope to one job
 research search "<query>" --kind findings    # findings only (default: both)
 research search "<query>" --kind sources     # sources only
 research search "<query>" --json             # machine-readable list
+
+research export <job-id> --zip               # bundle jobs/<id>/ into <job-id>.zip in cwd
+research export <job-id> --md-bundle         # one markdown file: report + findings + sources
+research export <job-id> --zip --out PATH    # write to PATH (file) or PATH/<job-id>.zip (dir)
+research export <job-id> --md-bundle --include-history   # also inline report.history/
 ```
 
 `research search` runs the user's query through SQLite FTS5 against
@@ -101,6 +106,19 @@ join through `job_sources`, so the `--job` filter correctly excludes
 sources fetched only by other jobs even when the underlying content is
 shared. FTS5 syntax errors (e.g. unbalanced quotes) exit `1` with a clear
 `FTS5 query error: ...` line on stderr.
+
+`research export` bundles a job for sharing. `--zip` walks
+`jobs/<job-id>/` and emits a single `ZIP_DEFLATED` archive whose entries
+are rooted at `<job-id>/...` so unzipping reproduces the full folder.
+`--md-bundle` concatenates the intake front matter, `report.md`, every
+finding (ordered by id), and the source list (with `archive_url` links)
+into one navigable markdown file. Exactly one mode flag is required —
+omitting both, or passing both, exits `2`. `--out` accepts either a file
+path or an existing directory (in which case `<job-id>.{zip,md}` is
+appended); when omitted the file lands in the current working directory.
+`--include-history` adds `report.history/` to either format. Both writes
+use the project's atomic `*.tmp` + `os.replace` convention, so a crash
+mid-export never leaves a half-written archive on disk.
 
 ### Config verbs
 

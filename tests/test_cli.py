@@ -1203,3 +1203,176 @@ def test_search_malformed_query_exits_one(isolated_jobs_repo: Path):
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr or "")
     assert "FTS5 query error" in combined
+
+
+# ---------------------------------------------------------------------------
+# export verb
+# ---------------------------------------------------------------------------
+
+
+def _seed_export_job(repo: Path) -> Job:
+    """Create a job with a report, two findings, one source, and a history file."""
+    import zipfile  # noqa: F401 — exercised via callers
+
+    job = _make_synthetic_job(repo, goal="Export target", today=date(2026, 5, 2))
+    (job.root / "report.md").write_text("# Final\n\nbody\n", encoding="utf-8")
+    (job.root / "findings" / "000001.md").write_text(
+        "# Finding 000001\n\nclaim one\n", encoding="utf-8"
+    )
+    (job.root / "findings" / "000002.md").write_text(
+        "# Finding 000002\n\nclaim two\n", encoding="utf-8"
+    )
+    (job.root / "report.history").mkdir(exist_ok=True)
+    (job.root / "report.history" / "20260501T000000Z.md").write_text(
+        "# Prior\n\narchived\n", encoding="utf-8"
+    )
+
+    now = int(time.time())
+    conn = db.connect(repo / "data" / "index.sqlite")
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO findings"
+                " (job_id, md_path, claim, confidence, source_ids, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (job.id, "findings/000001.md", "claim one", 0.9, "[1]", now),
+            )
+            conn.execute(
+                "INSERT INTO findings"
+                " (job_id, md_path, claim, confidence, source_ids, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (job.id, "findings/000002.md", "claim two", 0.8, "[1]", now),
+            )
+            cur = conn.execute(
+                "INSERT INTO sources"
+                " (sha256, url, title, fetched_at, archive_url, md_path, kind)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "b" * 64,
+                    "https://example.com/x",
+                    "Example X",
+                    now,
+                    "https://web.archive.org/web/2026/x",
+                    "sources/bbb.md",
+                    "web",
+                ),
+            )
+            sid = cur.lastrowid
+            conn.execute(
+                "INSERT INTO job_sources (job_id, source_id) VALUES (?, ?)",
+                (job.id, sid),
+            )
+    finally:
+        conn.close()
+
+    return job
+
+
+def test_export_zip_writes_archive(isolated_jobs_repo: Path):
+    import zipfile
+
+    job = _seed_export_job(isolated_jobs_repo)
+    out_path = isolated_jobs_repo / "bundle.zip"
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["export", job.id, "--zip", "--out", str(out_path)])
+    assert result.exit_code == 0, result.stdout
+    assert out_path.exists()
+
+    with zipfile.ZipFile(out_path) as zf:
+        names = set(zf.namelist())
+    assert f"{job.id}/job.json" in names
+    assert f"{job.id}/report.md" in names
+    assert f"{job.id}/findings/000001.md" in names
+
+
+def test_export_md_bundle_writes_markdown(isolated_jobs_repo: Path):
+    job = _seed_export_job(isolated_jobs_repo)
+    out_path = isolated_jobs_repo / "bundle.md"
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["export", job.id, "--md-bundle", "--out", str(out_path)])
+    assert result.exit_code == 0, result.stdout
+    body = out_path.read_text(encoding="utf-8")
+    assert body.startswith(f"# {job.id}\n")
+    assert "## Report" in body
+    assert "## Findings" in body
+    assert "### Finding 000001" in body
+    assert "## Sources" in body
+    assert "https://web.archive.org/web/2026/x" in body
+
+
+def test_export_requires_a_mode(isolated_jobs_repo: Path):
+    job = _seed_export_job(isolated_jobs_repo)
+    runner = CliRunner()
+
+    no_flag = runner.invoke(cli.app, ["export", job.id])
+    assert no_flag.exit_code == 2
+    combined = no_flag.stdout + (no_flag.stderr or "")
+    assert "exactly one" in combined
+
+    both_flags = runner.invoke(cli.app, ["export", job.id, "--zip", "--md-bundle"])
+    assert both_flags.exit_code == 2
+
+
+def test_export_unknown_job_errors(isolated_jobs_repo: Path):
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["export", "2026-05-02-does-not-exist", "--zip"])
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "job not found" in combined
+    assert "Traceback" not in combined
+
+
+def test_export_include_history_flag(isolated_jobs_repo: Path):
+    import zipfile
+
+    job = _seed_export_job(isolated_jobs_repo)
+    runner = CliRunner()
+
+    md_with = isolated_jobs_repo / "with.md"
+    md_no = isolated_jobs_repo / "no.md"
+    runner.invoke(
+        cli.app,
+        ["export", job.id, "--md-bundle", "--include-history", "--out", str(md_with)],
+    )
+    runner.invoke(cli.app, ["export", job.id, "--md-bundle", "--out", str(md_no)])
+    assert "## Report History" in md_with.read_text(encoding="utf-8")
+    assert "## Report History" not in md_no.read_text(encoding="utf-8")
+
+    zip_with = isolated_jobs_repo / "with.zip"
+    zip_no = isolated_jobs_repo / "no.zip"
+    runner.invoke(
+        cli.app,
+        ["export", job.id, "--zip", "--include-history", "--out", str(zip_with)],
+    )
+    runner.invoke(cli.app, ["export", job.id, "--zip", "--out", str(zip_no)])
+
+    with zipfile.ZipFile(zip_with) as zf:
+        names_with = set(zf.namelist())
+    with zipfile.ZipFile(zip_no) as zf:
+        names_no = set(zf.namelist())
+
+    assert f"{job.id}/report.history/20260501T000000Z.md" in names_with
+    assert not any("report.history/" in n for n in names_no)
+
+
+def test_export_default_out_uses_cwd(isolated_jobs_repo: Path):
+    job = _seed_export_job(isolated_jobs_repo)
+    runner = CliRunner()
+    # CliRunner inherits cwd from the test (chdir'd by isolated_jobs_repo).
+    result = runner.invoke(cli.app, ["export", job.id, "--zip"])
+    assert result.exit_code == 0, result.stdout
+    expected = isolated_jobs_repo / f"{job.id}.zip"
+    assert expected.exists()
+
+
+def test_export_out_directory_appends_default_name(isolated_jobs_repo: Path):
+    job = _seed_export_job(isolated_jobs_repo)
+    target_dir = isolated_jobs_repo / "exports"
+    target_dir.mkdir()
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["export", job.id, "--md-bundle", "--out", str(target_dir)])
+    assert result.exit_code == 0, result.stdout
+    assert (target_dir / f"{job.id}.md").exists()
