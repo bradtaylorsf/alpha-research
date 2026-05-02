@@ -1,5 +1,11 @@
 """Orchestrator — job lifecycle, planning, research loop, synthesis, critique, checkpointing."""
 
+from research_agent.orchestrator.checkpoint import (
+    CHECKPOINT_KINDS,
+    RestoreState,
+    checkpoint,
+    restore,
+)
 from research_agent.orchestrator.critique import (
     CritiqueOutput,
     Gap,
@@ -35,6 +41,7 @@ from research_agent.orchestrator.synth import (
 )
 
 __all__ = [
+    "CHECKPOINT_KINDS",
     "FINAL_TOP_N",
     "HEURISTIC_CHECK_EVERY_N",
     "CritiqueOutput",
@@ -46,6 +53,7 @@ __all__ = [
     "PlanVersionCapExceeded",
     "RETRY_MAX_ATTEMPTS",
     "RETRY_WAITS",
+    "RestoreState",
     "Subgoal",
     "SynthesisOutput",
     "TOP_N_FINDINGS",
@@ -53,11 +61,13 @@ __all__ = [
     "TaskSpec",
     "FatalError",
     "RetriableError",
+    "checkpoint",
     "cloud_replan",
     "critique",
     "default_handlers",
     "final_synthesis",
     "initial_plan",
+    "restore",
     "run_loop",
     "synthesize",
     "tactical_replan",
