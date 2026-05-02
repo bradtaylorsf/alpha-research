@@ -41,6 +41,7 @@ list, so there is no drift.
 | `RESEARCH_HEADFUL` | no | Set to `1` to launch Playwright in headed mode for debugging. |
 | `RESEARCH_IGNORE_ROBOTS` | no | Set to `1` to bypass robots.txt checks in `web_fetch`. |
 | `LMSTUDIO_BASE_URL` | no | Override the default `http://localhost:1234/v1`. |
+| `RESEARCH_DAEMON_PROGRESS` | no | Set to `0` to suppress the foreground Rich progress bar the daemon writes to stdout when run interactively. |
 
 ## CLI
 
