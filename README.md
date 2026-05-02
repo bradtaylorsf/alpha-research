@@ -45,6 +45,13 @@ list, so there is no drift.
 
 ```bash
 research --help
+research --version          # print package version
+research doctor             # environment readiness checks (Rich table)
+research doctor --json      # same report as machine-readable JSON
 ```
 
-Subcommands land here as later issues introduce them.
+`research doctor` exits non-zero if any required check fails — safe to wire
+into CI as a pre-flight gate. Optional checks (LM Studio reachability, optional
+env keys) never affect the exit code.
+
+More subcommands land here as later issues introduce them.
