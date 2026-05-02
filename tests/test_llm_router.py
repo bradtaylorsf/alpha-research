@@ -290,6 +290,10 @@ class _RecordingBudget:
         self._db_path = db_path
         self._job_id = job_id
         self.last_cost: float = 0.0
+        # Mirrors :class:`BudgetTracker.spent` so the router's reroute path
+        # (which snapshots ``budget.spent`` before/after to compute per-reroute
+        # cost) sees a realistic running total when this fake stands in.
+        self.spent: float = 0.0
 
     def precheck(self, tier: str) -> None:
         self.precheck_calls.append(tier)
@@ -331,6 +335,7 @@ class _RecordingBudget:
             finally:
                 conn.close()
         self.last_cost = cost
+        self.spent += cost
         return cost
 
 
@@ -835,3 +840,249 @@ async def test_cache_hit_emits_zero_cost_event(
     assert p["output_tokens"] == 0
     assert p["cost_usd"] == 0.0
     cache.close()
+
+
+# ---------------------------------------------------------------------------
+# LM Studio health check + auto-recovery (#36)
+# ---------------------------------------------------------------------------
+
+
+def _read_events_by_kind(job: Job, kind: str) -> list[dict[str, Any]]:
+    """Pull all events of ``kind`` from the per-job ``events.jsonl``."""
+    import json as _json
+
+    out: list[dict[str, Any]] = []
+    events_path = job.root / "events.jsonl"
+    if not events_path.exists():
+        return out
+    for line in events_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        ev = _json.loads(line)
+        if ev.get("kind") == kind:
+            out.append(ev)
+    return out
+
+
+def test_models_yaml_ships_lmstudio_fallback_tiers() -> None:
+    """Each lmstudio tier (except embeddings) must point at a cloud equivalent."""
+    cfg = load_models_config(SHIPPED_MODELS_YAML)
+    tiers = cfg["tiers"]
+    assert tiers["fast"].get("fallback_tier") == "frontier_speed"
+    assert tiers["general"].get("fallback_tier") == "frontier_speed"
+    assert tiers["reasoner"].get("fallback_tier") == "frontier"
+    assert tiers["vision"].get("fallback_tier") == "frontier_speed"
+    # Embeddings intentionally omits fallback — no chat-tier substitute.
+    assert "fallback_tier" not in tiers["embeddings"]
+
+
+def _make_lmstudio_router(
+    *,
+    job: Job,
+    db_path: Path,
+    fallback_tier: str | None = "frontier_speed",
+    fast_timeout_s: float = 0.05,
+    cloud_pricing: dict[str, dict[str, float]] | None = None,
+) -> tuple[Router, _RecordingBudget]:
+    """Stand up a Router whose ``fast`` tier hangs quickly + reroutes deterministically.
+
+    Centralizes the boilerplate of: tiny ``timeout_s`` so timeouts fire fast,
+    a zero retry-sleep so two timeouts complete in one event-loop tick, and a
+    ``_RecordingBudget`` that tracks ``spent`` so the reroute path's
+    before/after cost snapshot returns a meaningful number.
+    """
+    cfg: dict[str, Any] = {
+        "tiers": {
+            t: {"provider": "lmstudio", "model": "stub", "timeout_s": 60} for t in EXPECTED_TIERS
+        },
+    }
+    cfg["tiers"]["fast"]["timeout_s"] = fast_timeout_s
+    if fallback_tier is not None:
+        cfg["tiers"]["fast"]["fallback_tier"] = fallback_tier
+    cfg["tiers"]["frontier_speed"] = {
+        "provider": "openrouter",
+        "model": "anthropic/claude-haiku-4-5",
+        "timeout_s": 60,
+    }
+    cfg["tiers"]["frontier"] = {
+        "provider": "openrouter",
+        "model": "anthropic/claude-opus-4-7",
+        "timeout_s": 600,
+    }
+    if cloud_pricing:
+        cfg["pricing"] = cloud_pricing
+    budget = _RecordingBudget(cost_per_call=0.42, db_path=db_path, job_id=job.id)
+    router = Router(cfg, budget, job=job, db_path=db_path)  # type: ignore[arg-type]
+    router.retry_sleep_s = 0.0
+    return router, budget
+
+
+@pytest.mark.asyncio
+async def test_two_timeouts_marks_tier_degraded_and_routes_to_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    db_path: Path,
+    job: Job,
+) -> None:
+    """First call: timeout, retry, second timeout, degrade, then reroute to cloud."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    router, budget = _make_lmstudio_router(job=job, db_path=db_path)
+
+    cloud_agent = _FakeAgent(result=_FakeResult(output="cloud body"))
+    monkeypatch.setattr(router, "_make_fallback_tier_agent", lambda ft: cloud_agent)
+
+    local_agent = _FakeAgent(sleep_s=1.0)
+    result = await router.call("fast", local_agent, "do work")
+
+    assert result is cloud_agent.result
+    assert "fast" in router._tier_degraded_until
+    # Retry path: agent.run was attempted twice before we gave up on local.
+    assert len(local_agent.calls) == 2
+    # The cloud (fallback_tier) call ran exactly once.
+    assert len(cloud_agent.calls) == 1
+
+    degraded = _read_events_by_kind(job, "lmstudio_degraded")
+    rerouted = _read_events_by_kind(job, "lmstudio_rerouted")
+    assert len(degraded) == 1
+    assert degraded[0]["level"] == "WARN"
+    assert degraded[0]["payload"]["tier"] == "fast"
+    assert degraded[0]["payload"]["fallback_tier"] == "frontier_speed"
+    assert degraded[0]["payload"]["until_ts"] >= int(time.time())
+
+    assert len(rerouted) == 1
+    assert rerouted[0]["level"] == "WARN"
+    assert rerouted[0]["payload"]["original_tier"] == "fast"
+    assert rerouted[0]["payload"]["fallback_tier"] == "frontier_speed"
+    assert rerouted[0]["payload"]["cost_usd"] == pytest.approx(0.42)
+
+    # The cloud reroute went through the normal cloud bookkeeping (precheck +
+    # charge) so the budget side recorded one cloud call.
+    assert budget.precheck_calls == ["frontier_speed"]
+    assert len(budget.charge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_calls_within_degraded_window_skip_local_and_reroute(
+    monkeypatch: pytest.MonkeyPatch,
+    db_path: Path,
+    job: Job,
+) -> None:
+    """Once the window is set, lmstudio is bypassed entirely until it expires."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    router, budget = _make_lmstudio_router(job=job, db_path=db_path)
+
+    # Pretend the prior call already degraded the tier.
+    router._tier_degraded_until["fast"] = time.time() + 600.0
+
+    cloud_agent = _FakeAgent(result=_FakeResult(output="reroute"))
+    monkeypatch.setattr(router, "_make_fallback_tier_agent", lambda ft: cloud_agent)
+
+    local_agent = _FakeAgent(sleep_s=10.0)  # would hang if it were called
+
+    for _ in range(3):
+        out = await router.call("fast", local_agent, "x")
+        assert out is cloud_agent.result
+
+    # Local was never even tried — the bypass kicks in before the timeout.
+    assert local_agent.calls == []
+    # Three reroutes → three cloud calls and three WARN events with cost.
+    assert len(cloud_agent.calls) == 3
+    rerouted = _read_events_by_kind(job, "lmstudio_rerouted")
+    assert len(rerouted) == 3
+    for ev in rerouted:
+        assert ev["level"] == "WARN"
+        assert ev["payload"]["original_tier"] == "fast"
+        assert ev["payload"]["fallback_tier"] == "frontier_speed"
+        assert ev["payload"]["cost_usd"] == pytest.approx(0.42)
+    # No degrade event this time — the window was pre-existing, not freshly set.
+    assert _read_events_by_kind(job, "lmstudio_degraded") == []
+
+
+@pytest.mark.asyncio
+async def test_local_recovery_after_window_expires_emits_recovered(
+    monkeypatch: pytest.MonkeyPatch,
+    db_path: Path,
+    job: Job,
+) -> None:
+    """Once the window has elapsed, the next successful local call clears the flag."""
+    monkeypatch.delenv("LMSTUDIO_BASE_URL", raising=False)
+    router, _budget = _make_lmstudio_router(job=job, db_path=db_path, fast_timeout_s=60)
+    # Pre-set an *expired* degraded window. The next call must (a) not reroute
+    # (window is in the past) and (b) clear the flag on success.
+    router._tier_degraded_until["fast"] = time.time() - 1.0
+
+    healthy_local = _FakeAgent(result=_FakeResult(output="local back"))
+    out = await router.call("fast", healthy_local, "x")
+    assert out is healthy_local.result
+
+    assert "fast" not in router._tier_degraded_until
+    recovered = _read_events_by_kind(job, "lmstudio_recovered")
+    assert len(recovered) == 1
+    assert recovered[0]["level"] == "INFO"
+    assert recovered[0]["payload"] == {"tier": "fast"}
+    # Sanity: a normal llm_call event was still emitted for the local call.
+    llm_calls = _read_events_by_kind(job, "llm_call")
+    assert len(llm_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_two_timeouts_without_fallback_tier_propagates_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    db_path: Path,
+    job: Job,
+) -> None:
+    """When ``fallback_tier`` is omitted (e.g. embeddings) the second timeout raises."""
+    monkeypatch.delenv("LMSTUDIO_BASE_URL", raising=False)
+    router, budget = _make_lmstudio_router(job=job, db_path=db_path, fallback_tier=None)
+    # If the reroute path were taken anyway it would call this — fail loudly.
+    monkeypatch.setattr(
+        router,
+        "_make_fallback_tier_agent",
+        lambda ft: pytest.fail("must not build a fallback agent when fallback_tier is unset"),
+    )
+
+    local_agent = _FakeAgent(sleep_s=1.0)
+    with pytest.raises(asyncio.TimeoutError):
+        await router.call("fast", local_agent, "x")
+
+    # The tier is still marked degraded — operator can see the problem.
+    assert "fast" in router._tier_degraded_until
+    degraded = _read_events_by_kind(job, "lmstudio_degraded")
+    assert len(degraded) == 1
+    assert degraded[0]["payload"]["fallback_tier"] is None
+    # And no reroute was attempted.
+    assert _read_events_by_kind(job, "lmstudio_rerouted") == []
+    assert budget.charge_calls == []
+
+
+@pytest.mark.asyncio
+async def test_first_timeout_then_retry_succeeds_does_not_degrade(
+    monkeypatch: pytest.MonkeyPatch,
+    db_path: Path,
+    job: Job,
+) -> None:
+    """A single transient timeout that recovers on retry must not flip the tier."""
+    monkeypatch.delenv("LMSTUDIO_BASE_URL", raising=False)
+    router, _budget = _make_lmstudio_router(job=job, db_path=db_path)
+
+    success_result = _FakeResult(output="recovered on retry")
+
+    class _OneShotHangingAgent:
+        """Hangs on first .run(), succeeds instantly on the second."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(10.0)
+                return None  # pragma: no cover — should be cancelled by timeout
+            return success_result
+
+    agent = _OneShotHangingAgent()
+    out = await router.call("fast", agent, "x")
+    assert out is success_result
+    assert agent.calls == 2
+    assert "fast" not in router._tier_degraded_until
+    assert _read_events_by_kind(job, "lmstudio_degraded") == []
+    assert _read_events_by_kind(job, "lmstudio_rerouted") == []
