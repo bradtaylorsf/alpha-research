@@ -1129,7 +1129,7 @@ def _seed_search_data(repo: Path) -> tuple[Job, Job]:
 def test_search_json_emits_results(isolated_jobs_repo: Path):
     _seed_search_data(isolated_jobs_repo)
     runner = CliRunner()
-    result = runner.invoke(cli.app, ["search", "quantum", "--json"])
+    result = runner.invoke(cli.app, ["search", "quantum", "--fts-only", "--json"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert isinstance(payload, list)
@@ -1142,7 +1142,7 @@ def test_search_json_emits_results(isolated_jobs_repo: Path):
 def test_search_empty_result_zero_exit(isolated_jobs_repo: Path):
     _seed_search_data(isolated_jobs_repo)
     runner = CliRunner()
-    result = runner.invoke(cli.app, ["search", "nonexistenttoken", "--json"])
+    result = runner.invoke(cli.app, ["search", "nonexistenttoken", "--fts-only", "--json"])
     assert result.exit_code == 0, result.stdout
     assert json.loads(result.stdout) == []
 
@@ -1150,7 +1150,10 @@ def test_search_empty_result_zero_exit(isolated_jobs_repo: Path):
 def test_search_kind_flag_filters_output(isolated_jobs_repo: Path):
     _seed_search_data(isolated_jobs_repo)
     runner = CliRunner()
-    result = runner.invoke(cli.app, ["search", "quantum", "--kind", "findings", "--json"])
+    result = runner.invoke(
+        cli.app,
+        ["search", "quantum", "--fts-only", "--kind", "findings", "--json"],
+    )
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload
@@ -1160,7 +1163,10 @@ def test_search_kind_flag_filters_output(isolated_jobs_repo: Path):
 def test_search_job_flag_scopes_to_job(isolated_jobs_repo: Path):
     job_a, _job_b = _seed_search_data(isolated_jobs_repo)
     runner = CliRunner()
-    result = runner.invoke(cli.app, ["search", "quantum", "--job", job_a.id, "--json"])
+    result = runner.invoke(
+        cli.app,
+        ["search", "quantum", "--fts-only", "--job", job_a.id, "--json"],
+    )
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload
@@ -1179,7 +1185,14 @@ def test_search_unknown_job_errors(isolated_jobs_repo: Path):
     runner = CliRunner()
     result = runner.invoke(
         cli.app,
-        ["search", "quantum", "--job", "2026-05-02-does-not-exist", "--json"],
+        [
+            "search",
+            "quantum",
+            "--fts-only",
+            "--job",
+            "2026-05-02-does-not-exist",
+            "--json",
+        ],
     )
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr or "")
@@ -1190,7 +1203,7 @@ def test_search_unknown_job_errors(isolated_jobs_repo: Path):
 def test_search_no_results_table_message(isolated_jobs_repo: Path):
     _seed_search_data(isolated_jobs_repo)
     runner = CliRunner()
-    result = runner.invoke(cli.app, ["search", "nonexistenttoken"])
+    result = runner.invoke(cli.app, ["search", "nonexistenttoken", "--fts-only"])
     assert result.exit_code == 0, result.stdout
     assert "(no results)" in result.stdout
 
@@ -1199,7 +1212,7 @@ def test_search_malformed_query_exits_one(isolated_jobs_repo: Path):
     _seed_search_data(isolated_jobs_repo)
     runner = CliRunner()
     # Unbalanced quotes are an FTS5 syntax error.
-    result = runner.invoke(cli.app, ["search", '"unterminated', "--json"])
+    result = runner.invoke(cli.app, ["search", '"unterminated', "--fts-only", "--json"])
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr or "")
     assert "FTS5 query error" in combined

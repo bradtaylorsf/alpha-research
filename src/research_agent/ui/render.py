@@ -331,27 +331,47 @@ def tail_events_jsonl(
             yield ev
 
 
+def _format_score(value: Any, *, digits: int = 2) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def render_search_table(results: list[dict[str, Any]]) -> Table:
-    """Render a Rich table for `research search` results."""
+    """Render a Rich table for `research search` results.
+
+    Hybrid results expose ``fts_score`` / ``cosine_score`` alongside the
+    fused ``score``; if any row carries those keys we surface them as
+    additional columns so operators can see why an item ranked where it did.
+    """
+    show_components = any(("fts_score" in row) or ("cosine_score" in row) for row in results)
+
     table = Table(title="search results", show_lines=False)
     table.add_column("score")
+    if show_components:
+        table.add_column("fts")
+        table.add_column("cosine")
     table.add_column("kind")
     table.add_column("job_id", overflow="fold")
     table.add_column("snippet", overflow="fold")
     for row in results:
-        snippet = str(row.get("snippet", ""))
+        snippet = str(row.get("snippet") or "")
         snippet = snippet.replace("[", "[bold yellow]").replace("]", "[/]")
-        score = row.get("score")
-        try:
-            score_str = f"{float(score):.2f}"  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            score_str = "—"
-        table.add_row(
-            score_str,
-            str(row.get("kind", "")),
-            str(row.get("job_id") or "—"),
-            snippet,
+        cells = [_format_score(row.get("score"), digits=4)]
+        if show_components:
+            cells.append(_format_score(row.get("fts_score")))
+            cells.append(_format_score(row.get("cosine_score")))
+        cells.extend(
+            [
+                str(row.get("kind", "")),
+                str(row.get("job_id") or "—"),
+                snippet,
+            ]
         )
+        table.add_row(*cells)
     return table
 
 
