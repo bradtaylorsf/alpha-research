@@ -140,6 +140,7 @@ register here) and invokes it with `<query>`. Exits with code 2 and a
 research _smoke-tool web_search "alpha research project"
 research _smoke-tool web_fetch "https://example.com/article"
 research _smoke-tool arxiv "transformer interpretability"
+research _smoke-tool news "federal reserve"
 ```
 
 `web_fetch` prints the resolved title, the path that served the fetch
@@ -151,3 +152,9 @@ so a missing `archive_url` is not a fetch failure.
 `arxiv` prints the top 5 hits as `- <title>\n  <abs URL>\n  <abstract
 preview>`. The connector honours arXiv's 3 s request-spacing recommendation
 and runs the synchronous `arxiv` lib through `asyncio.to_thread`.
+
+`news` aggregates every RSS feed and Playwright scrape recipe declared in
+`config/sources.yaml` under the `news:` key, prints the total hit count,
+a per-source breakdown grouped by `fetched_via` (`rss` vs `scrape`), and
+the top 5 hits. RSS is preferred; sites without a public feed get a
+per-source CSS selector recipe under `scrape:`. No paid news APIs.

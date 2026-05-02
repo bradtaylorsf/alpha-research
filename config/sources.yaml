@@ -1,1 +1,52 @@
-# Source enablement and connector configuration — populated in later issues.
+# Source enablement and connector configuration.
+#
+# `news:` defines bundles of public RSS feeds plus Playwright-driven scrape
+# recipes for sites that do not publish a feed. No paid news APIs.
+#
+# Schema:
+#   news:
+#     <bundle-name>:
+#       rss:
+#         - https://example.com/feed.xml      # plain list of feed URLs
+#       scrape:                                # optional, only for non-RSS sites
+#         - name: friendly-label
+#           index_url: https://example.com/news
+#           item_selector: "article.story"     # one locator per article card
+#           title_selector: "h2"
+#           link_selector: "a"
+#           summary_selector: "p.summary"      # optional
+#
+# Curated outlets only — public, no auth, no API keys. Add new feeds by
+# editing this file; `news.search()` reads it at first call and caches.
+
+news:
+  politics:
+    rss:
+      - https://feeds.npr.org/1014/rss.xml
+      - https://feeds.npr.org/1001/rss.xml
+      - https://feeds.bbci.co.uk/news/politics/rss.xml
+      - https://www.politico.com/rss/politics08.xml
+  business:
+    rss:
+      - https://feeds.npr.org/1006/rss.xml
+      - https://feeds.bbci.co.uk/news/business/rss.xml
+      - https://www.economist.com/business/rss.xml
+      - https://feeds.marketwatch.com/marketwatch/topstories/
+  tech:
+    rss:
+      - https://feeds.arstechnica.com/arstechnica/index
+      - https://www.theverge.com/rss/index.xml
+      - https://techcrunch.com/feed/
+      - https://feeds.bbci.co.uk/news/technology/rss.xml
+    scrape:
+      - name: hacker-news-front
+        index_url: https://news.ycombinator.com/
+        item_selector: "tr.athing"
+        title_selector: "span.titleline > a"
+        link_selector: "span.titleline > a"
+  general:
+    rss:
+      - https://feeds.bbci.co.uk/news/world/rss.xml
+      - https://feeds.npr.org/1004/rss.xml
+      - https://www.aljazeera.com/xml/rss/all.xml
+      - https://feeds.reuters.com/Reuters/worldNews

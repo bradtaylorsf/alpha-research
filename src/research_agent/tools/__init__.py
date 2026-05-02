@@ -78,6 +78,44 @@ def _smoke_arxiv(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_news(query: str) -> str:
+    """Smoke wrapper: aggregate news hits and report per-source contributions.
+
+    Runs ``news.search(query)`` over every configured bundle, prints the
+    total count and a per-source breakdown grouped by ``fetched_via``
+    (rss vs scrape), then the top-5 hits. Lets a human eyeball whether the
+    RSS feeds and Playwright scrape recipes are still healthy without a
+    full agent run.
+    """
+    from research_agent.tools import news
+
+    async def _run() -> str:
+        results = await news.search(query)
+        if not results:
+            return f"news search returned no results for {query!r}"
+
+        groups: dict[str, dict[str, int]] = {"rss": {}, "scrape": {}}
+        for hit in results:
+            via = str(hit.extras.get("fetched_via") or "?")
+            label = str(hit.extras.get("source_label") or "?")
+            groups.setdefault(via, {})
+            groups[via][label] = groups[via].get(label, 0) + 1
+
+        lines: list[str] = [f"total: {len(results)}"]
+        for via in ("rss", "scrape"):
+            counts = groups.get(via, {})
+            for label, count in sorted(counts.items()):
+                lines.append(f"{via} {label}: {count}")
+
+        for hit in results[:5]:
+            published = hit.published_at.isoformat() if hit.published_at else "?"
+            lines.append(f"- {hit.title}\n  {hit.url}\n  {published}")
+
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_web_fetch(url: str) -> str:
     """Smoke wrapper for web_fetch: print word count, path, preview, archive URL.
 
@@ -122,6 +160,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "web_fetch": _smoke_web_fetch,
     "local_corpus": _smoke_local_corpus,
     "arxiv": _smoke_arxiv,
+    "news": _smoke_news,
 }
 
 __all__ = ["TOOL_REGISTRY", "SearchResult", "Source", "SourceKind"]
