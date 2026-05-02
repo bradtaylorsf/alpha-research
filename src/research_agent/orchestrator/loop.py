@@ -84,10 +84,10 @@ def default_handlers(router: Any) -> dict[str, Handler]:
     """Build the standard ``kind → handler`` registry.
 
     Connector kinds that have a shipping module (``web_search``, ``web_fetch``,
-    ``arxiv_*``, ``news_search``, ``reddit_search``, ``local_corpus_query``)
-    get thin async wrappers that call into the connector. Kinds whose
-    handlers haven't been implemented yet (``github_*``, ``extract_findings``,
-    ``summarize_source``, ``synthesize``, ``critique``) get
+    ``arxiv_*``, ``news_search``, ``reddit_search``, ``local_corpus_query``,
+    ``synthesize``) get thin async wrappers that call into the connector.
+    Kinds whose handlers haven't been implemented yet (``github_*``,
+    ``extract_findings``, ``summarize_source``, ``critique``) get
     :func:`_not_implemented_handler` so the loop stays runnable end-to-end.
     """
 
@@ -155,6 +155,19 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         )
         return {"results": results}
 
+    async def _synthesize(job: Job, task: dict[str, Any]) -> dict[str, Any] | None:
+        from research_agent.orchestrator.synth import final_synthesis, synthesize
+
+        plan = _load_latest_plan(job)
+        if plan is None:
+            raise FatalError("synthesize: no plan persisted for job")
+        payload = task.get("payload") or {}
+        if payload.get("final"):
+            output = await final_synthesis(job, plan, router=router)
+        else:
+            output = await synthesize(job, plan, router=router)
+        return output.model_dump()
+
     return {
         "web_search": _web_search,
         "web_fetch": _web_fetch,
@@ -167,7 +180,7 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         "github_fetch": _not_implemented_handler,
         "extract_findings": _not_implemented_handler,
         "summarize_source": _not_implemented_handler,
-        "synthesize": _not_implemented_handler,
+        "synthesize": _synthesize,
         "critique": _not_implemented_handler,
     }
 
