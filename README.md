@@ -78,6 +78,18 @@ research logs <job-id> -f          # follow appended events
 research logs <job-id> --level ERROR
 ```
 
+### Config verbs
+
+```bash
+research config cache-clear        # wipe data/llm_cache.sqlite (LLM response cache)
+```
+
+The LLM response cache lives in its own SQLite file (`data/llm_cache.sqlite`),
+keyed on `(provider, model, prompt, sampling-params, tool-defs)` with a 30-day
+default TTL. The router opts in per call (`cache=True`) — deterministic
+extractions opt in, exploratory synthesis opts out. `cache-clear` removes the
+file (and its `-wal`/`-shm` sidecars) without touching the main index DB.
+
 The interactive intake (`research start` without `--skip-intake`) lands in a
 later issue; until then `--skip-intake --goal "..."` is the supported entry
 point and the testing back door used throughout phases 1–4.

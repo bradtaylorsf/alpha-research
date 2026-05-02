@@ -391,9 +391,7 @@ def test_logs_unknown_job_errors(isolated_jobs_repo: Path):
 
 def test_view_unknown_job_errors(isolated_jobs_repo: Path):
     runner = CliRunner()
-    result = runner.invoke(
-        cli.app, ["view", "2026-05-02-does-not-exist"], env={"EDITOR": ""}
-    )
+    result = runner.invoke(cli.app, ["view", "2026-05-02-does-not-exist"], env={"EDITOR": ""})
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr or "")
     assert "job not found" in combined
@@ -419,3 +417,32 @@ def test_format_event_line_includes_ts_level_kind():
     assert "INFO" in line
     assert "job_started" in line
     assert "daemon" in line
+
+
+# ---------------------------------------------------------------------------
+# config cache-clear
+# ---------------------------------------------------------------------------
+
+
+def test_config_cache_clear_removes_cache_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from research_agent.llm.cache import DEFAULT_CACHE_PATH, LLMCache, make_key
+
+    cache_path = tmp_path / DEFAULT_CACHE_PATH
+    cache = LLMCache(cache_path)
+    cache.put(make_key("p", "m", "x"), "v")
+    cache.close()
+    assert cache_path.exists()
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["config", "cache-clear"])
+    assert result.exit_code == 0, result.stdout
+    assert "cleared" in result.stdout
+    assert not cache_path.exists()
+
+
+def test_config_cache_clear_is_idempotent_when_missing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["config", "cache-clear"])
+    assert result.exit_code == 0, result.stdout
