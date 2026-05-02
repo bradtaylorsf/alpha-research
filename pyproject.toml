@@ -38,6 +38,7 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "pytest-mock>=3.12",
     "ruff>=0.4",
     "mypy>=1.10",
 ]
@@ -51,6 +52,7 @@ web = []
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "pytest-mock>=3.12",
     "ruff>=0.4",
     "mypy>=1.10",
 ]

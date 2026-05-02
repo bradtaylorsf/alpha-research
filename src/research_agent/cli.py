@@ -12,7 +12,7 @@ import typer
 from rich.console import Console
 from rich.live import Live
 
-from research_agent import __version__, config, doctor
+from research_agent import __version__, config, doctor, intake
 from research_agent.storage import db
 from research_agent.storage.jobs import Job, list_jobs
 from research_agent.ui import render
@@ -97,30 +97,31 @@ def start_command(
     ),
 ) -> None:
     """Register a new research job (does NOT spawn the daemon — that's phase 5)."""
-    if not skip_intake:
-        typer.echo(
-            "interactive intake not yet implemented (phase 5) — use --skip-intake",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    if not goal or not goal.strip():
-        typer.echo("--goal is required when --skip-intake is set", err=True)
-        raise typer.Exit(code=2)
-
-    intake: dict[str, object] = {
-        "goal": goal.strip(),
-        "domain": "general",
-        "time_cap_hours": time_cap,
-        "budget_cap_usd": budget_usd,
-    }
-    if corpus:
-        intake["corpus"] = corpus
+    if skip_intake:
+        if not goal or not goal.strip():
+            typer.echo("--goal is required when --skip-intake is set", err=True)
+            raise typer.Exit(code=2)
+        intake_data: dict[str, object] = {
+            "goal": goal.strip(),
+            "domain": "general",
+            "time_cap_hours": time_cap,
+            "budget_cap_usd": budget_usd,
+        }
+        if corpus:
+            intake_data["corpus"] = corpus
+    else:
+        answers = intake.run_intake(corpus=corpus, budget_usd=budget_usd, time_cap=time_cap)
+        intake_data = {
+            **answers,
+            "time_cap_hours": answers["time_cap"],
+            "budget_cap_usd": answers["budget_usd"],
+            "corpus": answers["corpus_path"],
+        }
 
     # Make sure the schema exists so the testing back door is self-bootstrapping.
     db.migrate().close()
 
-    job = Job.create(intake)
+    job = Job.create(intake_data)
     typer.echo(f"Started job {job.id} (status: {job.status})")
     typer.echo("note: the daemon is not yet wired up — register-only for now (phase 5)")
 
