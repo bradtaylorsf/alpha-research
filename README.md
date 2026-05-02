@@ -93,3 +93,52 @@ file (and its `-wal`/`-shm` sidecars) without touching the main index DB.
 The interactive intake (`research start` without `--skip-intake`) lands in a
 later issue; until then `--skip-intake --goal "..."` is the supported entry
 point and the testing back door used throughout phases 1–4.
+
+## Troubleshooting
+
+Two hidden verbs (`_smoke-llm` and `_smoke-tool`) exist for operators and CI
+to verify the LLM stack and the tool registry without spinning up a job.
+They are intentionally hidden from `--help` (the leading underscore plus
+`hidden=True` keeps them out of the standard surface) but are stable enough
+to script against.
+
+### `research _smoke-llm <tier> "<prompt>"`
+
+Runs a single structured-output call against one tier in `config/models.yaml`
+and prints the response, token counts, and (for cloud tiers) computed cost.
+Exits non-zero on any failure with the underlying error written to stderr.
+
+```bash
+# Local tiers — require LM Studio at $LMSTUDIO_BASE_URL (default :1234).
+research _smoke-llm fast "Say hello"
+research _smoke-llm general "Say hello"
+research _smoke-llm reasoner "Say hello"
+
+# Cloud tiers — require OPENROUTER_API_KEY.
+research _smoke-llm frontier "Say hello"
+research _smoke-llm frontier_alt "Say hello"
+research _smoke-llm frontier_speed "Say hello"
+```
+
+Two tiers behave specially:
+
+- **`vision`**: skipped (exit 0) unless you pass `--image PATH`. The skip is
+  reported as `output: skipped: vision: no image provided` so CI can tell
+  apart a green skip from a green call.
+- **`embeddings`**: bypasses Pydantic AI and hits the configured provider's
+  `/embeddings` endpoint directly, reporting the vector dimension as
+  `output: dim=<N>` instead of a chat completion.
+
+### `research _smoke-tool <tool_name> <query>`
+
+Looks up `<tool_name>` in the in-process `TOOL_REGISTRY` (Phase 3 connectors
+register here) and invokes it with `<query>`. Exits with code 2 and a
+`tool not registered` message on stderr when the name is unknown.
+
+```bash
+research _smoke-tool web_search "alpha research project"
+```
+
+The registry is empty until Phase 3 lands — running the verb today exits
+with `tool not registered: <name> (available: ['(none registered yet)'])`,
+which is the expected pre-Phase-3 baseline.

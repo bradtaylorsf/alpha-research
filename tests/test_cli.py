@@ -446,3 +446,136 @@ def test_config_cache_clear_is_idempotent_when_missing(tmp_path, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(cli.app, ["config", "cache-clear"])
     assert result.exit_code == 0, result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Smoke verbs (_smoke-llm / _smoke-tool) — hidden from --help
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def smoke_repo(tmp_path, monkeypatch):
+    """Tmp cwd with a minimal models.yaml so the smoke verbs can load config."""
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.yaml").write_text(
+        (
+            "tiers:\n"
+            "  fast:\n"
+            "    provider: lmstudio\n"
+            "    model: qwen3-4b\n"
+            "    timeout_s: 30\n"
+            "  general: { provider: lmstudio, model: x, timeout_s: 30 }\n"
+            "  reasoner: { provider: lmstudio, model: x, timeout_s: 30 }\n"
+            "  vision: { provider: lmstudio, model: x, timeout_s: 30 }\n"
+            "  embeddings: { provider: lmstudio, model: x, timeout_s: 30 }\n"
+            "  frontier: { provider: openrouter, model: x, timeout_s: 30 }\n"
+            "  frontier_alt: { provider: openrouter, model: x, timeout_s: 30 }\n"
+            "  frontier_speed: { provider: openrouter, model: x, timeout_s: 30 }\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_LOADED_ENV_FILES", [])
+    return tmp_path
+
+
+def test_smoke_llm_hidden_from_help(smoke_repo):
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["--help"])
+    assert result.exit_code == 0
+    assert "_smoke-llm" not in result.stdout
+    assert "_smoke-tool" not in result.stdout
+
+
+def test_smoke_llm_prints_output_and_exits_zero(smoke_repo, monkeypatch):
+    from research_agent.llm.smoke import SmokeResult
+
+    async def _fake_run(tier, prompt, cfg, *, image_path=None):
+        return SmokeResult(
+            tier=tier,
+            provider="lmstudio",
+            model="qwen3-4b",
+            ok=True,
+            output="hi-there",
+            input_tokens=11,
+            output_tokens=3,
+            cost_usd=0.0,
+        )
+
+    monkeypatch.setattr("research_agent.llm.smoke.run_llm_smoke", _fake_run)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["_smoke-llm", "fast", "hi"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    assert "hi-there" in out
+    assert "fast" in out
+    assert "lmstudio" in out
+    assert "11" in out
+    assert "3" in out
+    assert "$0.0000" in out
+
+
+def test_smoke_llm_failure_exits_one_with_stderr(smoke_repo, monkeypatch):
+    from research_agent.llm.smoke import SmokeResult
+
+    async def _fake_run(tier, prompt, cfg, *, image_path=None):
+        return SmokeResult(
+            tier=tier,
+            provider="lmstudio",
+            model="qwen3-4b",
+            ok=False,
+            error="LM Studio not running",
+        )
+
+    monkeypatch.setattr("research_agent.llm.smoke.run_llm_smoke", _fake_run)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["_smoke-llm", "fast", "hi"])
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "LM Studio not running" in combined
+
+
+def test_smoke_llm_vision_skipped(smoke_repo, monkeypatch):
+    from research_agent.llm.smoke import SmokeResult
+
+    async def _fake_run(tier, prompt, cfg, *, image_path=None):
+        assert image_path is None
+        return SmokeResult(
+            tier=tier,
+            provider="lmstudio",
+            model="qwen3-vl",
+            ok=True,
+            skipped_reason="vision: no image provided",
+        )
+
+    monkeypatch.setattr("research_agent.llm.smoke.run_llm_smoke", _fake_run)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["_smoke-llm", "vision", "describe"])
+    assert result.exit_code == 0, result.stdout
+    assert "skipped" in result.stdout
+    assert "no image provided" in result.stdout
+
+
+def test_smoke_tool_unknown_exits_two(smoke_repo):
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["_smoke-tool", "no_such_tool", "q"])
+    assert result.exit_code == 2
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "not registered" in combined
+    assert "no_such_tool" in combined
+
+
+def test_smoke_tool_invokes_registered_callable(smoke_repo, monkeypatch):
+    from research_agent.tools import TOOL_REGISTRY
+
+    monkeypatch.setitem(TOOL_REGISTRY, "echo", lambda q: f"echo:{q}")
+    try:
+        runner = CliRunner()
+        result = runner.invoke(cli.app, ["_smoke-tool", "echo", "ping"])
+        assert result.exit_code == 0, result.stdout
+        assert "echo:ping" in result.stdout
+    finally:
+        TOOL_REGISTRY.pop("echo", None)

@@ -155,6 +155,38 @@ def _serialize_tool_defs(defs: Any) -> list[dict[str, Any]]:
     return out
 
 
+def _build_model_for_tier(tier: str, spec: dict[str, Any]) -> OpenAIModel:
+    """Build an :class:`OpenAIModel` bound to the provider configured for ``tier``.
+
+    Module-level so both :class:`Router` and the smoke helper share one wiring
+    point — the LM Studio base-url override and the OpenRouter env-key check
+    must stay identical between the production call path and the smoke probe.
+    """
+    provider = spec["provider"]
+    model_name = spec["model"]
+    if provider == "lmstudio":
+        base_url = cfg_get("LMSTUDIO_BASE_URL") or LMSTUDIO_DEFAULT_BASE_URL
+        api_key = "lm-studio"
+    elif provider == "openrouter":
+        api_key_env = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key_env:
+            raise RuntimeError(
+                f"OPENROUTER_API_KEY environment variable is required for "
+                f"cloud tier {tier!r} (provider=openrouter)"
+            )
+        base_url = OPENROUTER_BASE_URL
+        api_key = api_key_env
+    else:
+        raise ValueError(
+            f"unknown provider for tier {tier!r}: {provider!r} "
+            "(expected 'lmstudio' or 'openrouter')"
+        )
+    return OpenAIModel(
+        model_name,
+        provider=OpenAIProvider(base_url=base_url, api_key=api_key),
+    )
+
+
 def _extract_usage(result: Any, latency_ms: int) -> TokenUsage:
     """Map a Pydantic AI ``AgentRunResult.usage()`` into our :class:`TokenUsage`."""
     input_tokens = 0
@@ -228,31 +260,6 @@ class Router:
 
     # ---- Provider wiring ---------------------------------------------------
 
-    def _build_model(self, tier: str, model_name: str) -> OpenAIModel:
-        spec = self.tiers[tier]
-        provider = spec["provider"]
-        if provider == "lmstudio":
-            base_url = cfg_get("LMSTUDIO_BASE_URL") or LMSTUDIO_DEFAULT_BASE_URL
-            api_key = "lm-studio"
-        elif provider == "openrouter":
-            api_key_env = os.environ.get("OPENROUTER_API_KEY")
-            if not api_key_env:
-                raise RuntimeError(
-                    f"OPENROUTER_API_KEY environment variable is required for "
-                    f"cloud tier {tier!r} (provider=openrouter)"
-                )
-            base_url = OPENROUTER_BASE_URL
-            api_key = api_key_env
-        else:
-            raise ValueError(
-                f"unknown provider for tier {tier!r}: {provider!r} "
-                "(expected 'lmstudio' or 'openrouter')"
-            )
-        return OpenAIModel(
-            model_name,
-            provider=OpenAIProvider(base_url=base_url, api_key=api_key),
-        )
-
     def model_for(self, tier: Tier | str) -> OpenAIModel:
         """Return the cached :class:`OpenAIModel` for ``tier``.
 
@@ -265,7 +272,7 @@ class Router:
         cached = self._model_cache.get(tier)
         if cached is not None:
             return cached
-        model = self._build_model(tier, self.tiers[tier]["model"])
+        model = _build_model_for_tier(tier, self.tiers[tier])
         self._model_cache[tier] = model
         return model
 
