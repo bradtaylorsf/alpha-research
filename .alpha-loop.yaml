@@ -6,19 +6,33 @@ agent: claude  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
 label: ready
 base_branch: main
 auto_merge: true
+# Batch mode is OFF for the bootstrap phases (issues #1–#3 are sequential
+# dependencies — scaffold must land before pyproject, pyproject before
+# `research doctor`). Once Phase 1 ships, flip `batch: true` for the
+# parallel-friendly later phases (e.g. independent connectors in Phase 3).
+batch: false
 batch_size: 5
-batch: true
 
 # --- Validation commands (Python 3.12 stack per research-agent-implementation-guide.md) ---
 # `uv` manages the venv and installs from pyproject.toml on first run, so these
 # are safe to run from a clean worktree without manual `pip install -e .`.
 #
 # test_command runs in two places:
-#   1. Preflight (before the agent starts) — must pass on main.
+#   1. Preflight (before the agent starts) — must pass on main. (Disabled below
+#      via skip_preflight while bootstrapping; main has no Python project yet.)
 #   2. Validation (after the agent finishes) — gate on the change being correct.
-# Keep it fast and deterministic: unit tests only. The agent runs the heavier
-# CLI smoke / e2e checks itself per AGENTS.md → "Validation playbook".
-test_command: uv run pytest -q
+#
+# `scripts/test.sh` is a tolerant wrapper that treats:
+#   - "no pyproject.toml yet" as pass (issues #1–#2 haven't landed)
+#   - pytest exit 5 ("no tests collected") as pass (issue #3 hasn't landed)
+#   - real test failures (exit 1+) as fail
+# Once tests exist, the wrapper is a no-op around `uv run pytest`.
+test_command: bash scripts/test.sh
+
+# Skip the preflight test on main while bootstrapping. There is no Python
+# project on main yet — preflight would fail before any issue starts.
+# Flip back to `false` once Phase 1 (issues 4–8) has landed real tests.
+skip_preflight: true
 
 # dev_command is what `alpha-loop verify` would use to start a UI for Playwright.
 # Unused while skip_verify is true, but kept pointing at the env health check so
