@@ -189,7 +189,15 @@ def _make_synthetic_job(
     return job
 
 
-def test_start_skip_intake_creates_job(isolated_jobs_repo: Path):
+def test_start_skip_intake_creates_job(isolated_jobs_repo: Path, monkeypatch):
+    captured: dict[str, str] = {}
+
+    def _fake_spawn(job_id: str) -> int:
+        captured["job_id"] = job_id
+        return 12345
+
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", _fake_spawn)
+
     runner = CliRunner()
     result = runner.invoke(
         cli.app,
@@ -197,7 +205,8 @@ def test_start_skip_intake_creates_job(isolated_jobs_repo: Path):
     )
     assert result.exit_code == 0, result.stdout
     assert "Started job" in result.stdout
-    assert "pending" in result.stdout
+    assert "(daemon pid 12345)" in result.stdout
+    assert "Tail logs with: research logs " in result.stdout
 
     # Folder + sidecars exist.
     today = time.strftime("%Y-%m-%d")
@@ -205,6 +214,9 @@ def test_start_skip_intake_creates_job(isolated_jobs_repo: Path):
     job_root = isolated_jobs_repo / "jobs" / job_id
     assert (job_root / "job.json").exists()
     assert (job_root / "events.jsonl").exists()
+
+    # spawn_daemon was called with the job we just created.
+    assert captured["job_id"] == job_id
 
     # DB row exists with status=pending.
     conn = db.connect(isolated_jobs_repo / "data" / "index.sqlite")
@@ -241,6 +253,7 @@ def test_start_runs_intake_when_not_skipped(isolated_jobs_repo: Path, monkeypatc
         return canned
 
     monkeypatch.setattr(cli.intake, "run_intake", _fake_run_intake)
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 99999)
 
     runner = CliRunner()
     result = runner.invoke(
@@ -249,6 +262,7 @@ def test_start_runs_intake_when_not_skipped(isolated_jobs_repo: Path, monkeypatc
     )
     assert result.exit_code == 0, result.stdout
     assert "Started job" in result.stdout
+    assert "(daemon pid 99999)" in result.stdout
 
     today = time.strftime("%Y-%m-%d")
     job_id = f"{today}-investigate-widgets"
