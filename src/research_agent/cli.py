@@ -248,6 +248,79 @@ def view_command(
     typer.echo(body)
 
 
+def _print_smoke_result(result) -> None:  # type: ignore[no-untyped-def]
+    """Render a single :class:`SmokeResult` to stdout as a key/value list.
+
+    A table-shape was rejected because Rich truncates the output cell when
+    the terminal is narrower than the row — operators reading CI logs would
+    see ``skipped: visi…`` and miss the reason. A flat key/value listing
+    keeps every field grep-able regardless of width.
+    """
+    console = Console()
+    if result.skipped_reason is not None:
+        output_line = f"output: skipped: {result.skipped_reason}"
+    else:
+        preview = result.output[:200] + ("…" if len(result.output) > 200 else "")
+        output_line = f"output: {preview or '(empty)'}"
+
+    lines = [
+        f"tier: {result.tier}",
+        f"provider: {result.provider}",
+        f"model: {result.model}",
+        output_line,
+        f"input_tokens: {result.input_tokens}",
+        f"output_tokens: {result.output_tokens}",
+        f"cost_usd: ${result.cost_usd:.4f}",
+    ]
+    for line in lines:
+        console.print(line, highlight=False)
+
+
+@app.command(name="_smoke-llm", hidden=True)
+def smoke_llm_command(
+    tier: str = typer.Argument(..., help="Tier name from config/models.yaml."),
+    prompt: str = typer.Argument(..., help="Prompt to send to the tier."),
+    image: Path = typer.Option(  # noqa: B008 — Typer captures the default at decoration time
+        None,
+        "--image",
+        help="Path to an image (only meaningful for the vision tier).",
+    ),
+) -> None:
+    """Hidden: smoke-test a single LLM tier end-to-end."""
+    import asyncio
+
+    from research_agent.llm.router import load_models_config
+    from research_agent.llm.smoke import run_llm_smoke
+
+    cfg = load_models_config(Path("config/models.yaml"))
+    result = asyncio.run(run_llm_smoke(tier, prompt, cfg, image_path=image))
+    _print_smoke_result(result)
+    if not result.ok:
+        typer.echo(f"smoke failed: {result.error}", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command(name="_smoke-tool", hidden=True)
+def smoke_tool_command(
+    tool_name: str = typer.Argument(..., help="Registered tool name."),
+    query: str = typer.Argument(..., help="Query string passed to the tool."),
+) -> None:
+    """Hidden: smoke-test a single registered tool/connector."""
+    from research_agent.tools import TOOL_REGISTRY
+
+    fn = TOOL_REGISTRY.get(tool_name)
+    if fn is None:
+        available = sorted(TOOL_REGISTRY) or ["(none registered yet)"]
+        typer.echo(
+            f"tool not registered: {tool_name} (available: {available})",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    result = fn(query)
+    typer.echo(repr(result))
+
+
 @app.command(name="logs")
 def logs_command(
     job_id: str = typer.Argument(..., help="Job id (e.g. 2026-05-02-some-slug)."),
