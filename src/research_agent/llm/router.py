@@ -32,11 +32,19 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
+import openai
 import yaml  # type: ignore[import-untyped]
 from openai import RateLimitError
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_delay,
+    wait_exponential,
+)
 
 from research_agent.config import get as cfg_get
 from research_agent.observability.events import emit
@@ -79,6 +87,39 @@ LMSTUDIO_RETRY_SLEEP_S = 5.0
 # timeouts. Within this window calls reroute to the configured ``fallback_tier``
 # instead of hitting LM Studio again.
 LMSTUDIO_DEGRADED_WINDOW_S = 600.0
+
+# OpenRouter network-blip backoff (§6.3 #2): exponential backoff between
+# attempts (1s, 2s, 4s, 8s, 16s, 30s, 60s, 60s, …) capped at
+# ``OPENROUTER_RETRY_MAX_DELAY`` and giving up after
+# ``OPENROUTER_RETRY_STOP_DELAY`` total seconds. Per-instance overrides on
+# :class:`Router` let tests collapse these to zero.
+OPENROUTER_RETRY_MIN_DELAY = 1.0
+OPENROUTER_RETRY_MAX_DELAY = 60.0
+OPENROUTER_RETRY_STOP_DELAY = 120.0
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """True for transient OpenRouter failures: 5xx, 429, network, httpx timeout.
+
+    Matches the §6.3 "network blip" contract: 4xx other than 429 (bad request,
+    auth, permission, not found, unprocessable) are immediate failures.
+    Distinguishes by inspecting :attr:`openai.APIStatusError.status_code`
+    rather than the concrete subclass so any future provider 5xx still
+    qualifies and any new 4xx subclass still doesn't.
+    """
+    if isinstance(exc, RateLimitError):
+        return True
+    if isinstance(exc, openai.APIConnectionError):
+        return True
+    if isinstance(exc, openai.APIStatusError):
+        try:
+            status = int(getattr(exc, "status_code", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return status >= 500
+    if isinstance(exc, (httpx.NetworkError, httpx.TimeoutException)):
+        return True
+    return False
 
 
 def load_models_config(path: Path | str = "config/models.yaml") -> dict[str, Any]:
@@ -286,6 +327,11 @@ class Router:
         # monkeypatching the global asyncio loop.
         self.retry_sleep_s: float = LMSTUDIO_RETRY_SLEEP_S
         self.degraded_window_s: float = LMSTUDIO_DEGRADED_WINDOW_S
+        # Per-instance OpenRouter retry knobs — tests collapse to 0 to avoid
+        # actually waiting two minutes when simulating retry exhaustion.
+        self.openrouter_retry_min_delay: float = OPENROUTER_RETRY_MIN_DELAY
+        self.openrouter_retry_max_delay: float = OPENROUTER_RETRY_MAX_DELAY
+        self.openrouter_retry_stop_delay: float = OPENROUTER_RETRY_STOP_DELAY
 
     # ---- Provider wiring ---------------------------------------------------
 
@@ -410,13 +456,16 @@ class Router:
 
         t0 = time.perf_counter()
         try:
-            result = await self._run_with_timeout(agent, timeout_s, args, kwargs)
+            if is_cloud:
+                result = await self._run_openrouter_with_retry(agent, args, kwargs, timeout_s)
+            else:
+                result = await self._run_with_timeout(agent, timeout_s, args, kwargs)
         except RateLimitError:
             fallback_model = spec.get("fallback_model")
             if not (is_cloud and fallback_model):
                 raise
             fallback_agent = self._make_fallback_agent(tier, fallback_model)
-            result = await self._run_with_timeout(fallback_agent, timeout_s, args, kwargs)
+            result = await self._run_openrouter_with_retry(fallback_agent, args, kwargs, timeout_s)
             fallback_used = True
             model_name = fallback_model
         except TimeoutError:
@@ -505,6 +554,36 @@ class Router:
         if timeout_s is None:
             return await agent.run(*args, **kwargs)
         return await asyncio.wait_for(agent.run(*args, **kwargs), timeout=timeout_s)
+
+    async def _run_openrouter_with_retry(
+        self,
+        agent: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        timeout_s: float | None,
+    ) -> Any:
+        """Run the cloud call with §6.3 exponential backoff on transient errors.
+
+        Retries on 5xx, 429, network errors, and httpx timeouts up to
+        ``openrouter_retry_stop_delay`` total seconds; non-retryable 4xx
+        propagate immediately. ``reraise=True`` surfaces the original
+        exception (not :class:`tenacity.RetryError`) so the caller's
+        ``except RateLimitError`` fallback path keeps working unchanged.
+        """
+        result: Any = None
+        async for attempt in AsyncRetrying(
+            wait=wait_exponential(
+                multiplier=1,
+                min=self.openrouter_retry_min_delay,
+                max=max(self.openrouter_retry_max_delay, self.openrouter_retry_min_delay),
+            ),
+            stop=stop_after_delay(self.openrouter_retry_stop_delay),
+            retry=retry_if_exception(_is_retryable),
+            reraise=True,
+        ):
+            with attempt:
+                result = await self._run_with_timeout(agent, timeout_s, args, kwargs)
+        return result
 
     async def _reroute_to_fallback_tier(
         self,
@@ -687,6 +766,8 @@ __all__ = [
     "LMSTUDIO_DEGRADED_WINDOW_S",
     "LMSTUDIO_RETRY_SLEEP_S",
     "OPENROUTER_BASE_URL",
+    "OPENROUTER_RETRY_MAX_DELAY",
+    "OPENROUTER_RETRY_STOP_DELAY",
     "Router",
     "Tier",
     "load_models_config",

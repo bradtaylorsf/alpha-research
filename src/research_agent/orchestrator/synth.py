@@ -39,7 +39,11 @@ from research_agent.llm.budgets import BudgetExceeded
 from research_agent.observability.events import emit
 from research_agent.prompts.loader import load_prompt
 from research_agent.storage import db
-from research_agent.storage.markdown import write_report, write_synthesis
+from research_agent.storage.markdown import (
+    write_report,
+    write_synthesis,
+    write_synthesis_partial,
+)
 
 if TYPE_CHECKING:
     from research_agent.llm.router import Router
@@ -277,6 +281,12 @@ async def _do_synthesis(
                 {"stage": fallback_tier, "error": str(exc2), "budget_capped": True},
             )
             return _write_stub_output(job)
+        except Exception as exc2:  # noqa: BLE001 — terminal retry exhaustion
+            logger.warning("synth: %s tier failed after retries: %s", fallback_tier, exc2)
+            return _write_failed_output(job, tier=fallback_tier, exc=exc2, attempt_count=2)
+    except Exception as exc:  # noqa: BLE001 — terminal retry exhaustion
+        logger.warning("synth: %s tier failed after retries: %s", primary_tier, exc)
+        return _write_failed_output(job, tier=primary_tier, exc=exc, attempt_count=1)
 
     cost = getattr(router.budget, "last_cost", None)
     cost_val: float | None = float(cost) if isinstance(cost, (int, float)) else None
@@ -306,6 +316,45 @@ async def _do_synthesis(
         cost_usd=cost_val,
         report_path=str(report_path),
         truncated=False,
+    )
+
+
+def _write_failed_output(
+    job: Job,
+    *,
+    tier: str,
+    exc: BaseException,
+    attempt_count: int,
+    partial_content: str = "",
+) -> SynthesisOutput:
+    """Persist whatever content we managed to assemble + emit ``synthesis_failed``.
+
+    The current call path is non-streaming so ``partial_content`` is "" — the
+    file is still written so the next attempt can spot it as prior context.
+    Returns a degraded :class:`SynthesisOutput` (``model='synthesis_failed'``,
+    ``truncated=True``) so callers don't have to thread an exception type.
+    """
+    partial_version = write_synthesis_partial(job, partial_content, model="synthesis_failed")
+    partial_path = job.root / f"synthesis/{partial_version:04d}.partial.md"
+    emit(
+        job,
+        "ERROR",
+        "synth",
+        "synthesis_failed",
+        {
+            "tier": tier,
+            "reason": str(exc),
+            "attempt_count": attempt_count,
+            "partial_path": str(partial_path),
+        },
+    )
+    return SynthesisOutput(
+        version=partial_version,
+        content=partial_content,
+        model="synthesis_failed",
+        cost_usd=None,
+        report_path=str(partial_path),
+        truncated=True,
     )
 
 

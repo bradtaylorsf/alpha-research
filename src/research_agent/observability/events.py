@@ -38,6 +38,7 @@ EventKind = Literal[
     "plan_created",
     "synthesis_done",
     "synthesis_written",
+    "synthesis_failed",
     "critique_done",
     "critique_written",
     "replan_triggered",
