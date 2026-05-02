@@ -404,6 +404,41 @@ def test_rrf_default_k_constant() -> None:
     assert DEFAULT_RRF_K == 60
 
 
+def test_try_load_sqlite_vec_loads_on_each_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cache short-circuit must not skip loading the extension on a new conn.
+
+    SQLite extensions are loaded per-connection, so even after a successful
+    first load we still have to call ``sqlite_vec.load(conn)`` on every new
+    connection. Regression guard for the cache that previously returned True
+    immediately and let the per-connection load silently get skipped.
+    """
+    import sqlite3 as _sqlite3
+
+    calls: list[object] = []
+
+    fake_module = type("FakeSqliteVec", (), {})()
+
+    def _fake_load(conn):  # type: ignore[no-untyped-def]
+        calls.append(conn)
+        # Register the function this load attempt is supposed to enable so
+        # the post-load probe (only run on first attempt) succeeds.
+        conn.create_function("vec_distance_cosine", 2, lambda a, b: 0.0)
+
+    fake_module.load = _fake_load
+    monkeypatch.setitem(__import__("sys").modules, "sqlite_vec", fake_module)
+
+    c1 = _sqlite3.connect(":memory:")
+    c2 = _sqlite3.connect(":memory:")
+    try:
+        assert search_mod._try_load_sqlite_vec(c1) is True
+        assert search_mod._try_load_sqlite_vec(c2) is True
+    finally:
+        c1.close()
+        c2.close()
+
+    assert len(calls) == 2, f"sqlite_vec.load must be called on each new conn; got {len(calls)}"
+
+
 def test_rrf_invalid_k() -> None:
     with pytest.raises(ValueError):
         _rrf_fuse([], [], k=0)

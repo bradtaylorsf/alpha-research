@@ -38,8 +38,12 @@ DEFAULT_RRF_K = 60
 # Default per-list result cap (FTS top-N and cosine top-N before fusion).
 DEFAULT_TOP_K = 50
 
-# Module-level cache for sqlite-vec availability per connection process.
-# True/False once we've probed; None means "not yet attempted".
+# Module-level cache for sqlite-vec *availability* in this process.
+# True means a prior load succeeded (so the package is importable and the
+# extension works); we still have to call ``sqlite_vec.load(conn)`` on every
+# new connection because SQLite extensions are connection-local. False is a
+# negative cache: we already tried and the extension is unavailable, so we
+# skip the load attempt and fall back to numpy. None means "not yet probed".
 _SQLITE_VEC_LOADED: bool | None = None
 
 
@@ -181,16 +185,22 @@ def _count_sources(conn: sqlite3.Connection, job_id: str | None) -> int:
 
 
 def _try_load_sqlite_vec(conn: sqlite3.Connection) -> bool:
-    """Try to load the ``sqlite-vec`` extension on ``conn``. Cached per process.
+    """Try to load the ``sqlite-vec`` extension on ``conn``.
 
     Tries the python ``sqlite_vec`` package first (the official install
     pattern), then falls back to ``conn.load_extension('vec0')``. Returns
     True on success and False on any failure — callers must use the numpy
     fallback path when this returns False.
+
+    SQLite loads extensions *per-connection*, so this function always runs
+    the load attempt on ``conn``; the module-level :data:`_SQLITE_VEC_LOADED`
+    cache is only used as a *negative* short-circuit (skip the work when we
+    already know the extension is unavailable in this process) and to skip
+    the one-time function probe after the first successful load.
     """
     global _SQLITE_VEC_LOADED
-    if _SQLITE_VEC_LOADED is not None:
-        return _SQLITE_VEC_LOADED
+    if _SQLITE_VEC_LOADED is False:
+        return False
 
     try:
         conn.enable_load_extension(True)
@@ -216,12 +226,15 @@ def _try_load_sqlite_vec(conn: sqlite3.Connection) -> bool:
             _SQLITE_VEC_LOADED = False
             return False
 
-    try:
-        conn.execute("SELECT vec_distance_cosine(X'00000000', X'00000000')").fetchone()
-    except sqlite3.OperationalError as exc:
-        logger.debug("sqlite-vec loaded but vec_distance_cosine missing: %s", exc)
-        _SQLITE_VEC_LOADED = False
-        return False
+    if _SQLITE_VEC_LOADED is None:
+        # First time we've gotten this far in the process — confirm the
+        # cosine helper is actually registered before we commit to it.
+        try:
+            conn.execute("SELECT vec_distance_cosine(X'00000000', X'00000000')").fetchone()
+        except sqlite3.OperationalError as exc:
+            logger.debug("sqlite-vec loaded but vec_distance_cosine missing: %s", exc)
+            _SQLITE_VEC_LOADED = False
+            return False
 
     _SQLITE_VEC_LOADED = True
     return True
