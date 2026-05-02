@@ -58,7 +58,7 @@ env keys) never affect the exit code.
 ### Job verbs
 
 ```bash
-# Register a new job (testing back door — the daemon is not yet wired up).
+# Register a new job and spawn the background daemon.
 research start --skip-intake --goal "Investigate Widget Co" \
     [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes]
 
@@ -107,9 +107,17 @@ default TTL. The router opts in per call (`cache=True`) — deterministic
 extractions opt in, exploratory synthesis opts out. `cache-clear` removes the
 file (and its `-wal`/`-shm` sidecars) without touching the main index DB.
 
-The interactive intake (`research start` without `--skip-intake`) lands in a
-later issue; until then `--skip-intake --goal "..."` is the supported entry
-point and the testing back door used throughout phases 1–4.
+`research start` runs the interactive intake (or accepts `--skip-intake
+--goal "..."` as a non-interactive testing back door), creates the job
+folder + DB row, and then spawns a detached daemon via
+`subprocess.Popen(start_new_session=True)`. Control returns immediately
+with `Started job <id> (daemon pid <pid>). Tail logs with: research logs
+<id> -f`. The PID is written atomically to `jobs/<id>/daemon.pid`; the
+daemon's stdout/stderr are appended to `jobs/<id>/daemon.{out,err}.log`.
+On clean shutdown (including SIGTERM/SIGINT) the daemon's atexit hook
+removes `daemon.pid`. `daemon.is_daemon_alive(<id>)` checks liveness via
+`kill -0` plus a `/proc/<pid>/cmdline` peek on Linux, so a recycled PID
+won't false-positive.
 
 ## Troubleshooting
 

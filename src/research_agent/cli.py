@@ -12,7 +12,7 @@ import typer
 from rich.console import Console
 from rich.live import Live
 
-from research_agent import __version__, config, doctor, intake
+from research_agent import __version__, config, daemon, doctor, intake
 from research_agent.storage import db
 from research_agent.storage.jobs import Job, list_jobs
 from research_agent.ui import render
@@ -96,7 +96,7 @@ def start_command(
         help="Path to a local corpus directory to scope the research.",
     ),
 ) -> None:
-    """Register a new research job (does NOT spawn the daemon — that's phase 5)."""
+    """Register a new research job and spawn its background daemon."""
     if skip_intake:
         if not goal or not goal.strip():
             typer.echo("--goal is required when --skip-intake is set", err=True)
@@ -122,8 +122,10 @@ def start_command(
     db.migrate().close()
 
     job = Job.create(intake_data)
-    typer.echo(f"Started job {job.id} (status: {job.status})")
-    typer.echo("note: the daemon is not yet wired up — register-only for now (phase 5)")
+    pid = daemon.spawn_daemon(job.id)
+    typer.echo(
+        f"Started job {job.id} (daemon pid {pid}). Tail logs with: research logs {job.id} -f"
+    )
 
 
 @app.command(name="list")
