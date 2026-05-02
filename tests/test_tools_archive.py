@@ -1,8 +1,11 @@
-"""Tests for `research_agent.tools.archive` (issue #15)."""
+"""Tests for `research_agent.tools.archive` (issues #15 and #16)."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -29,7 +32,7 @@ def _patch_client(monkeypatch, on_get):
     Headers are captured from the ``AsyncClient(headers=...)`` init kwargs
     because that's where archive.py sets them.
     """
-    captured: dict[str, object] = {}
+    captured: dict[str, object] = {"call_count": 0}
 
     @asynccontextmanager
     async def _client_factory(*args, **kwargs):
@@ -38,6 +41,7 @@ def _patch_client(monkeypatch, on_get):
 
         class _Client:
             async def get(self, url, *args, **kwargs):
+                captured["call_count"] = int(captured["call_count"]) + 1
                 captured["last_url"] = url
                 merged = dict(init_headers)
                 merged.update(kwargs.get("headers", {}))
@@ -53,6 +57,20 @@ def _patch_client(monkeypatch, on_get):
 def _scrub_env(monkeypatch):
     monkeypatch.delenv("RESEARCH_USER_AGENT", raising=False)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_archive_state(monkeypatch):
+    """Reset per-process rate-limit state and silence backoff sleeps.
+
+    Tests that need to inspect or override ``asyncio.sleep`` re-patch it
+    explicitly; this default keeps the suite fast even when tenacity is
+    iterating its retry loop.
+    """
+    archive.reset_for_tests()
+    monkeypatch.setattr(archive.asyncio, "sleep", AsyncMock())
+    yield
+    archive.reset_for_tests()
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +155,7 @@ async def test_save_uses_default_user_agent_when_unset(monkeypatch):
 
 
 async def test_save_returns_none_on_4xx(monkeypatch):
-    _patch_client(monkeypatch, lambda url, _h: _FakeResponse(status_code=429))
+    _patch_client(monkeypatch, lambda url, _h: _FakeResponse(status_code=404))
     assert await archive.save("https://x.example/y") is None
 
 
@@ -193,3 +211,108 @@ async def test_save_returns_none_when_no_archive_pointer(monkeypatch):
         ),
     )
     assert await archive.save("https://x.example/y") is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #16 — retry/backoff and rate-limit behaviour
+# ---------------------------------------------------------------------------
+
+
+async def test_save_logs_warning_on_failure(monkeypatch, caplog):
+    _patch_client(monkeypatch, lambda url, _h: _FakeResponse(status_code=500))
+    with caplog.at_level(logging.WARNING, logger=archive.logger.name):
+        result = await archive.save("https://x.example/y")
+    assert result is None
+    assert any(rec.levelno == logging.WARNING for rec in caplog.records)
+
+
+async def test_save_retries_on_transient_error(monkeypatch):
+    """503 twice, then a 200 with Content-Location succeeds on the 3rd try."""
+    responses = iter(
+        [
+            _FakeResponse(status_code=503),
+            _FakeResponse(status_code=503),
+            _FakeResponse(headers={"Content-Location": "/web/2026/https://x.example/y"}),
+        ]
+    )
+    captured = _patch_client(monkeypatch, lambda url, _h: next(responses))
+
+    result = await archive.save("https://x.example/y")
+    assert result == "https://web.archive.org/web/2026/https://x.example/y"
+    assert captured["call_count"] == 3
+
+
+async def test_save_retries_on_timeout_then_succeeds(monkeypatch):
+    """First call raises TimeoutException; second returns 200."""
+    calls = {"n": 0}
+
+    @asynccontextmanager
+    async def _client_factory(*args, **kwargs):
+        class _Client:
+            async def get(self, url, *args, **kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise archive.httpx.TimeoutException("slow")
+                return _FakeResponse(
+                    headers={"Content-Location": "/web/2026/https://x.example/y"},
+                )
+
+        yield _Client()
+
+    monkeypatch.setattr(archive.httpx, "AsyncClient", _client_factory)
+
+    result = await archive.save("https://x.example/y")
+    assert result == "https://web.archive.org/web/2026/https://x.example/y"
+    assert calls["n"] == 2
+
+
+async def test_save_gives_up_after_max_attempts(monkeypatch, caplog):
+    captured = _patch_client(monkeypatch, lambda url, _h: _FakeResponse(status_code=503))
+    with caplog.at_level(logging.WARNING, logger=archive.logger.name):
+        result = await archive.save("https://x.example/y")
+    assert result is None
+    assert captured["call_count"] == 3
+    assert any(
+        "wayback save failed after retries" in rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING
+    )
+
+
+async def test_save_rate_limits_concurrent_calls(monkeypatch):
+    """Two concurrent ``save()`` calls must be serialised: the second one
+    sleeps at least the rate-limit interval before its submission."""
+    clock = [100.0]
+
+    def fake_monotonic() -> float:
+        return clock[0]
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        # Advance the fake clock so subsequent monotonic() reads reflect
+        # that time has "passed."
+        clock[0] += seconds
+
+    monkeypatch.setattr(archive.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(archive.asyncio, "sleep", fake_sleep)
+
+    _patch_client(
+        monkeypatch,
+        lambda url, _h: _FakeResponse(
+            headers={"Content-Location": "/web/2026/" + url},
+        ),
+    )
+
+    results = await asyncio.gather(
+        archive.save("https://a.example"),
+        archive.save("https://b.example"),
+    )
+
+    assert all(r is not None for r in results)
+    # The second call to enter the gate must have slept at least the full
+    # rate-limit interval (no real time passed between the two acquires).
+    assert any(s >= archive._RATE_LIMIT_INTERVAL for s in sleep_calls), (
+        f"expected a sleep ≥ {archive._RATE_LIMIT_INTERVAL}s, got {sleep_calls!r}"
+    )
