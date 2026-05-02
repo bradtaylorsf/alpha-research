@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "summary": "intake.py meets all AC: 11-step Questionary flow, general-tier follow-ups capped at 3, Rich summary, revise loop, 9-key dict; CLI flags pre-fill defaults; --skip-intake unaffected; 19 intake + 45 CLI tests pass. Fixed one minor doc drift in prompt frontmatter.",
+  "findings": [
+    {
+      "severity": "info",
+      "description": "intake_followup.md frontmatter declared model_tier: fast while the AC and intake.py call the general tier. Loader treats model_tier as metadata only (no routing impact), but the inconsistency was misleading. Updated frontmatter to general.",
+      "fixed": true,
+      "file": "src/research_agent/prompts/intake_followup.md"
+    },
+    {
+      "severity": "info",
+      "description": "Summary panel renders time_cap as '{N}h' when N is an int — '1 week' (168h) shows as 'time=168h' rather than 'time=1 week'. Not a bug per spec; flagging for future polish.",
+      "fixed": false,
+      "file": "src/research_agent/intake.py"
+    },
+    {
+      "severity": "info",
+      "description": "_collect_followups already slices to MAX_FOLLOWUPS, and run_intake slices again with [:MAX_FOLLOWUPS]. Redundant but harmless.",
+      "fixed": false,
+      "file": "src/research_agent/intake.py"
+    }
+  ]
+}

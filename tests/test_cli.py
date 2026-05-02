@@ -219,12 +219,55 @@ def test_start_skip_intake_creates_job(isolated_jobs_repo: Path):
     assert row["budget_cap_usd"] == 5.0
 
 
-def test_start_without_skip_intake_exits_nonzero(isolated_jobs_repo: Path):
+def test_start_runs_intake_when_not_skipped(isolated_jobs_repo: Path, monkeypatch):
+    canned = {
+        "goal": "Investigate widgets",
+        "goal_one_sentence": "a sourced overview of widget governance",
+        "domain": "Corporate / financial",
+        "time_cap": 12,
+        "budget_usd": 25.0,
+        "output_orientation": "internal brief",
+        "aggressiveness": "balanced",
+        "corpus_path": None,
+        "followup_qa": [],
+    }
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_intake(*, corpus=None, budget_usd=None, time_cap=None):
+        captured["corpus"] = corpus
+        captured["budget_usd"] = budget_usd
+        captured["time_cap"] = time_cap
+        return canned
+
+    monkeypatch.setattr(cli.intake, "run_intake", _fake_run_intake)
+
     runner = CliRunner()
-    result = runner.invoke(cli.app, ["start", "--goal", "x"])
-    assert result.exit_code != 0
-    # Combined output should mention the missing flag.
-    assert "skip-intake" in (result.stdout + (result.stderr or ""))
+    result = runner.invoke(
+        cli.app,
+        ["start", "--budget-usd", "25.0", "--time-cap", "12"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "Started job" in result.stdout
+
+    today = time.strftime("%Y-%m-%d")
+    job_id = f"{today}-investigate-widgets"
+    conn = db.connect(isolated_jobs_repo / "data" / "index.sqlite")
+    try:
+        row = conn.execute(
+            "SELECT status, budget_cap_usd, time_cap_hours FROM jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["status"] == "pending"
+    assert row["budget_cap_usd"] == 25.0
+    assert row["time_cap_hours"] == 12
+
+    # CLI flags must be forwarded to the intake helper as defaults.
+    assert captured["budget_usd"] == 25.0
+    assert captured["time_cap"] == 12
 
 
 def test_start_skip_intake_requires_goal(isolated_jobs_repo: Path):

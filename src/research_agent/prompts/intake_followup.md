@@ -1,6 +1,6 @@
 ---
 version: "1"
-model_tier: fast
+model_tier: general
 description: System prompt for the intake follow-up agent that decides which clarifying questions to ask the user.
 ---
 You are the **intake follow-up** for an autonomous research agent.
