@@ -168,6 +168,30 @@ def default_handlers(router: Any) -> dict[str, Handler]:
             output = await synthesize(job, plan, router=router)
         return output.model_dump()
 
+    async def _critique(job: Job, task: dict[str, Any]) -> dict[str, Any] | None:
+        from research_agent.orchestrator.critique import critique
+        from research_agent.orchestrator.plan import cloud_replan
+
+        plan = _load_latest_plan(job)
+        if plan is None:
+            raise FatalError("critique: no plan persisted for job")
+        latest_synth = _load_latest_synthesis_md(job)
+        result = await critique(job, plan, latest_synth, router=router)
+        if result.should_replan:
+            critique_md = _load_critique_md(job, result.md_path)
+            await cloud_replan(job, plan, critique_md, router=router)
+            emit(
+                job,
+                "INFO",
+                "critique",
+                "replan_triggered",
+                {
+                    "from_version": plan.version,
+                    "critique_version": result.version,
+                },
+            )
+        return result.model_dump()
+
     return {
         "web_search": _web_search,
         "web_fetch": _web_fetch,
@@ -181,7 +205,7 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         "extract_findings": _not_implemented_handler,
         "summarize_source": _not_implemented_handler,
         "synthesize": _synthesize,
-        "critique": _not_implemented_handler,
+        "critique": _critique,
     }
 
 
@@ -238,6 +262,30 @@ def _load_latest_plan(job: Job) -> Plan | None:
     if row is None:
         return None
     return Plan.model_validate_json(row["payload_json"])
+
+
+def _load_latest_synthesis_md(job: Job) -> str | None:
+    """Read the markdown content of the highest-version persisted synthesis."""
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            "SELECT md_path FROM syntheses WHERE job_id = ? ORDER BY version DESC LIMIT 1",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    md_path = job.root / row["md_path"]
+    if not md_path.exists():
+        return None
+    return md_path.read_text(encoding="utf-8")
+
+
+def _load_critique_md(job: Job, md_rel: str) -> str:
+    """Read the rendered markdown for a critique that was just written."""
+    md_path = job.root / md_rel
+    return md_path.read_text(encoding="utf-8")
 
 
 def _make_wait_fn(wait_seq: tuple[int, ...]) -> Callable[[Any], int]:

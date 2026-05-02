@@ -112,6 +112,20 @@ CREATE TABLE IF NOT EXISTS syntheses (
     UNIQUE(job_id, version)
 );
 
+-- Critique passes (paired with syntheses; uses a different model tier)
+CREATE TABLE IF NOT EXISTS critiques (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES jobs(id),
+    version INTEGER NOT NULL,
+    md_path TEXT NOT NULL,
+    model TEXT NOT NULL,
+    cost_usd REAL,
+    should_replan INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(job_id, version)
+);
+
 -- Checkpoints (one per state transition)
 CREATE TABLE IF NOT EXISTS checkpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

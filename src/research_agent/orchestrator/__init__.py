@@ -1,5 +1,10 @@
 """Orchestrator — job lifecycle, planning, research loop, synthesis, critique, checkpointing."""
 
+from research_agent.orchestrator.critique import (
+    CritiqueOutput,
+    Gap,
+    critique,
+)
 from research_agent.orchestrator.errors import FatalError, RetriableError
 from research_agent.orchestrator.loop import (
     HEURISTIC_CHECK_EVERY_N,
@@ -32,6 +37,8 @@ from research_agent.orchestrator.synth import (
 __all__ = [
     "FINAL_TOP_N",
     "HEURISTIC_CHECK_EVERY_N",
+    "CritiqueOutput",
+    "Gap",
     "Handler",
     "MAX_PLAN_VERSIONS",
     "MAX_TASKS_PER_JOB",
@@ -47,6 +54,7 @@ __all__ = [
     "FatalError",
     "RetriableError",
     "cloud_replan",
+    "critique",
     "default_handlers",
     "final_synthesis",
     "initial_plan",
