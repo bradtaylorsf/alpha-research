@@ -1,0 +1,15 @@
+Quarterly research summary.
+
+The autonomous research agent project began as a workspace for capturing patterns
+that recur across investigative work. Findings here cover three areas: connector
+reliability under flaky network conditions, the cost of routing every embedding
+through a local LM Studio process, and the operator experience of rerunning a
+job after a partial failure.
+
+Connector reliability is the dominant story. Roughly two-thirds of failed runs
+trace back to a single transient HTTP error in either the search or fetch
+phase, and most of those would self-recover on a single retry with backoff.
+
+Embedding costs were a non-issue because the local LM Studio path is free.
+The throughput ceiling, however, became the real constraint: a 10K-document
+corpus took roughly twelve minutes to ingest end-to-end on M-series hardware.

@@ -58,6 +58,7 @@ def write_source(
     kind: str | None,
     archive_url: str | None = None,
     fetched_at: int | None = None,
+    embedding: bytes | None = None,
 ) -> int:
     """Write a source under ``job`` with cross-job dedup by sha256.
 
@@ -65,6 +66,10 @@ def write_source(
     + sidecar under that job and inserts a ``sources`` row. Subsequent
     writers (any job) only insert a ``job_sources`` link — no duplicate
     file is written. Returns the source id (new or existing).
+
+    ``embedding`` is the optional packed float32 BLOB written to
+    ``sources.embedding`` for new rows. Reused rows keep whatever
+    embedding (if any) the first writer recorded.
     """
     if not isinstance(raw_content, str) or not raw_content:
         raise ValueError("raw_content must be a non-empty string")
@@ -76,6 +81,8 @@ def write_source(
         raise ValueError(f"kind must be a string or None; got {type(kind).__name__}")
     if archive_url is not None and not isinstance(archive_url, str):
         raise ValueError(f"archive_url must be a string or None; got {type(archive_url).__name__}")
+    if embedding is not None and not isinstance(embedding, bytes):
+        raise ValueError(f"embedding must be bytes or None; got {type(embedding).__name__}")
 
     cleaned = clean_content(raw_content)
     if not cleaned:
@@ -109,10 +116,10 @@ def write_source(
                 cur = conn.execute(
                     """
                     INSERT INTO sources (
-                        sha256, url, title, fetched_at, archive_url, md_path, kind
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        sha256, url, title, fetched_at, archive_url, md_path, kind, embedding
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (sha, url, title, fetched, archive_url, md_rel, kind),
+                    (sha, url, title, fetched, archive_url, md_rel, kind, embedding),
                 )
                 assert cur.lastrowid is not None
                 source_id = int(cur.lastrowid)
