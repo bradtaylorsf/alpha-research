@@ -146,7 +146,7 @@ Drop in occasionally from any terminal. Useful one-liners:
 
 ```bash
 research status "$JOB_ID"
-research logs "$JOB_ID" --tail 20      # last 20 events
+tail -n 20 "jobs/$JOB_ID/events.jsonl"  # last 20 raw event lines
 research logs "$JOB_ID" -f              # live tail (Ctrl-C to exit)
 
 # Quick "is it still healthy?" check.
@@ -265,12 +265,28 @@ mid-synth — see triage table.
 The acceptance bar is "events in each of the four hour-buckets and
 no `task_done` gap > 15 min".
 
+`events.jsonl` records `ts` as an integer Unix epoch (per
+`Event.ts` in `observability/events.py`), so the bucketing below floors
+each timestamp to the hour in epoch arithmetic and converts only at
+display time.
+
 ```bash
 # Hourly bucket count of *all* events: each hour from T0 onward should
-# have a non-trivial number of events.
+# have a non-trivial number of events. Epoch-floor to the hour, render
+# UTC label for human eyeballing.
 jq -r '.ts' "$EVENTS" \
-    | awk -F'[T:]' '{print $1"T"$2":00"}' \
-    | sort | uniq -c
+    | python3 -c '
+import sys, datetime as dt, collections
+buckets = collections.Counter()
+for s in sys.stdin:
+    s = s.strip()
+    if not s: continue
+    bucket = (int(s) // 3600) * 3600
+    buckets[bucket] += 1
+for ep, n in sorted(buckets.items()):
+    label = dt.datetime.fromtimestamp(ep, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:00Z")
+    print(f"{n:6d}  {label}")
+'
 ```
 
 Manually confirm at least four distinct hour-buckets (or three if the
@@ -280,15 +296,16 @@ have non-zero counts.
 ```bash
 # Largest gap between consecutive task_done timestamps, in seconds.
 jq -r 'select(.kind=="task_done") | .ts' "$EVENTS" \
-    | sort \
+    | sort -n \
     | python3 -c '
 import sys, datetime as dt
-ts = [dt.datetime.fromisoformat(s.strip().rstrip("Z")) for s in sys.stdin if s.strip()]
+ts = [int(s.strip()) for s in sys.stdin if s.strip()]
 if len(ts) < 2:
     print("FAIL: <2 task_done events"); sys.exit()
-gaps = [(ts[i+1]-ts[i]).total_seconds() for i in range(len(ts)-1)]
+gaps = [ts[i+1]-ts[i] for i in range(len(ts)-1)]
 mx = max(gaps); mxi = gaps.index(mx)
-print(f"task_done gaps: n={len(gaps)} max={mx:.0f}s at index {mxi} ({ts[mxi]} -> {ts[mxi+1]})")
+to_iso = lambda t: dt.datetime.fromtimestamp(t, tz=dt.timezone.utc).isoformat()
+print(f"task_done gaps: n={len(gaps)} max={mx}s at index {mxi} ({to_iso(ts[mxi])} -> {to_iso(ts[mxi+1])})")
 print("PASS" if mx <= 900 else "FAIL: gap > 15 min")
 '
 ```
@@ -301,9 +318,11 @@ the "long activity gap" row in §6.
 ### AC5 — cost stays within configured cap
 
 ```bash
+# Top-level columns on the `jobs` table — `budget_cap_usd` is mirrored
+# from intake at job-creation time (see storage/db.py SCHEMA_SQL), so a
+# direct SELECT is enough; no json_extract gymnastics required.
 sqlite3 data/index.sqlite \
-    "SELECT id, status, cost_so_far_usd,
-            (SELECT json_extract(intake,'\$.budget_cap_usd') FROM jobs WHERE id='$JOB_ID') AS cap
+    "SELECT id, status, cost_so_far_usd, budget_cap_usd AS cap
      FROM jobs WHERE id='$JOB_ID';"
 
 # Cross-check what the panel renders.
