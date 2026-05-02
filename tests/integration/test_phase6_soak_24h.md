@@ -367,20 +367,28 @@ case "$STATUS" in
 esac
 
 # completion_reason should be one of the expected self-terminations,
-# not 'manual_stop' (unless the operator notes why in the postmortem).
+# not 'user_stopped' (unless the operator notes why in the postmortem).
 sqlite3 data/index.sqlite \
     "SELECT completion_reason FROM jobs WHERE id='$JOB_ID';"
-# Expected: time_cap_hit | budget_cap_hit | planner_done.
+# Expected: goal_complete | budget_cap | task_cap (the values written by
+# daemon.run_daemon, validated against ALLOWED_COMPLETION_REASONS in
+# storage/jobs.py). NB: time_cap is in the allow-list but is not yet
+# enforced by the loop — a 24h soak self-terminates via task_cap (the
+# 10k-task anti-runaway guard) or budget_cap, not a wall-clock cap.
 # Anything else → record under 'Surprises' in postmortem.
 
-# No mid-run resumes. If the operator had to resume the daemon, that
-# breaks "completes without manual intervention".
-jq -r 'select(.kind=="daemon_started") | .ts' "$EVENTS" | wc -l
+# No mid-run resumes. The loop's `job_started` checkpoint (which fires
+# at the top of run_loop) is the canonical "loop started" signal —
+# emitted once per `research start` *and* once per `research resume`.
+# It surfaces in events.jsonl as `kind=checkpoint` with
+# `payload.checkpoint_kind=job_started`.
+jq -r 'select(.kind=="checkpoint" and .payload.checkpoint_kind=="job_started") | .ts' \
+    "$EVENTS" | wc -l
 # Expected: 1 (single launch). >1 means at least one resume happened.
 ```
 
 Pass if status ∈ {completed, stopped}, completion_reason is a
-self-termination, and there's exactly one `daemon_started` event.
+self-termination, and there's exactly one `job_started` checkpoint.
 
 ### AC5 — events.jsonl ERROR/WARN cluster scan
 
@@ -523,8 +531,8 @@ before opening a new issue.
 | Long activity gap mid-run (no `task_done` events for > 15 min) | `jq -r 'select(.kind=="task_done") | .ts' "$EVENTS" | sort` then eyeball | Connector stuck (web_fetch on a hung page), network blip, or a single very slow synth pass | `connectors/<name>` or `loop/perf` |
 | Mac slept mid-run (large unexplained gap, daemon resumed afterwards) | gap analysis from AC3 + check `pmset -g log` for `Sleep`/`Wake` entries inside the gap window | `caffeinate -i -w` not running — operator skipped §3.2, or caffeinate exited early because `-w` saw a stale PID | (operator error; re-run with §3.2 confirmed before walking away) |
 | caffeinate exited within minutes of launch | `ps -p "$CAFFEINATE_PID"` shortly after §3.2 | `-w <pid>` was given the wrong PID (e.g. the *parent* of the daemon, which exits after spawn) | re-run §3.2 with the value from `cat jobs/$JOB_ID/daemon.pid` |
-| Disk-cap pruning fired during soak | `jq 'select(.payload.kind=="source_pruned")' "$EVENTS" | wc -l` | Per-job disk cap (default 10 GB) hit on a content-heavy 24h run; expected behavior per #38 | (informational; if pruning was disruptive, raise `--disk-cap-gb`) |
-| Cost-cap final-pass synth fired | `jq 'select(.payload.checkpoint_kind=="final_pass_synth_started")' "$EVENTS"` | Budget cap hit before time cap; #39 enforcement wrote the report from cached findings | (informational; verify the report is still coherent) |
+| Disk-cap pruning fired during soak | `jq 'select(.kind=="source_pruned")' "$EVENTS" | wc -l` | Per-job disk cap (default 10 GB) hit on a content-heavy 24h run; expected behavior per #38 | (informational; if pruning was disruptive, raise `--disk-cap-gb`) |
+| Cost-cap final-pass synth fired | `jq 'select(.kind=="synthesis_written" and .payload.post_cap==true)' "$EVENTS"` | Budget cap hit; #39 enforcement (`final_synthesis_after_cap` in `orchestrator/synth.py`) wrote the report from cached findings via `frontier_speed`, or from the on-disk template stub if even that tier was out of budget | (informational; verify the report is still coherent) |
 | OpenRouter network blip | `jq 'select(.level=="WARN" and .payload.stage=="openrouter") | .payload' "$EVENTS"` | Transient network issue; tenacity backoff (#37) should have absorbed it | `llm/openrouter` (only if backoff didn't recover and the run died) |
 | LM Studio crashed mid-run | `jq 'select(.payload.stage=="lm_studio_health" and .level=="WARN")' "$EVENTS"` | Local model server crash; auto-recovery health check (#36) should have detected + waited | `infra/local-llm` (only if auto-recovery didn't kick in) |
 | `daemon.pid` present after `research stop --graceful` returned cleanly | `ls -l "$JOB_ROOT/daemon.pid"; ps -p "$DAEMON_PID"` | Daemon still running (final synth slow on a 24h goal — give it up to 15 min), or atexit hook never fired (crash) | `daemon/atexit` (only after the wait window expires) |

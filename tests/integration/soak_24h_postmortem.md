@@ -21,7 +21,7 @@
 | Time cap | 24h |
 | Budget cap | $25.00 |
 | Aggressiveness | `balanced` |
-| `completion_reason` | `<time_cap_hit | budget_cap_hit | planner_done | manual_stop>` |
+| `completion_reason` | `<goal_complete | budget_cap | task_cap | user_stopped>` |
 | Total cost | `$<TOTAL_COST>` |
 | Operator | `<name / handle>` |
 | Machine / OS | `<e.g. MacBook Pro M3 Max, macOS 15.3>` |
@@ -69,7 +69,7 @@ on whether the citations are real / load-bearing or filler>`.
 | AC1 | Goal selected and documented | `<PASS | FAIL>` | `<diff result from playbook AC1>` |
 | AC2 | Time cap 24h, budget $25, aggressiveness `balanced` | `<PASS | FAIL>` | `<sqlite SELECT row>` |
 | AC3 | `caffeinate -i -w <pid>` documented + used | `<PASS | FAIL>` | `<operator attestation: started at <ts>, exited at <ts>; max task_done gap = <Ns>>` |
-| AC4 | Run completed without manual intervention | `<PASS | FAIL>` | `<final status>; <completion_reason>; daemon_started events = <N>` |
+| AC4 | Run completed without manual intervention | `<PASS | FAIL>` | `<final status>; <completion_reason>; job_started checkpoints = <N>` |
 | AC5 | events.jsonl ERROR/WARN cluster scan | `<PASS | FAIL>` | `<top clusters from playbook AC5; each marked fixed-here / filed-as-#NNN / acceptable noise>` |
 | AC6 | Report coherent + cites sources | `<PASS | FAIL>` | `<citation count + framework coverage above>` |
 | AC7 | Cost under cap; Opus spend recorded | `<PASS | FAIL>` | `<TOTAL_COST> ≤ $25.00; Opus spend $<OPUS_COST>` |
