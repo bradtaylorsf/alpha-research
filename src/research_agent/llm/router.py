@@ -32,6 +32,7 @@ from research_agent.storage import db
 from research_agent.storage.jobs import Job
 
 from .budgets import BudgetTracker, TokenUsage
+from .cache import LLMCache, make_key
 
 Tier = Literal[
     "fast",
@@ -73,6 +74,85 @@ def load_models_config(path: Path | str = "config/models.yaml") -> dict[str, Any
     if not isinstance(data["tiers"], dict):
         raise ValueError(f"'tiers' in {p} must be a mapping; got {type(data['tiers']).__name__}")
     return data
+
+
+_PARAM_KEYS: tuple[str, ...] = ("temperature", "top_p", "top_k")
+
+
+class _CachedResult:
+    """Lightweight stand-in for a Pydantic AI ``AgentRunResult`` on cache hits.
+
+    Exposes the same surface the rest of the router/orchestrator expects:
+    ``.output`` (the cached string) and a ``usage()`` callable returning a
+    zero-token :class:`TokenUsage`. No tokens were spent, so cost is $0.
+    """
+
+    __slots__ = ("output", "_usage", "finish_reason")
+
+    def __init__(self, output: str) -> None:
+        self.output = output
+        self._usage = TokenUsage()
+        self.finish_reason = "cache"
+
+    def usage(self) -> TokenUsage:
+        return self._usage
+
+
+def _extract_prompt(args: tuple[Any, ...]) -> str:
+    """Pull the prompt string out of ``agent.run`` positional args.
+
+    Pydantic AI's ``Agent.run`` takes the prompt as the first positional arg
+    when it's a plain string; for richer inputs we fall back to ``repr`` so
+    the cache key still varies with the input shape.
+    """
+    if not args:
+        return ""
+    head = args[0]
+    if isinstance(head, str):
+        return head
+    return repr(args)
+
+
+def _extract_params(kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    """Pull the cache-relevant sampling params out of ``agent.run`` kwargs."""
+    settings = kwargs.get("model_settings")
+    if settings is None:
+        return None
+    if isinstance(settings, dict):
+        source: dict[str, Any] = settings
+    else:
+        source = {k: getattr(settings, k, None) for k in _PARAM_KEYS}
+    out = {k: source[k] for k in _PARAM_KEYS if source.get(k) is not None}
+    return out or None
+
+
+def _extract_tool_defs(agent: Any) -> Any:
+    """Probe a Pydantic AI ``Agent`` for its tool definitions, if any.
+
+    The exact attribute name has shifted across pydantic-ai releases. We
+    probe a small allow-list and return a lightweight ``[{name, schema}]``
+    list — enough to make the cache key sensitive to tool changes without
+    coupling to a specific internal type.
+    """
+    for attr in ("_function_tools", "tools", "_tools"):
+        defs = getattr(agent, attr, None)
+        if defs:
+            return _serialize_tool_defs(defs)
+    return None
+
+
+def _serialize_tool_defs(defs: Any) -> list[dict[str, Any]]:
+    items = list(defs.values()) if isinstance(defs, dict) else list(defs)
+    out: list[dict[str, Any]] = []
+    for t in items:
+        name = getattr(t, "name", None) or getattr(t, "__name__", None) or t.__class__.__name__
+        schema = (
+            getattr(t, "parameters_json_schema", None)
+            or getattr(t, "json_schema", None)
+            or getattr(t, "schema", None)
+        )
+        out.append({"name": str(name), "schema": schema})
+    return out
 
 
 def _extract_usage(result: Any, latency_ms: int) -> TokenUsage:
@@ -128,6 +208,7 @@ class Router:
         *,
         job: Job | None = None,
         db_path: Path | str | None = None,
+        cache: LLMCache | None = None,
     ) -> None:
         if "tiers" not in config:
             raise ValueError("router config missing 'tiers' key")
@@ -142,6 +223,7 @@ class Router:
         self.budget = budget
         self.job = job
         self.db_path = Path(db_path) if db_path is not None else None
+        self.cache = cache
         self._model_cache: dict[str, OpenAIModel] = {}
 
     # ---- Provider wiring ---------------------------------------------------
@@ -223,6 +305,7 @@ class Router:
         Local-tier failures are *not* silently rerouted to cloud (per §16);
         the original exception propagates to the caller.
         """
+        cache_enabled = bool(kwargs.pop("cache", False))
         if tier not in self.tiers:
             raise KeyError(f"unknown tier: {tier!r}")
         spec = self.tiers[tier]
@@ -231,6 +314,28 @@ class Router:
         timeout_s = spec.get("timeout_s")
         is_cloud = provider == "openrouter"
         fallback_used = False
+
+        cache_key: str | None = None
+        if cache_enabled and self.cache is not None:
+            cache_key = make_key(
+                provider,
+                model_name,
+                _extract_prompt(args),
+                _extract_params(kwargs),
+                _extract_tool_defs(agent),
+            )
+            hit = self.cache.get(cache_key)
+            if hit is not None:
+                self._emit_llm_call_event(
+                    tier=tier,
+                    provider=provider,
+                    model=model_name,
+                    usage=TokenUsage(),
+                    cost_usd=0.0,
+                    fallback_used=False,
+                    cached=True,
+                )
+                return _CachedResult(hit)
 
         if is_cloud:
             self.budget.precheck(tier)
@@ -261,6 +366,15 @@ class Router:
                 usage=usage,
             )
 
+        if cache_enabled and self.cache is not None and cache_key is not None:
+            output = getattr(result, "output", None)
+            if isinstance(output, str):
+                self.cache.put(
+                    cache_key,
+                    output,
+                    model_meta={"tier": tier, "provider": provider, "model": model_name},
+                )
+
         self._emit_llm_call_event(
             tier=tier,
             provider=provider,
@@ -268,6 +382,7 @@ class Router:
             usage=usage,
             cost_usd=cost_usd,
             fallback_used=fallback_used,
+            cached=False,
         )
 
         return result
@@ -340,6 +455,7 @@ class Router:
         usage: TokenUsage,
         cost_usd: float,
         fallback_used: bool,
+        cached: bool = False,
     ) -> None:
         if self.job is None:
             return
@@ -353,6 +469,7 @@ class Router:
             "cost_usd": cost_usd,
             "finish_reason": usage.finish_reason,
             "fallback_used": fallback_used,
+            "cached": cached,
         }
         # Round-trip through json so the payload always contains JSON-safe
         # primitives — `emit` re-serializes in the SQL mirror.

@@ -25,6 +25,22 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+config_app = typer.Typer(
+    name="config",
+    help="Configuration / state management commands.",
+    no_args_is_help=True,
+)
+app.add_typer(config_app)
+
+
+@config_app.command(name="cache-clear")
+def cache_clear_command() -> None:
+    """Wipe the LLM response cache file."""
+    from research_agent.llm.cache import DEFAULT_CACHE_PATH, LLMCache
+
+    LLMCache.wipe_file(DEFAULT_CACHE_PATH)
+    typer.echo(f"cleared {DEFAULT_CACHE_PATH}")
+
 
 def _version_callback(value: bool) -> None:
     if value:

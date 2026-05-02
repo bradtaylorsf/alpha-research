@@ -102,9 +102,15 @@ class _FakeUsage:
 
 
 class _FakeResult:
-    def __init__(self, usage: _FakeUsage | None = None) -> None:
+    def __init__(
+        self,
+        usage: _FakeUsage | None = None,
+        *,
+        output: str | None = None,
+    ) -> None:
         self._usage = usage or _FakeUsage()
         self.finish_reason = "stop"
+        self.output = output if output is not None else "fake-output"
 
     def usage(self) -> _FakeUsage:
         return self._usage
@@ -638,3 +644,194 @@ def test_budget_charge_persists_to_ledger_and_jobs_total(job: Job, db_path: Path
     assert len(rows) == 1
     assert rows[0]["cost_usd"] == pytest.approx(expected)
     assert cost_so_far == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# Router ↔ LLMCache integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_skips_agent_run_and_budget_charge(
+    monkeypatch: pytest.MonkeyPatch,
+    models_config: dict[str, Any],
+    db_path: Path,
+    tmp_path: Path,
+    job: Job,
+) -> None:
+    """Same prompt+params twice → second call serves from cache."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    from research_agent.llm.cache import LLMCache
+
+    cache = LLMCache(tmp_path / "llm_cache.sqlite")
+    budget = _RecordingBudget()
+    router = Router(
+        models_config,
+        budget,  # type: ignore[arg-type]
+        job=job,
+        db_path=db_path,
+        cache=cache,
+    )
+
+    agent = _FakeAgent(result=_FakeResult(output="cached body"))
+
+    # Miss → real call, cache write.
+    out1 = await router.call("frontier_speed", agent, "summarize this", cache=True)
+    assert out1.output == "cached body"
+    assert len(agent.calls) == 1
+    assert len(budget.precheck_calls) == 1
+    assert len(budget.charge_calls) == 1
+
+    # Hit → no agent.run, no precheck, no charge.
+    out2 = await router.call("frontier_speed", agent, "summarize this", cache=True)
+    assert out2.output == "cached body"
+    assert len(agent.calls) == 1, "cache hit must not invoke agent.run again"
+    assert len(budget.precheck_calls) == 1, "cache hit must skip budget precheck"
+    assert len(budget.charge_calls) == 1, "cache hit must skip budget charge"
+
+    # Event payload distinguishes hits via cached=True.
+    events_path = job.root / "events.jsonl"
+    import json as _json
+
+    payloads = []
+    for line in events_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        ev = _json.loads(line)
+        if ev.get("kind") == "llm_call":
+            payloads.append(ev["payload"])
+    cached_flags = [p.get("cached") for p in payloads]
+    assert cached_flags.count(True) == 1
+    assert cached_flags.count(False) == 1
+    cache.close()
+
+
+@pytest.mark.asyncio
+async def test_cache_default_off_does_not_consult_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    models_config: dict[str, Any],
+    db_path: Path,
+    tmp_path: Path,
+    job: Job,
+) -> None:
+    """Without ``cache=True`` the router never reads or writes the cache."""
+    monkeypatch.delenv("LMSTUDIO_BASE_URL", raising=False)
+    from research_agent.llm.cache import LLMCache, make_key
+
+    cache = LLMCache(tmp_path / "llm_cache.sqlite")
+    budget = _RecordingBudget()
+    router = Router(
+        models_config,
+        budget,  # type: ignore[arg-type]
+        job=job,
+        db_path=db_path,
+        cache=cache,
+    )
+    agent = _FakeAgent(result=_FakeResult(output="hello"))
+    await router.call("general", agent, "x")
+    # No write
+    spec = models_config["tiers"]["general"]
+    key = make_key(spec["provider"], spec["model"], "x", None, None)
+    assert cache.get(key) is None
+    cache.close()
+
+
+@pytest.mark.asyncio
+async def test_cache_keys_split_on_prompt_and_params(
+    monkeypatch: pytest.MonkeyPatch,
+    models_config: dict[str, Any],
+    db_path: Path,
+    tmp_path: Path,
+    job: Job,
+) -> None:
+    """Different prompt or sampling params → independent cache entries."""
+    monkeypatch.delenv("LMSTUDIO_BASE_URL", raising=False)
+    from research_agent.llm.cache import LLMCache
+
+    cache = LLMCache(tmp_path / "llm_cache.sqlite")
+    budget = _RecordingBudget()
+    router = Router(
+        models_config,
+        budget,  # type: ignore[arg-type]
+        job=job,
+        db_path=db_path,
+        cache=cache,
+    )
+
+    a = _FakeAgent(result=_FakeResult(output="A"))
+    b = _FakeAgent(result=_FakeResult(output="B"))
+    c = _FakeAgent(result=_FakeResult(output="C"))
+
+    await router.call("general", a, "prompt-1", cache=True)
+    await router.call("general", b, "prompt-2", cache=True)
+    await router.call("general", c, "prompt-1", cache=True, model_settings={"temperature": 0.7})
+
+    # All three must have actually run — different cache keys.
+    assert len(a.calls) == 1
+    assert len(b.calls) == 1
+    assert len(c.calls) == 1
+
+    # Re-run prompt-1 with no params → hits the first entry.
+    again = _FakeAgent(result=_FakeResult(output="should-not-be-used"))
+    out = await router.call("general", again, "prompt-1", cache=True)
+    assert out.output == "A"
+    assert len(again.calls) == 0
+    cache.close()
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_emits_zero_cost_event(
+    monkeypatch: pytest.MonkeyPatch,
+    models_config: dict[str, Any],
+    db_path: Path,
+    tmp_path: Path,
+    job: Job,
+) -> None:
+    """The llm_call event for a hit shows zero tokens/cost."""
+    monkeypatch.delenv("LMSTUDIO_BASE_URL", raising=False)
+    from research_agent.llm.cache import LLMCache, make_key
+
+    cache = LLMCache(tmp_path / "llm_cache.sqlite")
+    spec = models_config["tiers"]["general"]
+    cache.put(
+        make_key(spec["provider"], spec["model"], "preloaded prompt", None, None),
+        "preloaded answer",
+    )
+
+    budget = _RecordingBudget()
+    router = Router(
+        models_config,
+        budget,  # type: ignore[arg-type]
+        job=job,
+        db_path=db_path,
+        cache=cache,
+    )
+
+    agent = _FakeAgent(result=_FakeResult(output="should-not-run"))
+    out = await router.call("general", agent, "preloaded prompt", cache=True)
+    assert out.output == "preloaded answer"
+    assert len(agent.calls) == 0
+
+    # No llm_calls ledger row written for a pure cache hit.
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute("SELECT COUNT(*) FROM llm_calls WHERE job_id = ?", (job.id,)).fetchone()
+    finally:
+        conn.close()
+    assert rows[0] == 0
+
+    import json as _json
+
+    events_path = job.root / "events.jsonl"
+    payloads = [
+        _json.loads(line)["payload"]
+        for line in events_path.read_text().splitlines()
+        if line.strip() and _json.loads(line).get("kind") == "llm_call"
+    ]
+    assert len(payloads) == 1
+    p = payloads[0]
+    assert p["cached"] is True
+    assert p["input_tokens"] == 0
+    assert p["output_tokens"] == 0
+    assert p["cost_usd"] == 0.0
+    cache.close()
