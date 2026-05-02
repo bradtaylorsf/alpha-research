@@ -1,0 +1,349 @@
+"""Per-job folder management and the ``jobs`` row contract.
+
+Implements the load-bearing convention from §4 of the implementation guide:
+every job is a self-contained folder under ``jobs/<job-id>/`` with a fixed
+sidecar layout (``job.json``, ``intake.json``, ``goal.md``, the ``plan/``,
+``findings/``, ``sources/``, ``synthesis/``, ``critique/``, ``report.history/``
+subfolders, and an append-only ``events.jsonl``). The cross-job ``jobs`` table
+in :mod:`research_agent.storage.db` mirrors the canonical metadata so the
+future UI and the ``research list`` CLI can query without scanning disk.
+
+Job IDs are deterministic ``YYYY-MM-DD-<slug>`` strings derived from the
+intake goal. The slug is normalized aggressively (lowercased, non-alphanum
+collapsed to ``-``, capped at 60 chars) and rejects any sequence that could
+escape the jobs root via path traversal.
+
+All on-disk writes go through the atomic ``*.tmp`` + :func:`os.replace`
+pattern from §16 so a crashed process never leaves half-written sidecars
+that a tail-watching reader could pick up.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import time
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
+from pathlib import Path
+from typing import Any
+
+from research_agent.storage import db
+
+DEFAULT_JOBS_ROOT = Path("jobs")
+
+# Daemon kill escalation window. Module-level so tests can monkeypatch it
+# down from 10s to keep the suite fast.
+KILL_ESCALATION_SECONDS = 10.0
+KILL_POLL_INTERVAL_SECONDS = 0.5
+
+_SUBDIRS = ("plan", "findings", "sources", "synthesis", "critique", "report.history")
+_JOB_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,59}$")
+_SLUG_FORBIDDEN = ("/", "\\", "..")
+
+
+def _slugify(text: str, max_len: int = 60) -> str:
+    """Normalize ``text`` into a safe slug for a job folder name.
+
+    Lowercases, collapses runs of non-alphanumeric characters into ``-``,
+    strips leading/trailing dashes, truncates to ``max_len``. Raises
+    :class:`ValueError` if the input contains a path-traversal sequence
+    or normalizes to an empty string.
+    """
+    if not isinstance(text, str):
+        raise ValueError(f"slug input must be a string; got {type(text).__name__}")
+
+    for bad in _SLUG_FORBIDDEN:
+        if bad in text:
+            raise ValueError(f"slug input contains forbidden sequence {bad!r}: {text!r}")
+
+    lowered = text.strip().lower()
+    collapsed = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
+    if not collapsed:
+        raise ValueError(f"slug input normalized to empty string: {text!r}")
+
+    truncated = collapsed[:max_len].rstrip("-")
+    if not truncated:
+        raise ValueError(f"slug input collapsed to empty after truncation: {text!r}")
+    return truncated
+
+
+def _atomic_write_text(path: Path, data: str) -> None:
+    """Write ``data`` to ``path`` via a sibling ``*.tmp`` + :func:`os.replace`.
+
+    Per §16 anti-patterns: a tailing reader (editor, future UI) must never
+    see a half-written file. The temp file is colocated with the target so
+    ``os.replace`` is a same-filesystem atomic rename.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(data, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _atomic_write_json(path: Path, obj: Any) -> None:
+    _atomic_write_text(path, json.dumps(obj, indent=2, sort_keys=True) + "\n")
+
+
+def _now_epoch() -> int:
+    return int(time.time())
+
+
+def _validate_job_id(job_id: str) -> None:
+    if not isinstance(job_id, str) or not _JOB_ID_RE.match(job_id):
+        raise ValueError(f"invalid job id: {job_id!r}")
+
+
+@dataclass
+class Job:
+    """A single research job — its folder, its DB row, and lifecycle ops."""
+
+    id: str
+    root: Path
+    goal: str
+    domain: str | None
+    status: str
+    intake: dict[str, Any]
+    created_at: int
+    db_path: Path = field(default=db.DEFAULT_DB_PATH)
+
+    # ---- Construction --------------------------------------------------
+
+    @classmethod
+    def create(
+        cls,
+        intake: dict[str, Any],
+        *,
+        jobs_root: Path | str = DEFAULT_JOBS_ROOT,
+        db_path: Path | str = db.DEFAULT_DB_PATH,
+        today: date | None = None,
+    ) -> Job:
+        """Materialize a new job: folder + sidecars + ``jobs`` row.
+
+        ``intake`` must include ``goal``. Optional keys: ``domain``,
+        ``time_cap_hours``, ``budget_cap_usd``, ``aggressiveness``.
+        """
+        if not isinstance(intake, dict):
+            raise TypeError(f"intake must be a dict; got {type(intake).__name__}")
+        goal = intake.get("goal")
+        if not isinstance(goal, str) or not goal.strip():
+            raise ValueError("intake['goal'] must be a non-empty string")
+
+        slug = _slugify(goal)
+        day = today or datetime.now(UTC).date()
+        job_id = f"{day:%Y-%m-%d}-{slug}"
+        # Re-validate composed id — defensive against future slug rules.
+        _validate_job_id(job_id)
+
+        jobs_root_p = Path(jobs_root)
+        db_path_p = Path(db_path)
+        root = jobs_root_p / job_id
+
+        if root.exists():
+            raise FileExistsError(f"job folder already exists: {root}")
+
+        root.mkdir(parents=True, exist_ok=False)
+        for sub in _SUBDIRS:
+            (root / sub).mkdir()
+
+        now = _now_epoch()
+        domain = intake.get("domain")
+        status = "pending"
+
+        job_meta = {
+            "id": job_id,
+            "goal": goal,
+            "domain": domain,
+            "status": status,
+            "created_at": now,
+            "intake": intake,
+        }
+        _atomic_write_json(root / "job.json", job_meta)
+        _atomic_write_json(root / "intake.json", intake)
+        _atomic_write_text(root / "goal.md", goal.strip() + "\n")
+        # Touch events.jsonl so tail-followers don't error on a missing file.
+        _atomic_write_text(root / "events.jsonl", "")
+
+        intake_json = json.dumps(intake, sort_keys=True)
+        conn = db.connect(db_path_p)
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO jobs (
+                        id, goal, domain, status, intake_json,
+                        time_cap_hours, budget_cap_usd, aggressiveness,
+                        created_at, last_activity_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        goal,
+                        domain,
+                        status,
+                        intake_json,
+                        intake.get("time_cap_hours"),
+                        intake.get("budget_cap_usd"),
+                        intake.get("aggressiveness"),
+                        now,
+                        now,
+                    ),
+                )
+        finally:
+            conn.close()
+
+        return cls(
+            id=job_id,
+            root=root,
+            goal=goal,
+            domain=domain,
+            status=status,
+            intake=intake,
+            created_at=now,
+            db_path=db_path_p,
+        )
+
+    @classmethod
+    def load(
+        cls,
+        job_id: str,
+        *,
+        jobs_root: Path | str = DEFAULT_JOBS_ROOT,
+        db_path: Path | str = db.DEFAULT_DB_PATH,
+    ) -> Job:
+        """Rehydrate a job from disk + DB. Raises if either is missing."""
+        _validate_job_id(job_id)
+
+        jobs_root_p = Path(jobs_root)
+        db_path_p = Path(db_path)
+        root = jobs_root_p / job_id
+
+        job_json = root / "job.json"
+        if not job_json.exists():
+            raise FileNotFoundError(f"job folder missing: {root}")
+
+        meta = json.loads(job_json.read_text(encoding="utf-8"))
+        if meta.get("id") != job_id:
+            raise ValueError(f"job.json id mismatch: folder={job_id!r} meta={meta.get('id')!r}")
+
+        conn = db.connect(db_path_p)
+        try:
+            row = conn.execute(
+                "SELECT goal, domain, status, intake_json, created_at FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if row is None:
+            raise KeyError(f"job row missing in DB: {job_id}")
+
+        return cls(
+            id=job_id,
+            root=root,
+            goal=row["goal"],
+            domain=row["domain"],
+            status=row["status"],
+            intake=json.loads(row["intake_json"]),
+            created_at=int(row["created_at"]),
+            db_path=db_path_p,
+        )
+
+    # ---- Lifecycle ops -------------------------------------------------
+
+    def set_status(self, state: str) -> None:
+        """Update ``status`` + ``last_activity_at`` in the DB and mirror to ``job.json``."""
+        if not isinstance(state, str) or not state:
+            raise ValueError(f"status must be a non-empty string; got {state!r}")
+
+        now = _now_epoch()
+        conn = db.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE jobs SET status = ?, last_activity_at = ? WHERE id = ?",
+                    (state, now, self.id),
+                )
+        finally:
+            conn.close()
+
+        self.status = state
+        # Mirror into job.json so a disk-only consumer sees the same state.
+        job_json = self.root / "job.json"
+        meta = json.loads(job_json.read_text(encoding="utf-8"))
+        meta["status"] = state
+        meta["last_activity_at"] = now
+        _atomic_write_json(job_json, meta)
+
+    def request_stop(self) -> None:
+        """Drop a ``STOP`` flag the daemon polls between tasks."""
+        _atomic_write_text(self.root / "STOP", "")
+
+    def kill(self) -> None:
+        """SIGTERM the daemon PID; escalate to SIGKILL after the grace window."""
+        pid_file = self.root / "daemon.pid"
+        if not pid_file.exists():
+            raise FileNotFoundError(f"no PID file at {pid_file}")
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except ValueError as e:
+            raise ValueError(f"PID file at {pid_file} is not an integer") from e
+
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return  # already dead
+
+        deadline = time.monotonic() + KILL_ESCALATION_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(KILL_POLL_INTERVAL_SECONDS)
+
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+
+
+def list_jobs(
+    status: str | None = None,
+    *,
+    db_path: Path | str = db.DEFAULT_DB_PATH,
+) -> list[dict[str, Any]]:
+    """Return job summaries from the ``jobs`` table (DB-only, never folder-scan).
+
+    Per the §4 contract the DB is canonical for cross-job queries; the folders
+    can lag (e.g. a folder was archived) and a folder scan would race the
+    daemon's writes. Newest first.
+    """
+    db_path_p = Path(db_path)
+    conn = db.connect(db_path_p)
+    try:
+        sql = (
+            "SELECT id, goal, domain, status, created_at, last_activity_at,"
+            " cost_so_far_usd FROM jobs"
+        )
+        params: tuple[Any, ...] = ()
+        if status is not None:
+            sql += " WHERE status = ?"
+            params = (status,)
+        sql += " ORDER BY created_at DESC"
+        rows = conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+    return [dict(row) for row in rows]
+
+
+__all__ = [
+    "DEFAULT_JOBS_ROOT",
+    "KILL_ESCALATION_SECONDS",
+    "KILL_POLL_INTERVAL_SECONDS",
+    "Job",
+    "list_jobs",
+]
