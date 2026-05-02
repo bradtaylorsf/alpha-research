@@ -116,6 +116,31 @@ def _smoke_news(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_reddit(query: str) -> str:
+    """Smoke wrapper: run reddit.search and print top hits formatted.
+
+    Lets a human eyeball whether old.reddit.com selectors still parse
+    cleanly without firing the full agent loop.
+    """
+    from research_agent.tools import reddit
+
+    async def _run() -> str:
+        results = await reddit.search(query)
+        if not results:
+            return f"reddit search returned no results for {query!r}"
+        lines: list[str] = [f"total: {len(results)}"]
+        for hit in results[:10]:
+            sub = hit.extras.get("subreddit") or "?"
+            score = hit.extras.get("score")
+            num_comments = hit.extras.get("num_comments")
+            lines.append(
+                f"- {hit.title}\n  {hit.url}\n  r/{sub} | score={score} | comments={num_comments}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_web_fetch(url: str) -> str:
     """Smoke wrapper for web_fetch: print word count, path, preview, archive URL.
 
@@ -161,6 +186,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "local_corpus": _smoke_local_corpus,
     "arxiv": _smoke_arxiv,
     "news": _smoke_news,
+    "reddit": _smoke_reddit,
 }
 
 __all__ = ["TOOL_REGISTRY", "SearchResult", "Source", "SourceKind"]
