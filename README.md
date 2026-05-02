@@ -77,7 +77,23 @@ research view <job-id> --sources   # generated list of recorded sources
 research logs <job-id>             # print existing events.jsonl entries
 research logs <job-id> -f          # follow appended events
 research logs <job-id> --level ERROR
+
+research search "<query>"          # FTS5 over findings + sources (cross-job)
+research search "<query>" --job <job-id>     # scope to one job
+research search "<query>" --kind findings    # findings only (default: both)
+research search "<query>" --kind sources     # sources only
+research search "<query>" --json             # machine-readable list
 ```
+
+`research search` runs the user's query through SQLite FTS5 against
+`findings_fts` (claim text) and `sources_fts` (source titles), ordered by
+the BM25 score (lower is better). Snippet highlights come from the FTS5
+`snippet()` function — the Rich table renders matched terms in bold yellow;
+the `--json` payload preserves them as literal `[`/`]` markers. Source rows
+join through `job_sources`, so the `--job` filter correctly excludes
+sources fetched only by other jobs even when the underlying content is
+shared. FTS5 syntax errors (e.g. unbalanced quotes) exit `1` with a clear
+`FTS5 query error: ...` line on stderr.
 
 ### Config verbs
 

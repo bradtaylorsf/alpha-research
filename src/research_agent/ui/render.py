@@ -242,6 +242,35 @@ def tail_events_jsonl(
             yield ev
 
 
+def render_search_table(results: list[dict[str, Any]]) -> Table:
+    """Render a Rich table for `research search` results."""
+    table = Table(title="search results", show_lines=False)
+    table.add_column("score")
+    table.add_column("kind")
+    table.add_column("job_id", overflow="fold")
+    table.add_column("snippet", overflow="fold")
+    for row in results:
+        snippet = str(row.get("snippet", ""))
+        snippet = snippet.replace("[", "[bold yellow]").replace("]", "[/]")
+        score = row.get("score")
+        try:
+            score_str = f"{float(score):.2f}"  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            score_str = "—"
+        table.add_row(
+            score_str,
+            str(row.get("kind", "")),
+            str(row.get("job_id") or "—"),
+            snippet,
+        )
+    return table
+
+
+def search_results_to_json(results: list[dict[str, Any]]) -> str:
+    """Serialize search results for `--json` callers."""
+    return json.dumps(results, indent=2, sort_keys=True, default=str)
+
+
 def format_event_line(event: dict[str, Any]) -> str:
     """One-line printable form of an event for `research logs`."""
     ts = event.get("ts", "?")
@@ -260,6 +289,8 @@ __all__ = [
     "jobs_to_json",
     "load_status_data",
     "render_jobs_table",
+    "render_search_table",
     "render_status_panel",
+    "search_results_to_json",
     "tail_events_jsonl",
 ]

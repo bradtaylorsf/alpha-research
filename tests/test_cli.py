@@ -579,3 +579,134 @@ def test_smoke_tool_invokes_registered_callable(smoke_repo, monkeypatch):
         assert "echo:ping" in result.stdout
     finally:
         TOOL_REGISTRY.pop("echo", None)
+
+
+# ---------------------------------------------------------------------------
+# search verb
+# ---------------------------------------------------------------------------
+
+
+def _seed_search_data(repo: Path) -> tuple[Job, Job]:
+    """Create two jobs with seeded findings/sources, then rebuild FTS indexes."""
+    job_a = _make_synthetic_job(repo, goal="alpha quantum job", today=date(2026, 5, 1))
+    job_b = _make_synthetic_job(repo, goal="beta classical job", today=date(2026, 5, 2))
+
+    now = int(time.time())
+    conn = db.connect(repo / "data" / "index.sqlite")
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO findings"
+                " (job_id, md_path, claim, confidence, source_ids, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (job_a.id, "findings/000001.md", "quantum mechanics insight", 0.9, "[]", now),
+            )
+            conn.execute(
+                "INSERT INTO findings"
+                " (job_id, md_path, claim, confidence, source_ids, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (job_b.id, "findings/000001.md", "quantum supremacy paper", 0.8, "[]", now),
+            )
+            conn.execute(
+                "INSERT INTO findings"
+                " (job_id, md_path, claim, confidence, source_ids, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (job_a.id, "findings/000002.md", "classical mechanics review", 0.6, "[]", now),
+            )
+
+            cur = conn.execute(
+                "INSERT INTO sources (sha256, url, title, fetched_at, md_path, kind)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                ("a" * 64, "http://x", "Quantum source title", now, "sources/a.md", "web"),
+            )
+            sid = cur.lastrowid
+            conn.execute(
+                "INSERT INTO job_sources (job_id, source_id) VALUES (?, ?)",
+                (job_a.id, sid),
+            )
+
+            conn.execute("INSERT INTO findings_fts(findings_fts) VALUES('rebuild')")
+            conn.execute("INSERT INTO sources_fts(sources_fts) VALUES('rebuild')")
+    finally:
+        conn.close()
+
+    return job_a, job_b
+
+
+def test_search_json_emits_results(isolated_jobs_repo: Path):
+    _seed_search_data(isolated_jobs_repo)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["search", "quantum", "--json"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert isinstance(payload, list)
+    assert len(payload) >= 1
+    expected = {"kind", "score", "job_id", "snippet", "id", "md_path", "title_or_claim"}
+    for row in payload:
+        assert expected <= row.keys()
+
+
+def test_search_empty_result_zero_exit(isolated_jobs_repo: Path):
+    _seed_search_data(isolated_jobs_repo)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["search", "nonexistenttoken", "--json"])
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout) == []
+
+
+def test_search_kind_flag_filters_output(isolated_jobs_repo: Path):
+    _seed_search_data(isolated_jobs_repo)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["search", "quantum", "--kind", "findings", "--json"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload
+    assert all(r["kind"] == "finding" for r in payload)
+
+
+def test_search_job_flag_scopes_to_job(isolated_jobs_repo: Path):
+    job_a, _job_b = _seed_search_data(isolated_jobs_repo)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["search", "quantum", "--job", job_a.id, "--json"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload
+    assert all(r["job_id"] == job_a.id for r in payload)
+
+
+def test_search_invalid_kind_exit_code_2(isolated_jobs_repo: Path):
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["search", "quantum", "--kind", "bogus"])
+    assert result.exit_code == 2
+    combined = result.stdout + (result.stderr or "")
+    assert "kind" in combined.lower()
+
+
+def test_search_unknown_job_errors(isolated_jobs_repo: Path):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        ["search", "quantum", "--job", "2026-05-02-does-not-exist", "--json"],
+    )
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "job not found" in combined
+    assert "Traceback" not in combined
+
+
+def test_search_no_results_table_message(isolated_jobs_repo: Path):
+    _seed_search_data(isolated_jobs_repo)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["search", "nonexistenttoken"])
+    assert result.exit_code == 0, result.stdout
+    assert "(no results)" in result.stdout
+
+
+def test_search_malformed_query_exits_one(isolated_jobs_repo: Path):
+    _seed_search_data(isolated_jobs_repo)
+    runner = CliRunner()
+    # Unbalanced quotes are an FTS5 syntax error.
+    result = runner.invoke(cli.app, ["search", '"unterminated', "--json"])
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "FTS5 query error" in combined
