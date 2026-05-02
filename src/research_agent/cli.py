@@ -381,6 +381,67 @@ def search_command(
     Console().print(render.render_search_table(results))
 
 
+@app.command(name="stop")
+def stop_command(
+    job_id: str = typer.Argument(..., help="Job id (e.g. 2026-05-02-some-slug)."),
+    graceful: bool = typer.Option(
+        True,
+        "--graceful/--kill",
+        help="Graceful stop drops a STOP flag; --kill SIGTERMs then SIGKILLs.",
+    ),
+) -> None:
+    """Stop a running job, gracefully (default) or hard-killing the daemon."""
+    job = _load_job_or_exit(job_id)
+
+    if graceful:
+        job.request_stop()
+        typer.echo("Stop requested; daemon will finish current task and synthesize.")
+        return
+
+    try:
+        job.kill()
+    except FileNotFoundError:
+        typer.echo(f"no daemon PID file for job {job_id}", err=True)
+        raise typer.Exit(code=1) from None
+
+    pid_file = job.root / "daemon.pid"
+    try:
+        pid_file.unlink()
+    except FileNotFoundError:
+        pass
+    typer.echo(f"Killed daemon for job {job_id}.")
+
+
+@app.command(name="resume")
+def resume_command(
+    job_id: str = typer.Argument(..., help="Job id (e.g. 2026-05-02-some-slug)."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Resume even if the job is in a terminal state (completed/failed).",
+    ),
+) -> None:
+    """Restart a stranded job's daemon — checkpoint-restore happens at startup."""
+    job = _load_job_or_exit(job_id)
+
+    if daemon.is_daemon_alive(job.id):
+        typer.echo(
+            f"job {job_id} is already running (pid file present and process alive)",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if job.status in {"completed", "failed"} and not force:
+        typer.echo(
+            f"job {job_id} is {job.status}; pass --force to resume anyway",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    pid = daemon.spawn_daemon(job.id)
+    typer.echo(f"Resumed job {job.id} (daemon pid {pid}).")
+
+
 @app.command(name="logs")
 def logs_command(
     job_id: str = typer.Argument(..., help="Job id (e.g. 2026-05-02-some-slug)."),

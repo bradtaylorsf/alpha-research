@@ -456,6 +456,264 @@ def test_view_unknown_job_errors(isolated_jobs_repo: Path):
 
 
 # ---------------------------------------------------------------------------
+# stop / resume verbs
+# ---------------------------------------------------------------------------
+
+
+def test_stop_graceful_writes_stop_flag(isolated_jobs_repo: Path):
+    job = _make_synthetic_job(isolated_jobs_repo)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["stop", job.id])
+    assert result.exit_code == 0, result.stdout
+    assert "Stop requested" in result.stdout
+    assert (job.root / "STOP").exists()
+
+
+def test_stop_graceful_is_default_no_kill_called(isolated_jobs_repo: Path, monkeypatch):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    called = {"n": 0}
+
+    def _kill(self):
+        called["n"] += 1
+
+    monkeypatch.setattr(cli.Job, "kill", _kill)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["stop", job.id])
+    assert result.exit_code == 0, result.stdout
+    assert called["n"] == 0
+
+
+def test_stop_kill_sends_sigterm_and_removes_pid_file(isolated_jobs_repo: Path, monkeypatch):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    pid_file = job.root / "daemon.pid"
+    pid_file.write_text("99999\n", encoding="utf-8")
+
+    called = {"n": 0}
+
+    def _kill(self):
+        called["n"] += 1
+
+    monkeypatch.setattr(cli.Job, "kill", _kill)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["stop", job.id, "--kill"])
+    assert result.exit_code == 0, result.stdout
+    assert called["n"] == 1
+    assert not pid_file.exists()
+    assert "Killed daemon" in result.stdout
+
+
+def test_stop_kill_no_pid_file_errors_clearly(isolated_jobs_repo: Path):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    # No daemon.pid present — Job.kill raises FileNotFoundError.
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["stop", job.id, "--kill"])
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "no daemon PID file" in combined
+    assert "Traceback" not in combined
+
+
+def test_stop_unknown_job_errors(isolated_jobs_repo: Path):
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["stop", "2026-05-02-does-not-exist"])
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "job not found" in combined
+    assert "Traceback" not in combined
+
+
+def test_resume_refuses_when_daemon_alive(isolated_jobs_repo: Path, monkeypatch):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    monkeypatch.setattr(cli.daemon, "is_daemon_alive", lambda _job_id: True)
+    spawn_called = {"n": 0}
+    monkeypatch.setattr(
+        cli.daemon,
+        "spawn_daemon",
+        lambda _job_id: spawn_called.__setitem__("n", spawn_called["n"] + 1) or 1,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["resume", job.id])
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "already running" in combined
+    assert spawn_called["n"] == 0
+
+
+def test_resume_refuses_completed_without_force(isolated_jobs_repo: Path, monkeypatch):
+    job = _make_synthetic_job(isolated_jobs_repo, status="completed")
+    monkeypatch.setattr(cli.daemon, "is_daemon_alive", lambda _job_id: False)
+    spawn_called: dict[str, object] = {"job_id": None}
+
+    def _fake_spawn(job_id: str) -> int:
+        spawn_called["job_id"] = job_id
+        return 4242
+
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", _fake_spawn)
+
+    runner = CliRunner()
+    refused = runner.invoke(cli.app, ["resume", job.id])
+    assert refused.exit_code == 1
+    combined = refused.stdout + (refused.stderr or "")
+    assert "completed" in combined
+    assert "--force" in combined
+    assert spawn_called["job_id"] is None
+
+    forced = runner.invoke(cli.app, ["resume", job.id, "--force"])
+    assert forced.exit_code == 0, forced.stdout
+    assert spawn_called["job_id"] == job.id
+    assert "Resumed job" in forced.stdout
+    assert "4242" in forced.stdout
+
+
+def test_resume_failed_without_force_is_refused(isolated_jobs_repo: Path, monkeypatch):
+    job = _make_synthetic_job(isolated_jobs_repo, status="failed")
+    monkeypatch.setattr(cli.daemon, "is_daemon_alive", lambda _job_id: False)
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 1)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["resume", job.id])
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "failed" in combined
+    assert "--force" in combined
+
+
+def test_resume_pending_job_spawns_daemon(isolated_jobs_repo: Path, monkeypatch):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    monkeypatch.setattr(cli.daemon, "is_daemon_alive", lambda _job_id: False)
+    captured: dict[str, object] = {}
+
+    def _fake_spawn(job_id: str) -> int:
+        captured["job_id"] = job_id
+        return 7777
+
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", _fake_spawn)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["resume", job.id])
+    assert result.exit_code == 0, result.stdout
+    assert captured["job_id"] == job.id
+    assert "7777" in result.stdout
+
+
+def test_stop_graceful_then_resume_does_not_duplicate_findings(
+    isolated_jobs_repo: Path, monkeypatch
+):
+    """End-to-end: graceful stop preserves done tasks; resume re-runs none of them."""
+    import asyncio as _asyncio
+
+    from research_agent.orchestrator.loop import run_loop
+    from research_agent.orchestrator.plan import Plan, Subgoal, TaskSpec
+    from research_agent.storage.markdown import write_plan
+    from research_agent.storage.tasks import enqueue
+
+    job = _make_synthetic_job(isolated_jobs_repo, goal="resume target")
+
+    plan = Plan(
+        version=1,
+        objective="Investigate the target",
+        subgoals=[Subgoal(id=1, description="Gather", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=3,
+    )
+    write_plan(job, plan.model_dump())
+
+    enqueue(
+        job,
+        [TaskSpec(kind="web_search", payload={"q": f"q-{i}"}) for i in range(2)],
+        plan_version=1,
+    )
+
+    db_path = isolated_jobs_repo / "data" / "index.sqlite"
+    now = int(time.time())
+    handler_calls = {"n": 0}
+
+    async def _record_finding(j, task):
+        handler_calls["n"] += 1
+        conn = db.connect(db_path)
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO findings"
+                    " (job_id, md_path, claim, confidence, source_ids, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        j.id,
+                        f"findings/{handler_calls['n']:06d}.md",
+                        f"finding from task {task['id']}",
+                        0.5,
+                        "[]",
+                        now,
+                    ),
+                )
+        finally:
+            conn.close()
+        return {"ok": True}
+
+    _asyncio.run(
+        run_loop(
+            job,
+            router=None,
+            plan=plan,
+            handlers={"web_search": _record_finding},
+            retry_waits=(0,),
+        )
+    )
+
+    assert handler_calls["n"] == 2
+
+    def _findings_count() -> int:
+        conn = db.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM findings WHERE job_id = ?", (job.id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        return int(row["c"])
+
+    assert _findings_count() == 2
+
+    runner = CliRunner()
+    stop_res = runner.invoke(cli.app, ["stop", job.id])
+    assert stop_res.exit_code == 0, stop_res.stdout
+    assert (job.root / "STOP").exists()
+
+    pre_resume_findings = _findings_count()
+
+    monkeypatch.setattr(cli.daemon, "is_daemon_alive", lambda _job_id: False)
+
+    def _fake_spawn(job_id: str) -> int:
+        # Synchronously run another loop iteration in-process.
+        # All seeded tasks are STATUS_DONE, so next_pending() returns None
+        # and the loop exits without calling any handler.
+        (job.root / "STOP").unlink(missing_ok=True)
+        _asyncio.run(
+            run_loop(
+                Job.load(job_id, jobs_root=isolated_jobs_repo / "jobs", db_path=db_path),
+                router=None,
+                plan=plan,
+                handlers={"web_search": _record_finding},
+                retry_waits=(0,),
+            )
+        )
+        return 12345
+
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", _fake_spawn)
+
+    resume_res = runner.invoke(cli.app, ["resume", job.id])
+    assert resume_res.exit_code == 0, resume_res.stdout
+
+    # Handler must not have been re-invoked for already-completed tasks.
+    assert handler_calls["n"] == 2
+    assert _findings_count() == pre_resume_findings
+
+
+# ---------------------------------------------------------------------------
 # Pure render helpers
 # ---------------------------------------------------------------------------
 
