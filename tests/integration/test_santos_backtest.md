@@ -380,9 +380,12 @@ grep -in -E '\$0|\$11(\.[0-9])?\s?M|\$11,000,000|disclosure' "$REPORT" | head -1
 awk 'NR>=L-3 && NR<=L+3 {print}' L=<line-from-grep> "$REPORT" \
     | grep -Eo 'https?://[^ )]+'
 # Spot-check the first URL: was it crawled, and is it a primary source?
+# job_sources is a (job_id, source_id) junction; the URL + fetch ts live on
+# the `sources` row, so JOIN through.
 sqlite3 data/index.sqlite \
-    "SELECT url, retrieved_at, host FROM job_sources
-     WHERE job_id='$JOB_ID' AND url='<paste-url>';"
+    "SELECT s.url, s.fetched_at, s.archive_url
+       FROM job_sources js JOIN sources s ON s.id = js.source_id
+      WHERE js.job_id='$JOB_ID' AND s.url='<paste-url>';"
 ```
 
 ### AC4 — results documented in `tests/integration/santos_backtest_results.md`
@@ -572,8 +575,8 @@ Phase-6-shape table extended with Santos-specific symptoms.
 | Report has no mention of "$11M" or "wealth jump" or "disclosure" | `grep -iE '\$11|wealth|disclosure' "$REPORT"` | Planner converged on biographical surface area; conservative throttled financial-disclosure follow-ups | `prompt` follow-up per §6 |
 | Report mentions Santos lying but cites only Wikipedia | `awk '/citation/ || /^https/' "$REPORT" | grep -i wikipedia | head` | Synth tier accepted secondary-only citations; the conservative planner didn't surface primaries | `synth/citations` follow-up per §6 |
 | Brazilian fraud surfaced but with wrong date (e.g. "2023" without the 2008 origin) | `grep -in -E 'Brazil|estelionato|2008|2023' "$REPORT"` | Synth tier conflated the 2023 charges with the 2008 underlying case; frontier_speed reasoning gap | `models.yaml` tier-swap follow-up per §6 |
-| `job_sources` has zero rows for `clerk.house.gov` / `fd.house.gov` | `sqlite3 data/index.sqlite "SELECT COUNT(*) FROM job_sources WHERE job_id='$JOB_ID' AND host LIKE '%.house.gov';"` | Connector / planner never queried the official disclosure portals | `connector/fec-house` follow-up per §6 |
-| `job_sources` has zero rows for `northshoreleader.com` | `sqlite3 data/index.sqlite "SELECT COUNT(*) FROM job_sources WHERE job_id='$JOB_ID' AND host LIKE '%northshoreleader%';"` | News connector biased toward national outlets; small Long Island weekly never indexed | `connector/news` follow-up per §6 |
+| `job_sources` has zero rows for `clerk.house.gov` / `fd.house.gov` | `sqlite3 data/index.sqlite "SELECT COUNT(*) FROM job_sources js JOIN sources s ON s.id=js.source_id WHERE js.job_id='$JOB_ID' AND s.url LIKE '%.house.gov/%';"` | Connector / planner never queried the official disclosure portals | `connector/fec-house` follow-up per §6 |
+| `job_sources` has zero rows for `northshoreleader.com` | `sqlite3 data/index.sqlite "SELECT COUNT(*) FROM job_sources js JOIN sources s ON s.id=js.source_id WHERE js.job_id='$JOB_ID' AND s.url LIKE '%northshoreleader%';"` | News connector biased toward national outlets; small Long Island weekly never indexed | `connector/news` follow-up per §6 |
 | `completion_reason` is `task_cap` (10k tasks) before any synth pass | `sqlite3 data/index.sqlite "SELECT completion_reason FROM jobs WHERE id='$JOB_ID';"` | Conservative planner stuck in a fan-out loop; anti-runaway guard fired without producing useful work | `planner/coverage` follow-up |
 | Report starts with `# Report (truncated)` | `head -1 "$REPORT"` | Budget cap fired and final-pass synth ran on a near-empty budget; #39 stub path | (informational; may still pass §5 if the stub captured the signals) |
 | Same as a Phase 6 symptom | (Phase 6 row) | (Phase 6 cause) | (Phase 6 label) |

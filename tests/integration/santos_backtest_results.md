@@ -123,9 +123,23 @@ A zero on any of these rows is a strong signal toward a connector
 follow-up issue (§6 of the playbook).
 
 ```
-<paste output of:
+<paste output of (job_sources is a junction; URL lives on `sources` —
+ grab top hosts by URL-prefix matching):
  sqlite3 data/index.sqlite \
-   "SELECT host, COUNT(*) FROM job_sources WHERE job_id='$JOB_ID' GROUP BY host ORDER BY 2 DESC;">
+   "SELECT s.url FROM job_sources js JOIN sources s ON s.id=js.source_id
+     WHERE js.job_id='$JOB_ID';" \
+   | awk -F/ '{print $3}' | sort | uniq -c | sort -rn | head -30>
+```
+
+Per-host pass-criterion spot-check (one query per row; copy the count
+into the Hits column):
+
+```
+sqlite3 data/index.sqlite "SELECT COUNT(*) FROM job_sources js JOIN sources s ON s.id=js.source_id WHERE js.job_id='$JOB_ID' AND s.url LIKE '%.house.gov/%';"            # *.house.gov
+sqlite3 data/index.sqlite "SELECT COUNT(*) FROM job_sources js JOIN sources s ON s.id=js.source_id WHERE js.job_id='$JOB_ID' AND s.url LIKE '%fec.gov/%';"                  # fec.gov
+sqlite3 data/index.sqlite "SELECT COUNT(*) FROM job_sources js JOIN sources s ON s.id=js.source_id WHERE js.job_id='$JOB_ID' AND (s.url LIKE '%mp.rj.gov.br%' OR s.url LIKE '%tjrj.jus.br%');"
+sqlite3 data/index.sqlite "SELECT COUNT(*) FROM job_sources js JOIN sources s ON s.id=js.source_id WHERE js.job_id='$JOB_ID' AND s.url LIKE '%northshoreleader%';"
+sqlite3 data/index.sqlite "SELECT COUNT(*) FROM job_sources js JOIN sources s ON s.id=js.source_id WHERE js.job_id='$JOB_ID' AND (s.url LIKE '%wikipedia.org%' OR s.url LIKE '%wikidata.org%');"
 ```
 
 | Host pattern | Hits | Pass-criterion relevance |
