@@ -40,10 +40,13 @@ skip_preflight: true
 dev_command: uv run research doctor
 
 # setup_command runs once per fresh worktree before the agent starts.
-# Bootstraps the venv and editable install so the agent never sees `uv: not found`
-# or import errors mid-session. Failures are non-blocking (alpha-loop warns and
-# continues), so this is safe even before pyproject.toml exists.
-setup_command: uv sync && uv pip install -e .
+# Bootstraps the venv, editable install, and Playwright browsers so the agent
+# never sees `uv: not found`, missing deps, or "browser not installed" errors
+# mid-session. Failures are non-blocking (alpha-loop warns and continues), so
+# this is safe even before pyproject.toml or playwright are declared.
+# Playwright browsers cache to ~/Library/Caches/ms-playwright (shared across
+# worktrees), so the first run downloads ~150MB once and subsequent runs no-op.
+setup_command: uv sync 2>/dev/null || true; uv pip install -e . 2>/dev/null || true; uv run playwright install chromium 2>/dev/null || true
 
 # This is a Python repo — skip the default `pnpm install` step.
 skip_install: true
@@ -70,6 +73,10 @@ harnesses:
   - claude
 
 # --- Safety limits (0 = unlimited) ---
-max_issues: 60
-max_session_duration: 28800  # 8 hours in seconds
-agent_timeout: 3600          # 1 hour per issue (default 1800s = 30m, too short for large refactors)
+# Goal: drain the entire 45-issue backlog overnight. Realistic completion is
+# 15–30 issues depending on per-issue complexity; the loop continues past any
+# single failure (failed issues get the `failed` label, loop moves on), so
+# leaving session_duration unlimited maximizes throughput without losing safety.
+max_issues: 60                # cap on issues per session — more than the current backlog
+max_session_duration: 0       # unlimited; loop exits when queue is drained or interrupted
+agent_timeout: 3600           # 1h per-issue cap stays in place (per-issue safety net)
