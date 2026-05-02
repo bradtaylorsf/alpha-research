@@ -139,6 +139,7 @@ register here) and invokes it with `<query>`. Exits with code 2 and a
 ```bash
 research _smoke-tool web_search "alpha research project"
 research _smoke-tool web_fetch "https://example.com/article"
+research _smoke-tool arxiv "transformer interpretability"
 ```
 
 `web_fetch` prints the resolved title, the path that served the fetch
@@ -146,3 +147,7 @@ research _smoke-tool web_fetch "https://example.com/article"
 archive URL (when Save Page Now completed in time), and the first 200
 characters of cleaned text. Background Wayback archival is fire-and-forget,
 so a missing `archive_url` is not a fetch failure.
+
+`arxiv` prints the top 5 hits as `- <title>\n  <abs URL>\n  <abstract
+preview>`. The connector honours arXiv's 3 s request-spacing recommendation
+and runs the synchronous `arxiv` lib through `asyncio.to_thread`.

@@ -54,6 +54,30 @@ def _smoke_local_corpus(corpus_path: str) -> str:
     )
 
 
+def _smoke_arxiv(query: str) -> str:
+    """Smoke wrapper: arXiv search returning the top-5 hits as plain text.
+
+    Each hit shows ``title``, abs URL, and a 200-char snippet of the abstract
+    so AC #5 (`research _smoke-tool arxiv "..."` returns top 5 with abstracts)
+    can be eyeballed against live data.
+    """
+    from research_agent.tools import arxiv_tool
+
+    async def _run() -> str:
+        results = await arxiv_tool.search(query, max_results=5)
+        if not results:
+            return f"arxiv search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(f"- {hit.title}\n  {hit.url}\n  {snippet}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_web_fetch(url: str) -> str:
     """Smoke wrapper for web_fetch: print word count, path, preview, archive URL.
 
@@ -97,6 +121,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "web_search": _smoke_web_search,
     "web_fetch": _smoke_web_fetch,
     "local_corpus": _smoke_local_corpus,
+    "arxiv": _smoke_arxiv,
 }
 
 __all__ = ["TOOL_REGISTRY", "SearchResult", "Source", "SourceKind"]
