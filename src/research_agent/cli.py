@@ -480,5 +480,50 @@ def logs_command(
         return
 
 
+@app.command(name="export")
+def export_command(
+    job_id: str = typer.Argument(..., help="Job id (e.g. 2026-05-02-some-slug)."),
+    zip_: bool = typer.Option(False, "--zip", help="Bundle the job folder into a zip archive."),
+    md_bundle: bool = typer.Option(
+        False,
+        "--md-bundle",
+        help="Concatenate report + findings + sources into one markdown file.",
+    ),
+    out: Path = typer.Option(  # noqa: B008 — Typer captures defaults at decoration time
+        None,
+        "--out",
+        help="Output path (file or directory). Defaults to <job-id>.{zip,md} in the cwd.",
+    ),
+    include_history: bool = typer.Option(
+        False,
+        "--include-history",
+        help="Include report.history/ in the export.",
+    ),
+) -> None:
+    """Export a job as a shareable bundle (zip archive or single markdown file)."""
+    from research_agent.storage.export import export_md_bundle, export_zip
+
+    if zip_ == md_bundle:
+        typer.echo("exactly one of --zip or --md-bundle must be set", err=True)
+        raise typer.Exit(code=2)
+
+    job = _load_job_or_exit(job_id)
+    suffix = ".zip" if zip_ else ".md"
+    default_name = f"{job.id}{suffix}"
+
+    if out is None:
+        out_path = Path.cwd() / default_name
+    elif out.exists() and out.is_dir():
+        out_path = out / default_name
+    else:
+        out_path = out
+
+    if zip_:
+        written = export_zip(job, out_path, include_history=include_history)
+    else:
+        written = export_md_bundle(job, out_path, include_history=include_history)
+    typer.echo(str(written))
+
+
 if __name__ == "__main__":
     app()

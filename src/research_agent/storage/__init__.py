@@ -7,6 +7,10 @@ from research_agent.storage.db import (
     connect_for_checkpoints,
     migrate,
 )
+from research_agent.storage.export import (
+    export_md_bundle,
+    export_zip,
+)
 from research_agent.storage.jobs import (
     DEFAULT_JOBS_ROOT,
     Job,
@@ -34,6 +38,8 @@ __all__ = [
     "connect",
     "connect_for_checkpoints",
     "content_sha256",
+    "export_md_bundle",
+    "export_zip",
     "list_jobs",
     "migrate",
     "search_fts",
