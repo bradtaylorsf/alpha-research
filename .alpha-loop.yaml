@@ -1,0 +1,33 @@
+# Alpha Loop configuration
+repo: bradtaylorsf/alpha-research
+project: 0  # GitHub Project number (find it in your project URL)
+agent: claude  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
+# model:       # AI model (omit to use agent's default, e.g., opus, gpt-5.4)
+label: ready
+base_branch: main
+auto_merge: true
+
+# --- Validation commands (Python 3.12 stack per research-agent-implementation-guide.md) ---
+# `uv` manages the venv and installs from pyproject.toml on first run, so these
+# are safe to run from a clean worktree without manual `pip install -e .`.
+#
+# test_command runs in two places:
+#   1. Preflight (before the agent starts) — must pass on main.
+#   2. Validation (after the agent finishes) — gate on the change being correct.
+# Keep it fast and deterministic: unit tests only. The agent runs the heavier
+# CLI smoke / e2e checks itself per AGENTS.md → "Validation playbook".
+test_command: uv run pytest -q
+
+# dev_command is what `alpha-loop verify` would use to start a UI for Playwright.
+# This project is a CLI/daemon, not a UI — alpha-loop will detect non-UI diffs
+# and skip Playwright verify automatically. We point dev_command at the env
+# health check so any manual `--verify` run still does something useful.
+dev_command: uv run research doctor
+
+# Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
+harnesses:
+  - claude
+
+# Safety limits (0 = unlimited)
+max_issues: 20
+max_session_duration: 7200  # 2 hours in seconds

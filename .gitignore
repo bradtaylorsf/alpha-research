@@ -118,3 +118,8 @@ models/
 # --- OS / misc ---
 *.pid
 *.seed
+# Alpha-loop ephemeral data (not shared)
+.alpha-loop/sessions/
+.alpha-loop/auth/
+.alpha-loop/templates/*.bak
+.worktrees/
