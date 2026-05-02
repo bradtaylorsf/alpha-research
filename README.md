@@ -39,6 +39,7 @@ list, so there is no drift.
 | `OPENROUTER_API_KEY` | yes | Cloud synthesis tier (Claude Opus / Haiku via OpenRouter). |
 | `RESEARCH_USER_AGENT` | no | Override default UA sent by httpx + Playwright. |
 | `RESEARCH_HEADFUL` | no | Set to `1` to launch Playwright in headed mode for debugging. |
+| `RESEARCH_IGNORE_ROBOTS` | no | Set to `1` to bypass robots.txt checks in `web_fetch`. |
 | `LMSTUDIO_BASE_URL` | no | Override the default `http://localhost:1234/v1`. |
 
 ## CLI
@@ -137,8 +138,11 @@ register here) and invokes it with `<query>`. Exits with code 2 and a
 
 ```bash
 research _smoke-tool web_search "alpha research project"
+research _smoke-tool web_fetch "https://example.com/article"
 ```
 
-The registry is empty until Phase 3 lands — running the verb today exits
-with `tool not registered: <name> (available: ['(none registered yet)'])`,
-which is the expected pre-Phase-3 baseline.
+`web_fetch` prints the resolved title, the path that served the fetch
+(`httpx` vs `playwright`), HTTP status code, word count, the Wayback
+archive URL (when Save Page Now completed in time), and the first 200
+characters of cleaned text. Background Wayback archival is fire-and-forget,
+so a missing `archive_url` is not a fetch failure.

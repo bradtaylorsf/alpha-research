@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>The Great Boilerplate Detour - Example Times</title>
+  <meta property="og:title" content="The Great Boilerplate Detour">
+  <meta name="description" content="A test fixture article with realistic boilerplate around the body content.">
+</head>
+<body>
+  <header class="site-header">
+    <nav>
+      <ul class="nav-list">
+        <li><a href="/">Home</a></li>
+        <li><a href="/news">News</a></li>
+        <li><a href="/opinion">Opinion</a></li>
+        <li><a href="/sports">Sports</a></li>
+        <li><a href="/weather">Weather</a></li>
+        <li><a href="/login">Sign in</a></li>
+      </ul>
+    </nav>
+    <div class="ad ad-leaderboard">Advertisement: Buy widgets at WidgetCo!</div>
+  </header>
+  <aside class="sidebar">
+    <h3>Most Popular</h3>
+    <ul>
+      <li><a href="/a">Top stocks of 2026</a></li>
+      <li><a href="/b">10 ways to save money</a></li>
+      <li><a href="/c">Cooking with cabbage</a></li>
+      <li><a href="/d">Why Mondays are like that</a></li>
+    </ul>
+    <div class="newsletter-signup">
+      <p>Sign up for our daily newsletter!</p>
+      <input type="email" placeholder="Your email">
+      <button>Subscribe</button>
+    </div>
+  </aside>
+  <main>
+    <article>
+      <h1>The Great Boilerplate Detour</h1>
+      <p class="byline">By A. Reporter, May 2, 2026</p>
+      <p>
+        In a stunning development for content extraction researchers, a long-form
+        article surfaced today that was almost entirely buried under navigation
+        menus, advertising slots, and reader-engagement widgets. The article,
+        which appeared on the front page of a popular news site, was widely
+        praised for being a useful test fixture rather than for any particular
+        editorial merit.
+      </p>
+      <p>
+        Speaking at a press conference held in a small windowless conference
+        room, the lead engineer for the extraction system explained that the
+        purpose of the fixture is to demonstrate the difference between raw
+        HTML and the cleaned-text output that downstream language models will
+        actually consume. "If we hand the model the navigation bar, the cookie
+        banner, and the related-articles list," she said, "we will burn our
+        token budget on text that has nothing to do with the user's question."
+      </p>
+      <p>
+        The article continues with several more paragraphs, all of which are
+        genuine prose intended to push the cleaned text well past the five
+        hundred character minimum that the fetch pipeline enforces before it
+        decides to escalate to a JavaScript-rendered fallback. Without this
+        body of content, the test would mistakenly trigger the Playwright
+        path on a page that did not actually require browser execution.
+      </p>
+      <p>
+        Industry observers noted that the fixture goes out of its way to
+        include a sidebar, a footer, and a leaderboard advertisement, all of
+        which are common boilerplate elements that boilerpipe-style extractors
+        are specifically designed to remove. A successful extraction should
+        contain the article body, including this paragraph, and exclude the
+        navigation menu, the newsletter signup form, and the legal notices in
+        the footer.
+      </p>
+      <p>
+        Asked whether the fixture would be updated for future releases, the
+        engineer noted that the fixture is intentionally stable so that
+        regressions in the extraction pipeline can be detected by simple
+        substring assertions. "We don't want this thing to drift," she said.
+        "If the extractor stops finding the byline or the dateline, that's a
+        bug, and we want a deterministic test to catch it."
+      </p>
+    </article>
+    <section class="related-articles">
+      <h3>Related Articles</h3>
+      <ul>
+        <li><a href="/r1">Related story one</a></li>
+        <li><a href="/r2">Related story two</a></li>
+        <li><a href="/r3">Related story three</a></li>
+      </ul>
+    </section>
+  </main>
+  <footer>
+    <p>&copy; 2026 Example Times. All rights reserved.</p>
+    <p>
+      <a href="/terms">Terms of Service</a> |
+      <a href="/privacy">Privacy Policy</a> |
+      <a href="/contact">Contact Us</a>
+    </p>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,338 @@
+"""HTTP fetch + content extraction connector (issue #15).
+
+Pipeline per call:
+
+1. Robots.txt check (skipped if ``RESEARCH_IGNORE_ROBOTS=1``).
+2. ``httpx`` GET — unless the planner already declared ``requires_js=True``.
+3. Run trafilatura over the HTML; if the cleaned text is too short, retry
+   with ``readability-lxml`` for academic sites where trafilatura under-
+   extracts.
+4. If the result is still tiny (< 500 chars), or the server replied with a
+   classic anti-bot status (403/429/503), or the planner asked for JS up
+   front, fall back to the shared Playwright session and re-extract.
+5. Spawn a background Wayback Save Page Now task — failures never block the
+   return value.
+
+We deliberately do NOT spawn Playwright per-call: the shared
+``tools/browser.py`` session is reused so we don't pay a Chromium launch on
+every fetch.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import urllib.robotparser
+from datetime import UTC, datetime
+from typing import Any
+from urllib.parse import urlparse
+
+import httpx
+import trafilatura
+from readability import Document
+
+from research_agent import config
+from research_agent.tools import archive, browser
+from research_agent.tools.models import Source
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_USER_AGENT = "research-agent/0.1"
+_MIN_TRAFILATURA_CHARS = 200
+_MIN_TEXT_CHARS = 500
+_BROWSER_FALLBACK_STATUSES = frozenset({403, 429, 503})
+_ROBOTS_TIMEOUT = 5.0
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+# Per-host robots cache. Keyed by ``scheme://host`` so http/https are
+# treated separately (they are technically different "origins" for robots).
+_robots_cache: dict[str, urllib.robotparser.RobotFileParser | None] = {}
+_robots_lock = asyncio.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Config helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_user_agent() -> str:
+    return config.get("RESEARCH_USER_AGENT") or _DEFAULT_USER_AGENT
+
+
+def _ignore_robots() -> bool:
+    raw = config.get("RESEARCH_IGNORE_ROBOTS")
+    if raw is None:
+        return False
+    return raw.strip().lower() in _TRUTHY
+
+
+# ---------------------------------------------------------------------------
+# robots.txt
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_robots_text(robots_url: str, user_agent: str) -> str | None:
+    headers = {"User-Agent": user_agent}
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=_ROBOTS_TIMEOUT,
+            headers=headers,
+        ) as client:
+            response = await client.get(robots_url)
+    except (httpx.HTTPError, OSError):
+        return None
+    if response.status_code >= 400:
+        # RFC 9309: a 4xx generally means "no robots.txt, allow everything."
+        return ""
+    return response.text
+
+
+async def _robots_allows(url: str, user_agent: str) -> bool:
+    """Return True when ``url`` is fetchable per the host's robots.txt.
+
+    On any fetch error we default to "allow" (the RFC-recommended behaviour
+    when robots.txt is unreachable). Cached per scheme+host so we don't
+    re-fetch for every page on a site.
+    """
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return True
+    cache_key = f"{parsed.scheme}://{parsed.netloc}"
+
+    async with _robots_lock:
+        if cache_key in _robots_cache:
+            parser = _robots_cache[cache_key]
+        else:
+            parser = None
+            text = await _fetch_robots_text(f"{cache_key}/robots.txt", user_agent)
+            if text is not None:
+                parser = urllib.robotparser.RobotFileParser()
+                parser.parse(text.splitlines())
+            _robots_cache[cache_key] = parser
+
+    if parser is None:
+        return True
+    return parser.can_fetch(user_agent, url)
+
+
+# ---------------------------------------------------------------------------
+# Extraction
+# ---------------------------------------------------------------------------
+
+
+def _strip_html(html: str) -> str:
+    return _WS_RE.sub(" ", _TAG_RE.sub(" ", html)).strip()
+
+
+def _extract(html: str) -> tuple[str, str]:
+    """Return ``(title, cleaned_text)``.
+
+    Trafilatura first; if it returns suspiciously little (<200 chars) we
+    fall back to readability-lxml's ``Document.summary()`` and strip tags.
+    Pure function — no I/O — so unit tests can hit it directly.
+    """
+    if not html:
+        return "", ""
+
+    title = ""
+    text = ""
+
+    # Trafilatura's metadata extractor is best for the title; the extracted
+    # body itself rarely contains the page <title>.
+    try:
+        meta = trafilatura.extract_metadata(html)
+        if meta and getattr(meta, "title", None):
+            title = (meta.title or "").strip()
+    except Exception:  # noqa: BLE001 — metadata parsing must never crash
+        title = ""
+
+    try:
+        extracted = trafilatura.extract(
+            html,
+            include_comments=False,
+            include_tables=True,
+            favor_recall=True,
+        )
+    except Exception:  # noqa: BLE001
+        extracted = None
+    if extracted:
+        text = extracted.strip()
+
+    if len(text) < _MIN_TRAFILATURA_CHARS:
+        # readability tends to win on academic pages with heavy boilerplate
+        # that trafilatura over-prunes.
+        try:
+            doc = Document(html)
+            summary_html = doc.summary() or ""
+            readable_text = _strip_html(summary_html)
+            if len(readable_text) > len(text):
+                text = readable_text
+            if not title:
+                title = (doc.short_title() or doc.title() or "").strip()
+        except Exception:  # noqa: BLE001
+            pass
+
+    return title, text
+
+
+def _should_use_browser(text_len: int, status_code: int | None, requires_js: bool) -> bool:
+    if requires_js:
+        return True
+    if status_code is not None and status_code in _BROWSER_FALLBACK_STATUSES:
+        return True
+    return text_len < _MIN_TEXT_CHARS
+
+
+# ---------------------------------------------------------------------------
+# Fetchers
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_via_httpx(
+    url: str,
+    timeout: float,
+    user_agent: str,
+) -> tuple[int | None, str | None]:
+    """Return ``(status_code, html)``. ``status_code`` is None on transport error."""
+    headers = {"User-Agent": user_agent}
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=timeout,
+            headers=headers,
+        ) as client:
+            response = await client.get(url)
+    except (httpx.HTTPError, OSError) as exc:
+        logger.debug("httpx fetch failed for %s: %s", url, exc)
+        return None, None
+
+    if response.status_code >= 400:
+        return response.status_code, None
+    return response.status_code, response.text
+
+
+async def _fetch_via_playwright(url: str, timeout: float) -> str | None:
+    """Render ``url`` through the shared Chromium session, return HTML."""
+    try:
+        async with browser.browser_session() as ctx:
+            page = await ctx.new_page()
+            try:
+                await browser.navigate(page, url, timeout_ms=int(timeout * 1000))
+                return await page.content()
+            finally:
+                await page.close()
+    except Exception as exc:  # noqa: BLE001 — never crash the pipeline
+        logger.warning("playwright fetch failed for %s: %s", url, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Background Wayback save
+# ---------------------------------------------------------------------------
+
+
+def _spawn_archive_task(source: Source) -> asyncio.Task[None] | None:
+    """Kick off ``archive.save`` and write the result back onto ``source``.
+
+    Returns the spawned task so callers (and tests) can opt into awaiting it,
+    but the standard contract is fire-and-forget — Wayback failure never
+    blocks ``fetch`` from returning.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+    async def _runner() -> None:
+        try:
+            archive_url = await archive.save(source.url)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("wayback save raised for %s: %s", source.url, exc)
+            return
+        if archive_url:
+            source.archive_url = archive_url
+
+    return loop.create_task(_runner())
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+
+async def fetch(
+    url: str,
+    requires_js: bool = False,
+    timeout: float = 30.0,
+) -> Source | None:
+    """Fetch ``url``, extract its content, and return a :class:`Source`.
+
+    Returns None when robots.txt forbids the fetch, both fetch paths fail to
+    yield enough text, or the URL is malformed. Wayback archival happens in
+    a background task; the returned ``Source.archive_url`` is None unless the
+    save completes before the consumer reads it.
+    """
+    if not url or not urlparse(url).netloc:
+        return None
+
+    user_agent = _resolve_user_agent()
+
+    if not _ignore_robots():
+        if not await _robots_allows(url, user_agent):
+            logger.info("web_fetch skipped %s — disallowed by robots.txt", url)
+            return None
+
+    html: str | None = None
+    status_code: int | None = None
+    fetched_via: str = "httpx"
+
+    if not requires_js:
+        status_code, html = await _fetch_via_httpx(url, timeout, user_agent)
+
+    title, text = _extract(html or "")
+
+    if _should_use_browser(len(text), status_code, requires_js):
+        rendered = await _fetch_via_playwright(url, timeout)
+        if rendered:
+            html = rendered
+            title, text = _extract(rendered)
+            fetched_via = "playwright"
+        elif requires_js or html is None:
+            # We needed JS or had no httpx html and Playwright also failed —
+            # nothing to return.
+            return None
+
+    if len(text) < _MIN_TEXT_CHARS and not html:
+        return None
+
+    metadata: dict[str, Any] = {
+        "fetched_via": fetched_via,
+        "status_code": status_code,
+    }
+
+    source = Source(
+        url=url,
+        title=title or url,
+        cleaned_text=text,
+        raw_html=html,
+        fetched_at=datetime.now(UTC),
+        source_kind="web",
+        metadata=metadata,
+    )
+
+    _spawn_archive_task(source)
+
+    return source
+
+
+def reset_for_tests() -> None:
+    """Clear the per-host robots cache. Test-only."""
+    _robots_cache.clear()
+
+
+__all__ = ["fetch", "reset_for_tests"]

@@ -318,7 +318,10 @@ def smoke_tool_command(
         raise typer.Exit(code=2)
 
     result = fn(query)
-    typer.echo(repr(result))
+    if isinstance(result, str):
+        typer.echo(result)
+    else:
+        typer.echo(repr(result))
 
 
 @app.command(name="logs")
