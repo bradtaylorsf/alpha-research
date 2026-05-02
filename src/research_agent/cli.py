@@ -340,7 +340,7 @@ def smoke_tool_command(
 
 @app.command(name="search")
 def search_command(
-    query: str = typer.Argument(..., help="FTS5 query string."),
+    query: str = typer.Argument(..., help="Search query string."),
     job: str = typer.Option(None, "--job", help="Scope to a single job id."),
     all_: bool = typer.Option(  # noqa: ARG001 — explicit flag; --all is the default
         False,
@@ -352,16 +352,26 @@ def search_command(
         "--kind",
         help="What to search: findings | sources | both.",
     ),
+    fts_only: bool = typer.Option(
+        False,
+        "--fts-only",
+        help="Skip the semantic pass and run FTS5 only (legacy / escape hatch).",
+    ),
     json_output: bool = typer.Option(
         False,
         "--json",
         help="Emit machine-readable JSON instead of the Rich table.",
     ),
 ) -> None:
-    """Run FTS5 search over findings and/or sources."""
+    """Hybrid FTS5 + semantic search over findings and/or sources."""
     import sqlite3
 
-    from research_agent.storage.search import ALLOWED_KINDS, search_fts
+    from research_agent.llm.router import load_models_config
+    from research_agent.storage.search import (
+        ALLOWED_KINDS,
+        search_fts,
+        search_hybrid,
+    )
 
     if kind not in ALLOWED_KINDS:
         typer.echo(
@@ -376,7 +386,17 @@ def search_command(
         job_id = job
 
     try:
-        results = search_fts(query, job_id=job_id, kind=kind, db_path=db.DEFAULT_DB_PATH)
+        if fts_only:
+            results = search_fts(query, job_id=job_id, kind=kind, db_path=db.DEFAULT_DB_PATH)
+        else:
+            models_cfg = load_models_config(Path("config/models.yaml"))
+            results = search_hybrid(
+                query,
+                job_id=job_id,
+                kind=kind,
+                db_path=db.DEFAULT_DB_PATH,
+                models_config=models_cfg,
+            )
     except sqlite3.OperationalError as e:
         typer.echo(f"FTS5 query error: {e}", err=True)
         raise typer.Exit(code=1) from e

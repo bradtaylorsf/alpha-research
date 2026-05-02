@@ -85,7 +85,8 @@ research stop <job-id> --kill      # hard: SIGTERM then SIGKILL after 10s, unlin
 research resume <job-id>           # respawn the daemon; restores from last checkpoint
 research resume <job-id> --force   # resume even when job is completed/failed
 
-research search "<query>"          # FTS5 over findings + sources (cross-job)
+research search "<query>"          # hybrid FTS5 + semantic (cross-job, default)
+research search "<query>" --fts-only         # legacy FTS5-only escape hatch
 research search "<query>" --job <job-id>     # scope to one job
 research search "<query>" --kind findings    # findings only (default: both)
 research search "<query>" --kind sources     # sources only
@@ -97,15 +98,24 @@ research export <job-id> --zip --out PATH    # write to PATH (file) or PATH/<job
 research export <job-id> --md-bundle --include-history   # also inline report.history/
 ```
 
-`research search` runs the user's query through SQLite FTS5 against
-`findings_fts` (claim text) and `sources_fts` (source titles), ordered by
-the BM25 score (lower is better). Snippet highlights come from the FTS5
-`snippet()` function — the Rich table renders matched terms in bold yellow;
-the `--json` payload preserves them as literal `[`/`]` markers. Source rows
-join through `job_sources`, so the `--job` filter correctly excludes
-sources fetched only by other jobs even when the underlying content is
-shared. FTS5 syntax errors (e.g. unbalanced quotes) exit `1` with a clear
-`FTS5 query error: ...` line on stderr.
+`research search` defaults to a hybrid pass: it runs the query through
+SQLite FTS5 against `findings_fts` (claim text) and `sources_fts` (source
+titles), embeds the same query through the `embeddings` tier, and scores
+every embedded `findings.embedding` / `sources.embedding` blob by cosine
+similarity. The two top-50 lists are deduped on `(kind, id)` and combined
+via reciprocal-rank fusion (k=60). The Rich table surfaces both the fused
+`score` and the underlying `fts` / `cosine` components so it is obvious
+why a row ranked where it did. When the visible source count exceeds 5000,
+the cosine pass tries the optional `sqlite-vec` extension to run KNN in
+SQL; any load or execution error falls back to numpy cosine, so the hybrid
+path is always available. Pass `--fts-only` to skip the semantic pass
+(useful for FTS-syntax debugging or when LM Studio is offline). Snippet
+highlights come from the FTS5 `snippet()` function — the table renders
+matched terms in bold yellow; the `--json` payload preserves them as
+literal `[`/`]` markers. Source rows join through `job_sources`, so the
+`--job` filter correctly excludes sources fetched only by other jobs even
+when the underlying content is shared. FTS5 syntax errors (e.g. unbalanced
+quotes) exit `1` with a clear `FTS5 query error: ...` line on stderr.
 
 `research export` bundles a job for sharing. `--zip` walks
 `jobs/<job-id>/` and emits a single `ZIP_DEFLATED` archive whose entries
