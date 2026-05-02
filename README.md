@@ -60,7 +60,7 @@ env keys) never affect the exit code.
 ```bash
 # Register a new job and spawn the background daemon.
 research start --skip-intake --goal "Investigate Widget Co" \
-    [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes]
+    [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes] [--disk-cap-gb 10]
 
 research list                      # newest first; Rich table on a TTY, JSON otherwise
 research list --json               # force JSON output
@@ -139,6 +139,19 @@ Otherwise it spawns a fresh daemon, which restores from the last
 checkpoint at startup.
 
 ## Troubleshooting
+
+### Disk cap
+
+Each job has a per-job disk cap (default `10` GB, override with
+`--disk-cap-gb`). The daemon polls `jobs/<id>/` every 5 minutes; when
+total on-disk usage exceeds the cap, it scores every linked source by
+`5 * findings_usage + 1 * fts_title_hits − 0.1 * age_days` and prunes
+the lowest-scored 10 % until usage drops below 90 % of the cap. A
+single `WARN`/`warning` event marks the cap crossing; one
+`INFO`/`source_pruned` event fires per file removed. Pruned ≠ banned:
+the `sources` row stays in the cross-job index with `md_path = NULL`,
+and a future fetch with the same sha256 transparently re-creates the
+file under the current job (see `storage/sources.py`).
 
 Two hidden verbs (`_smoke-llm` and `_smoke-tool`) exist for operators and CI
 to verify the LLM stack and the tool registry without spinning up a job.

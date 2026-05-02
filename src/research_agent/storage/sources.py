@@ -96,7 +96,7 @@ def write_source(
     try:
         with conn:
             existing = conn.execute(
-                "SELECT id FROM sources WHERE sha256 = ?",
+                "SELECT id, md_path FROM sources WHERE sha256 = ?",
                 (sha,),
             ).fetchone()
 
@@ -125,6 +125,25 @@ def write_source(
                 source_id = int(cur.lastrowid)
             else:
                 source_id = int(existing["id"])
+                # Pruned ≠ banned: a row whose md_path was nulled by the disk-cap
+                # watcher (issue #38) gets its file rewritten under the current job
+                # and the column repointed. The canonical sha is unchanged.
+                if not existing["md_path"]:
+                    _atomic_write_text(job.root / md_rel, cleaned + "\n")
+                    sidecar = {
+                        "sha256": sha,
+                        "url": url,
+                        "title": title,
+                        "fetched_at": fetched,
+                        "archive_url": archive_url or "",
+                        "kind": kind,
+                        "md_path": md_rel,
+                    }
+                    _atomic_write_json(job.root / json_rel, sidecar)
+                    conn.execute(
+                        "UPDATE sources SET md_path = ?, fetched_at = ? WHERE id = ?",
+                        (md_rel, fetched, source_id),
+                    )
 
             conn.execute(
                 "INSERT OR IGNORE INTO job_sources (job_id, source_id) VALUES (?, ?)",
