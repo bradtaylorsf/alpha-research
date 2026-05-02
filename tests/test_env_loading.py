@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 from research_agent import config
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -80,3 +83,16 @@ def test_load_env_is_idempotent(tmp_path, monkeypatch):
     second = config.load_env()
     assert second == []
     assert config.get("OPENROUTER_API_KEY") == "first"
+
+
+def test_env_example_matches_expected_keys():
+    """`.env.example` and `EXPECTED_ENV_KEYS` must not drift."""
+    example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    declared = {k.name for k in config.EXPECTED_ENV_KEYS}
+    documented = set(re.findall(r"^([A-Z][A-Z0-9_]*)=", example, flags=re.MULTILINE))
+
+    assert documented == declared, (
+        f"drift between .env.example and EXPECTED_ENV_KEYS:\n"
+        f"  only in .env.example: {documented - declared}\n"
+        f"  only in EXPECTED_ENV_KEYS: {declared - documented}"
+    )
