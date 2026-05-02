@@ -1,18 +1,32 @@
 """Long-running research process — drives the agent loop per job (impl guide §4, §5.1, §6).
 
-Issue #32 ships the spawn/PID-file lifecycle: ``spawn_daemon`` forks a
-detached child via :func:`subprocess.Popen` with ``start_new_session=True``
-so it survives terminal exit, and ``is_daemon_alive`` checks the process
-behind ``jobs/<id>/daemon.pid``. The actual research loop wired into
-``run_daemon`` is owned by issue #33; this module ships a thin stub that
-delegates to ``orchestrator.loop.run_daemon`` once that lands.
+Issue #32 shipped the spawn/PID-file lifecycle; issue #33 fills in the
+research-loop body. ``spawn_daemon`` forks a detached child via
+:func:`subprocess.Popen` with ``start_new_session=True`` so it survives
+terminal exit, and ``is_daemon_alive`` checks the process behind
+``jobs/<id>/daemon.pid``.
+
+``run_daemon`` is the long-running async coroutine the child enters. It:
+
+1. Loads the :class:`Job`, builds a :class:`Router`/:class:`BudgetTracker`
+   from ``config/models.yaml``, runs the LM Studio + OpenRouter health
+   checks (60 s deadline each), and flips ``status=running``.
+2. Installs SIGTERM/SIGINT handlers via ``loop.add_signal_handler`` that
+   set a single in-memory ``asyncio.Event`` *and* atomically touch
+   ``jobs/<id>/STOP`` so the existing ``orchestrator.loop._should_stop``
+   poll picks the request up.
+3. Starts a 2 s ``STOP``-flag watcher task so a ``research stop --graceful``
+   that drops the file externally also flips the event.
+4. Calls :func:`research_agent.orchestrator.loop.run_loop`, then a
+   best-effort :func:`research_agent.orchestrator.synth.final_synthesis`
+   so ``report.md`` is always rewritten.
+5. Sets ``status=completed``/``stopped``/``failed`` accordingly and exits
+   with ``0`` on graceful shutdown, ``1`` on uncaught exception.
 
 The PID file is written by the *parent* (spawn_daemon) and removed by the
-*child* on clean shutdown (atexit). Both SIGTERM and SIGINT route through
-the same path: raise :class:`KeyboardInterrupt`, the asyncio loop unwinds,
-atexit fires, ``daemon.pid`` is deleted. Per §5.2 the daemon is the
-graceful path — there is no separate "dirty" exit that leaves the file
-behind on a normal signal.
+*child* on shutdown via ``atexit``. Per §5.2 the daemon is the graceful
+path — there is no separate "dirty" exit that leaves the file behind on a
+normal signal.
 """
 
 from __future__ import annotations
@@ -24,11 +38,16 @@ import os
 import signal
 import subprocess
 import sys
+import time
+import traceback
 from pathlib import Path
-from types import FrameType
 from typing import Any
 
-from research_agent.storage.jobs import DEFAULT_JOBS_ROOT
+import httpx
+
+from research_agent.config import get as cfg_get
+from research_agent.observability.events import emit
+from research_agent.storage.jobs import DEFAULT_JOBS_ROOT, Job
 
 logger = logging.getLogger(__name__)
 
@@ -159,45 +178,386 @@ def _remove_pid_file(jobs_root: Path, job_id: str) -> None:
         logger.exception("failed to remove %s", pid_file)
 
 
-async def run_daemon(job_id: str, *, jobs_root: Path | str = DEFAULT_JOBS_ROOT) -> None:
-    """Drive the agent loop for ``job_id`` until completion or stop.
+# ---------------------------------------------------------------------------
+# Health checks (acceptance criterion: 60 s retry deadline at startup)
+# ---------------------------------------------------------------------------
 
-    Stub: issue #33 owns the real implementation. This delegates to
-    ``orchestrator.loop.run_daemon`` if it has shipped, otherwise it logs
-    a warning and returns cleanly so the PID-file lifecycle (write on
-    spawn, remove on shutdown) is exercised end-to-end.
+
+_HEALTH_INITIAL_DELAY_S = 1.0
+_HEALTH_MAX_DELAY_S = 10.0
+_HEALTH_CLIENT_TIMEOUT_S = 10.0
+
+
+async def _retry_until(
+    job: Job | None,
+    *,
+    name: str,
+    probe: Any,
+    deadline_s: float,
+) -> None:
+    """Drive a single async ``probe()`` until it succeeds or ``deadline_s`` expires.
+
+    Backoff doubles from ``_HEALTH_INITIAL_DELAY_S`` and clamps at
+    ``_HEALTH_MAX_DELAY_S`` per the issue spec. The first failure emits a
+    ``warning`` event so an operator tailing logs sees it before the full
+    deadline expires; on deadline we emit ``error`` and re-raise.
     """
-    _ = jobs_root  # kept on the signature for future use; loop.run_daemon owns root resolution
-    from research_agent.orchestrator import loop as _loop
+    start = time.monotonic()
+    deadline = start + deadline_s
+    delay = _HEALTH_INITIAL_DELAY_S
+    last_exc: BaseException | None = None
+    first_failure_emitted = False
 
-    real = getattr(_loop, "run_daemon", None)
-    if real is None:
-        logger.warning("daemon entrypoint stub — run_daemon not implemented yet (issue #33)")
+    while True:
+        try:
+            await probe()
+            return
+        except BaseException as exc:  # noqa: BLE001 — health probes can raise anything
+            last_exc = exc
+            if not first_failure_emitted and job is not None:
+                try:
+                    emit(
+                        job,
+                        "WARN",
+                        "daemon",
+                        "warning",
+                        {"stage": f"{name}_health", "error": str(exc)},
+                    )
+                except Exception:
+                    pass
+                first_failure_emitted = True
+            logger.info(
+                "%s health check failed (%s); retrying in %.1fs",
+                name,
+                exc,
+                delay,
+            )
+        now = time.monotonic()
+        if now + delay >= deadline:
+            break
+        await asyncio.sleep(delay)
+        delay = min(delay * 2.0, _HEALTH_MAX_DELAY_S)
+
+    msg = f"{name} not reachable within {deadline_s:.0f}s: {last_exc}"
+    if job is not None:
+        try:
+            emit(
+                job,
+                "ERROR",
+                "daemon",
+                "error",
+                {"stage": f"{name}_health", "error": str(last_exc)},
+            )
+        except Exception:
+            pass
+    raise RuntimeError(msg)
+
+
+async def ensure_lm_studio_alive(router: Any, *, deadline_s: float = 60.0) -> None:
+    """Block until LM Studio answers ``GET /models`` or 60 s expires.
+
+    The router can't usefully dispatch local-tier calls without LM Studio,
+    so failing fast at startup is friendlier than letting the first
+    in-loop call time out per-tier.
+    """
+    base_url = (cfg_get("LMSTUDIO_BASE_URL") or "http://localhost:1234/v1").rstrip("/")
+    url = f"{base_url}/models"
+
+    async def _probe() -> None:
+        async with httpx.AsyncClient(timeout=_HEALTH_CLIENT_TIMEOUT_S) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+
+    await _retry_until(
+        getattr(router, "job", None),
+        name="lm_studio",
+        probe=_probe,
+        deadline_s=deadline_s,
+    )
+
+
+async def ensure_openrouter_reachable(router: Any, *, deadline_s: float = 60.0) -> None:
+    """Block until OpenRouter answers ``GET /models`` or 60 s expires.
+
+    Authenticated request — a missing ``OPENROUTER_API_KEY`` should raise
+    immediately rather than retry-loop for 60 s.
+    """
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        msg = "OPENROUTER_API_KEY environment variable is required"
+        job = getattr(router, "job", None)
+        if job is not None:
+            try:
+                emit(
+                    job,
+                    "ERROR",
+                    "daemon",
+                    "error",
+                    {"stage": "openrouter_health", "error": msg},
+                )
+            except Exception:
+                pass
+        raise RuntimeError(msg)
+
+    url = "https://openrouter.ai/api/v1/models"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    async def _probe() -> None:
+        async with httpx.AsyncClient(timeout=_HEALTH_CLIENT_TIMEOUT_S) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+
+    await _retry_until(
+        getattr(router, "job", None),
+        name="openrouter",
+        probe=_probe,
+        deadline_s=deadline_s,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Run-daemon: the §6.1 main coroutine
+# ---------------------------------------------------------------------------
+
+
+_STOP_POLL_INTERVAL_S = 2.0
+
+
+def _build_router(job: Job) -> Any:
+    """Build a :class:`Router` + :class:`BudgetTracker` for ``job``.
+
+    Imports are deferred so plain ``daemon.spawn_daemon`` callers don't pay
+    the cost of pulling the LLM stack just to launch a child.
+    """
+    from research_agent.llm.budgets import BudgetTracker
+    from research_agent.llm.router import Router, load_models_config
+
+    config_path = os.environ.get("RESEARCH_MODELS_CONFIG", "config/models.yaml")
+    config = load_models_config(config_path)
+    pricing = config.get("pricing") or {}
+    intake = job.intake or {}
+    cap_usd = intake.get("budget_cap_usd")
+
+    budget = BudgetTracker(job.id, cap_usd, pricing=pricing, db_path=job.db_path)
+    return Router(config, budget, job=job, db_path=job.db_path)
+
+
+def _resolve_db_path() -> Path | None:
+    """Pull ``RESEARCH_DB_PATH`` from the env, if set, else None for the default."""
+    val = os.environ.get("RESEARCH_DB_PATH")
+    return Path(val) if val else None
+
+
+def _install_stop_signal_handlers(
+    aloop: asyncio.AbstractEventLoop,
+    job: Job,
+    should_stop: asyncio.Event,
+) -> None:
+    """Wire SIGTERM/SIGINT through the asyncio loop into a graceful stop.
+
+    The handler does two things: atomically writes ``jobs/<id>/STOP`` so
+    ``orchestrator.loop._should_stop`` picks the request up between tasks,
+    and sets the in-memory event so any non-loop awaiter (e.g. the watcher
+    or future health-check loops) can also bail.
+    """
+    stop_path = job.root / "STOP"
+
+    def _on_signal() -> None:
+        try:
+            tmp = stop_path.with_suffix(".tmp")
+            tmp.write_text("", encoding="utf-8")
+            os.replace(tmp, stop_path)
+        except OSError:
+            logger.exception("failed to write STOP flag for job %s", job.id)
+        should_stop.set()
+
+    aloop.add_signal_handler(signal.SIGTERM, _on_signal)
+    aloop.add_signal_handler(signal.SIGINT, _on_signal)
+
+
+async def _stop_flag_watcher(
+    job: Job,
+    should_stop: asyncio.Event,
+    *,
+    poll_interval_s: float = _STOP_POLL_INTERVAL_S,
+) -> None:
+    """Poll ``jobs/<id>/STOP`` every ``poll_interval_s`` seconds.
+
+    The signal handler also touches the file so this loop is in fact
+    redundant for the SIGTERM/SIGINT path — but ``research stop --graceful``
+    drops the file from a sibling process, and that needs to flip the
+    in-memory event without relying on a signal arriving.
+    """
+    stop_path = job.root / "STOP"
+    try:
+        while not should_stop.is_set():
+            if stop_path.exists():
+                should_stop.set()
+                return
+            try:
+                await asyncio.wait_for(should_stop.wait(), timeout=poll_interval_s)
+            except TimeoutError:
+                continue
+    except asyncio.CancelledError:
         return
-    await real(job_id)
 
 
-def _make_signal_handler() -> Any:
-    """Build a SIGTERM/SIGINT handler that routes through KeyboardInterrupt.
+async def run_daemon(
+    job_id: str,
+    *,
+    jobs_root: Path | str = DEFAULT_JOBS_ROOT,
+    db_path: Path | str | None = None,
+) -> int:
+    """Drive the agent loop for ``job_id`` until completion, stop, or failure.
 
-    Raising :class:`KeyboardInterrupt` from the handler unwinds the
-    :func:`asyncio.run` call cleanly; ``_main`` catches it and exits with
-    status 0 so atexit fires and the PID file is removed.
+    Returns the integer exit code: ``0`` on a graceful run (including
+    SIGTERM/SIGINT or external STOP), ``1`` on an uncaught exception.
+
+    ``db_path`` defaults to the project-relative ``data/index.sqlite`` (via
+    :data:`research_agent.storage.db.DEFAULT_DB_PATH`); tests pass a
+    ``tmp_path`` override so the suite never touches the real index.
     """
+    from research_agent.orchestrator import loop as _loop
+    from research_agent.orchestrator import synth as _synth
+    from research_agent.storage import db as _db
 
-    def _on_signal(signum: int, frame: FrameType | None) -> None:
-        del signum, frame
-        raise KeyboardInterrupt
+    jobs_root_p = Path(jobs_root)
+    db_path_p = Path(db_path) if db_path is not None else _db.DEFAULT_DB_PATH
 
-    return _on_signal
+    try:
+        job = Job.load(job_id, jobs_root=jobs_root_p, db_path=db_path_p)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        logger.error("daemon: cannot load job %r: %s", job_id, exc)
+        return 1
+
+    try:
+        router = _build_router(job)
+    except Exception as exc:
+        logger.exception("daemon: failed to build router for job %s", job.id)
+        try:
+            emit(
+                job,
+                "ERROR",
+                "daemon",
+                "error",
+                {
+                    "stage": "router_init",
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                },
+            )
+        except Exception:
+            pass
+        try:
+            job.set_status("failed")
+        except Exception:
+            pass
+        return 1
+
+    skip_health = os.environ.get("RESEARCH_DAEMON_SKIP_HEALTH_CHECKS") == "1"
+    if not skip_health:
+        try:
+            await ensure_lm_studio_alive(router)
+            await ensure_openrouter_reachable(router)
+        except Exception as exc:
+            logger.error("daemon: health checks failed for job %s: %s", job.id, exc)
+            try:
+                job.set_status("failed")
+            except Exception:
+                pass
+            return 1
+
+    job.set_status("running")
+
+    should_stop = asyncio.Event()
+    aloop = asyncio.get_running_loop()
+    signals_installed = False
+    try:
+        _install_stop_signal_handlers(aloop, job, should_stop)
+        signals_installed = True
+    except (NotImplementedError, ValueError):
+        # Windows / inside a thread: fall back to default signal handling.
+        # The STOP-flag watcher still works, so callers using
+        # ``research stop --graceful`` aren't broken.
+        logger.warning("could not install asyncio signal handlers; relying on STOP flag only")
+
+    watcher_task = aloop.create_task(_stop_flag_watcher(job, should_stop))
+
+    exit_code = 0
+    final_status = "stopped"
+    try:
+        try:
+            await _loop.run_loop(job, router)
+        except Exception as exc:
+            logger.exception("daemon: run_loop crashed for job %s", job.id)
+            try:
+                emit(
+                    job,
+                    "ERROR",
+                    "daemon",
+                    "error",
+                    {
+                        "stage": "run_loop",
+                        "error": str(exc),
+                        "traceback": traceback.format_exc(),
+                    },
+                )
+            except Exception:
+                pass
+            try:
+                job.set_status("failed")
+            except Exception:
+                pass
+            return 1
+
+        plan = _loop._load_latest_plan(job)
+        try:
+            if plan is not None:
+                await _synth.final_synthesis(job, plan, router=router)
+        except Exception as exc:
+            logger.warning("daemon: final synthesis failed for job %s: %s", job.id, exc)
+            try:
+                emit(
+                    job,
+                    "WARN",
+                    "daemon",
+                    "warning",
+                    {"stage": "final_synthesis", "error": str(exc)},
+                )
+            except Exception:
+                pass
+
+        if plan is not None and plan.is_complete():
+            final_status = "completed"
+        else:
+            final_status = "stopped"
+        try:
+            job.set_status(final_status)
+        except Exception:
+            logger.exception("daemon: failed to write final status for job %s", job.id)
+    finally:
+        watcher_task.cancel()
+        try:
+            await watcher_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        if signals_installed:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    aloop.remove_signal_handler(sig)
+                except (NotImplementedError, ValueError):
+                    pass
+
+    return exit_code
 
 
 def _main(argv: list[str] | None = None) -> int:
     """Module entrypoint for ``python -m research_agent.daemon <job_id>``.
 
-    Wires up the PID-file cleanup, signal handlers, and then runs the
-    research loop via :func:`run_daemon`. Exits 0 on clean shutdown
-    (including SIGTERM/SIGINT), 1 on an unhandled exception, 2 on usage.
+    Wires up the PID-file cleanup, then runs :func:`run_daemon` (which
+    installs its own signal handlers via the asyncio loop). Surfaces the
+    exit code from :func:`run_daemon`: ``0`` on graceful shutdown,
+    ``1`` on an uncaught exception, ``2`` on usage error.
     """
     argv = list(sys.argv if argv is None else argv)
     if len(argv) < 2:
@@ -205,28 +565,29 @@ def _main(argv: list[str] | None = None) -> int:
         return 2
 
     job_id = argv[1]
-    jobs_root = Path(DEFAULT_JOBS_ROOT)
+    jobs_root_env = os.environ.get("RESEARCH_JOBS_ROOT")
+    jobs_root = Path(jobs_root_env) if jobs_root_env else Path(DEFAULT_JOBS_ROOT)
+    db_path = _resolve_db_path()
 
     atexit.register(_remove_pid_file, jobs_root, job_id)
 
-    handler = _make_signal_handler()
-    signal.signal(signal.SIGTERM, handler)
-    signal.signal(signal.SIGINT, handler)
-
     try:
-        asyncio.run(run_daemon(job_id, jobs_root=jobs_root))
+        return asyncio.run(run_daemon(job_id, jobs_root=jobs_root, db_path=db_path))
     except KeyboardInterrupt:
-        # SIGTERM/SIGINT handlers re-raise as KeyboardInterrupt; that's a
-        # graceful shutdown per §5.2.
+        # The asyncio signal handler turns SIGINT into a graceful stop, but
+        # if the handler couldn't be installed (e.g. running on Windows) the
+        # default SIGINT behavior raises here. Treat as graceful so the PID
+        # file is still cleaned up.
         return 0
     except Exception:
         logger.exception("daemon crashed for job %s", job_id)
         return 1
-    return 0
 
 
 __all__ = [
     "DEFAULT_JOBS_ROOT",
+    "ensure_lm_studio_alive",
+    "ensure_openrouter_reachable",
     "is_daemon_alive",
     "run_daemon",
     "spawn_daemon",

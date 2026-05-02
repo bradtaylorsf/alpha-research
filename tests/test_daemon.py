@@ -1,31 +1,42 @@
-"""Tests for ``daemon.spawn_daemon`` / ``is_daemon_alive`` / module entrypoint.
+"""Tests for ``research_agent.daemon`` — spawn lifecycle + main loop (issues #32, #33).
 
-These tests exercise the §5.1 contract from the implementation guide:
+These tests exercise the §5.1 + §6.1 contract from the implementation guide:
 
 * ``spawn_daemon`` launches a detached child via ``Popen(start_new_session=True)``,
   redirects stdout/stderr to ``daemon.{out,err}.log``, and writes the PID to
   ``daemon.pid`` atomically.
 * ``is_daemon_alive`` reads the PID file and confirms the process exists. It
   returns ``False`` for missing files, garbage contents, and dead PIDs.
+* ``run_daemon`` is the long-running coroutine: loads the job, builds the
+  router, runs the orchestrator loop with signal handlers + STOP watcher,
+  calls a final synthesis pass, and writes ``status=completed/stopped/failed``
+  on the way out.
 * The ``python -m research_agent.daemon <id>`` entrypoint cleans up the PID
-  file on a graceful exit (atexit).
-
-Tests rely on the ``run_daemon`` stub-warning fast path — issue #33 owns the
-real loop, so the child currently logs and returns within milliseconds. That
-makes the suite fast without monkeypatching across the process boundary.
+  file on exit (atexit) regardless of the path taken.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from research_agent import daemon
+from research_agent.orchestrator.plan import Plan, Subgoal, TaskSpec
+from research_agent.storage import db
+from research_agent.storage.jobs import Job
+from research_agent.storage.markdown import write_plan
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -48,7 +59,39 @@ def jobs_root(job_root: Path) -> Path:
     return job_root.parent
 
 
-def _wait_for_proc_exit(pid: int, timeout: float = 5.0) -> None:
+@pytest.fixture
+def db_path(tmp_path: Path) -> Path:
+    """Migrated SQLite at a known tmp path for the run-daemon tests."""
+    path = tmp_path / "index.sqlite"
+    db.migrate(path=path).close()
+    return path
+
+
+@pytest.fixture
+def jobs_root_for_run(tmp_path: Path) -> Path:
+    return tmp_path / "jobs"
+
+
+@pytest.fixture
+def seeded_job(jobs_root_for_run: Path, db_path: Path) -> Job:
+    """Job + persisted plan, ready for ``run_daemon`` to drain."""
+    job = Job.create(
+        {"goal": "Investigate Widget Co", "budget_cap_usd": None},
+        jobs_root=jobs_root_for_run,
+        db_path=db_path,
+    )
+    plan = Plan(
+        version=1,
+        objective="Investigate the target",
+        subgoals=[Subgoal(id=1, description="Gather", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=3,
+    )
+    write_plan(job, plan.model_dump())
+    return job
+
+
+def _wait_for_proc_exit(pid: int, timeout: float = 10.0) -> None:
     """Wait for ``pid`` to exit and reap the zombie.
 
     ``spawn_daemon`` does not double-fork (per §5.1's "simple, portable" choice
@@ -204,12 +247,14 @@ def test_is_daemon_alive_true_after_spawn_daemon(jobs_root: Path, job_id: str) -
 
 
 # ---------------------------------------------------------------------------
-# Module entrypoint: clean shutdown removes daemon.pid
+# Module entrypoint
 # ---------------------------------------------------------------------------
 
 
-def test_module_entrypoint_clean_shutdown_removes_pid_file(jobs_root: Path, job_id: str) -> None:
-    """``python -m research_agent.daemon <id>`` deletes the PID file on exit."""
+def test_module_entrypoint_unknown_job_exits_one_and_clears_pid(
+    jobs_root: Path, job_id: str
+) -> None:
+    """An unknown job id is a fatal startup error: returncode 1, PID file removed."""
     pid_file = jobs_root / job_id / "daemon.pid"
     pid_file.write_text("12345\n", encoding="utf-8")
     assert pid_file.exists()
@@ -220,25 +265,12 @@ def test_module_entrypoint_clean_shutdown_removes_pid_file(jobs_root: Path, job_
         capture_output=True,
         text=True,
         timeout=30,
+        env={**os.environ, "RESEARCH_JOBS_ROOT": str(jobs_root)},
     )
-    assert proc.returncode == 0, f"stderr={proc.stderr}"
-    assert not pid_file.exists(), "atexit hook must remove daemon.pid on graceful exit"
-
-
-def test_module_entrypoint_logs_stub_warning(jobs_root: Path, job_id: str) -> None:
-    """Stub fast path emits the warning so future operators know why nothing ran."""
-    proc = subprocess.run(
-        [sys.executable, "-m", "research_agent.daemon", job_id],
-        cwd=jobs_root.parent,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert proc.returncode == 0
-    # Python logging.warning() goes to stderr by default.
-    combined = proc.stdout + proc.stderr
-    assert "daemon entrypoint stub" in combined
-    assert "issue #33" in combined
+    # Job folder lacks job.json → Job.load raises FileNotFoundError → exit 1.
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    # atexit must still fire and unlink the (test-seeded) PID file.
+    assert not pid_file.exists(), "atexit hook must remove daemon.pid even on exit 1"
 
 
 def test_module_entrypoint_usage_when_missing_args() -> None:
@@ -250,3 +282,304 @@ def test_module_entrypoint_usage_when_missing_args() -> None:
     )
     assert proc.returncode == 2
     assert "usage" in proc.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# run_daemon: graceful path via STOP flag (no real LLM calls)
+# ---------------------------------------------------------------------------
+
+
+def _patch_run_daemon_for_in_process(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    run_loop_impl: Any,
+) -> dict[str, list[tuple[Any, ...]]]:
+    """Stub out the LLM-touching pieces of ``run_daemon`` for in-process tests.
+
+    Returns a dict of recorded calls so each test can assert what fired.
+    """
+    monkeypatch.setenv("RESEARCH_DAEMON_SKIP_HEALTH_CHECKS", "1")
+
+    calls: dict[str, list[tuple[Any, ...]]] = {"final_synthesis": [], "run_loop": []}
+
+    async def _wrapped_run_loop(job: Job, router: Any, **kwargs: Any) -> Any:
+        calls["run_loop"].append((job.id,))
+        return await run_loop_impl(job, router, **kwargs)
+
+    async def _final_synth_stub(job: Job, plan: Plan, *, router: Any) -> None:
+        calls["final_synthesis"].append((job.id, plan.version))
+        return None
+
+    monkeypatch.setattr(
+        "research_agent.orchestrator.loop.run_loop",
+        _wrapped_run_loop,
+    )
+    monkeypatch.setattr(
+        "research_agent.orchestrator.synth.final_synthesis",
+        _final_synth_stub,
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_stops_on_stop_flag(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An externally-dropped STOP flag triggers a clean shutdown with status=stopped."""
+
+    async def _waiting_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        # Mimic the real run_loop's STOP poll: spin until the flag exists.
+        for _ in range(200):
+            if (job.root / "STOP").exists():
+                return {"tasks_done": 0, "stopped": True, "completed": False, "cap_hit": False}
+            await asyncio.sleep(0.02)
+        return {"tasks_done": 0, "stopped": False, "completed": False, "cap_hit": False}
+
+    calls = _patch_run_daemon_for_in_process(monkeypatch, run_loop_impl=_waiting_run_loop)
+
+    async def _drop_stop() -> None:
+        await asyncio.sleep(0.1)
+        (seeded_job.root / "STOP").write_text("", encoding="utf-8")
+
+    drop_task = asyncio.create_task(_drop_stop())
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    await drop_task
+
+    assert exit_code == 0
+    assert calls["run_loop"], "run_loop must have been called"
+    assert calls["final_synthesis"], "final_synthesis must run after a stop"
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_sigterm_routes_through_same_graceful_path(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SIGTERM must flip the in-memory event AND touch STOP so the loop bails."""
+
+    async def _waiting_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        for _ in range(200):
+            if (job.root / "STOP").exists():
+                return {"tasks_done": 0, "stopped": True, "completed": False, "cap_hit": False}
+            await asyncio.sleep(0.02)
+        return {"tasks_done": 0, "stopped": False, "completed": False, "cap_hit": False}
+
+    calls = _patch_run_daemon_for_in_process(monkeypatch, run_loop_impl=_waiting_run_loop)
+
+    async def _send_sigterm() -> None:
+        await asyncio.sleep(0.1)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    sig_task = asyncio.create_task(_send_sigterm())
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    await sig_task
+
+    assert exit_code == 0
+    assert (seeded_job.root / "STOP").exists(), "signal handler must touch STOP"
+    assert calls["final_synthesis"], "final_synthesis must run after SIGTERM"
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_completed_status_when_plan_is_complete(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When run_loop returns and plan.is_complete(), status flips to completed."""
+
+    async def _instant_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        # Mark every subgoal done so the post-loop ``plan.is_complete()`` is True.
+        plan_dump = {
+            "version": 2,
+            "objective": "Investigate the target",
+            "subgoals": [{"id": 1, "description": "Gather", "done": True}],
+            "task_template": [{"kind": "web_search"}],
+            "expected_iterations": 3,
+        }
+        write_plan(job, plan_dump)
+        return {"tasks_done": 1, "stopped": False, "completed": True, "cap_hit": False}
+
+    _patch_run_daemon_for_in_process(monkeypatch, run_loop_impl=_instant_run_loop)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert exit_code == 0
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_uncaught_exception_marks_failed(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bubbling exceptions from run_loop produce status=failed + an error event."""
+
+    async def _crashing_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("planner explosion")
+
+    _patch_run_daemon_for_in_process(monkeypatch, run_loop_impl=_crashing_run_loop)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert exit_code == 1
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "failed"
+
+    conn = db.connect(seeded_job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT level, kind, payload_json FROM events WHERE job_id = ? AND kind = 'error'",
+            (seeded_job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows, "an error event must be emitted on uncaught exception"
+    payload = rows[-1]["payload_json"]
+    assert "planner explosion" in payload
+    assert "Traceback" in payload, "traceback must be captured in the error payload"
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_health_check_failure_exits_one(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreachable LM Studio at startup → status=failed, exit 1."""
+    monkeypatch.delenv("RESEARCH_DAEMON_SKIP_HEALTH_CHECKS", raising=False)
+
+    async def _fast_fail_lm(router: Any, *, deadline_s: float = 60.0) -> None:
+        raise RuntimeError("lm_studio not reachable: connection refused")
+
+    async def _ok_openrouter(router: Any, *, deadline_s: float = 60.0) -> None:
+        return None
+
+    monkeypatch.setattr(daemon, "ensure_lm_studio_alive", _fast_fail_lm)
+    monkeypatch.setattr(daemon, "ensure_openrouter_reachable", _ok_openrouter)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert exit_code == 1
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Health-check helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ensure_lm_studio_alive_succeeds_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One successful probe must short-circuit the retry loop."""
+
+    class _OkResp:
+        def raise_for_status(self) -> None:
+            return None
+
+    class _OkClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _OkClient:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs: Any) -> _OkResp:
+            return _OkResp()
+
+    monkeypatch.setattr(daemon.httpx, "AsyncClient", _OkClient)
+
+    class _StubRouter:
+        job = None
+
+    await daemon.ensure_lm_studio_alive(_StubRouter(), deadline_s=1.0)
+
+
+@pytest.mark.asyncio
+async def test_ensure_lm_studio_alive_raises_on_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent failures must raise RuntimeError once the deadline expires."""
+
+    class _BadClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _BadClient:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs: Any) -> Any:
+            raise ConnectionError("nope")
+
+    monkeypatch.setattr(daemon.httpx, "AsyncClient", _BadClient)
+    # Compress the backoff so the test finishes fast.
+    monkeypatch.setattr(daemon, "_HEALTH_INITIAL_DELAY_S", 0.01)
+    monkeypatch.setattr(daemon, "_HEALTH_MAX_DELAY_S", 0.02)
+
+    class _StubRouter:
+        job = None
+
+    with pytest.raises(RuntimeError, match="lm_studio not reachable"):
+        await daemon.ensure_lm_studio_alive(_StubRouter(), deadline_s=0.05)
+
+
+@pytest.mark.asyncio
+async def test_ensure_openrouter_reachable_requires_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    class _StubRouter:
+        job = None
+
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        await daemon.ensure_openrouter_reachable(_StubRouter(), deadline_s=1.0)
