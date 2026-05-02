@@ -180,6 +180,9 @@ def status_command(
             task_counts=data["task_counts"],
             cost=data["cost"],
             recent_events=data["recent_events"],
+            budget_cap=data["budget_cap"],
+            eta_seconds=data["eta_seconds"],
+            current_task=data["current_task"],
         )
 
     if not watch:

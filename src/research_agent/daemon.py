@@ -327,6 +327,10 @@ _STOP_POLL_INTERVAL_S = 2.0
 DISK_CAP_POLL_INTERVAL_S = 300.0
 DEFAULT_DISK_CAP_GB = 10.0
 
+# Foreground progress bar (issue #41). 2 s matches `research status --watch`
+# so the operator's two views advance in lockstep.
+FOREGROUND_PROGRESS_INTERVAL_S = 2.0
+
 
 def _build_router(job: Job) -> Any:
     """Build a :class:`Router` + :class:`BudgetTracker` for ``job``.
@@ -420,6 +424,129 @@ async def _disk_cap_watcher(
                 await asyncio.wait_for(should_stop.wait(), timeout=poll_s)
             except TimeoutError:
                 continue
+    except asyncio.CancelledError:
+        return
+
+
+def _should_show_foreground_progress(stream: Any) -> bool:
+    """True when the daemon should drive a Rich Progress bar on ``stream``.
+
+    Active only when stdout is a real TTY (``spawn_daemon`` redirects to a
+    log file, where this stays dormant) and the operator hasn't opted out
+    via ``RESEARCH_DAEMON_PROGRESS=0``. Anything that isn't ``"0"`` is
+    treated as opt-in.
+    """
+    if os.environ.get("RESEARCH_DAEMON_PROGRESS") == "0":
+        return False
+    isatty = getattr(stream, "isatty", None)
+    if isatty is None:
+        return False
+    try:
+        return bool(isatty())
+    except Exception:  # noqa: BLE001 — defensive: never let isatty crash the daemon
+        return False
+
+
+def _plan_completion(job: Job, plan_version: int | None) -> tuple[int, int]:
+    """Return ``(done_count, total_count)`` for the latest plan version's tasks.
+
+    ``plan_version`` is recomputed each tick because a mid-run replan
+    advances ``plans.version`` and the operator wants the bar to track the
+    *current* plan, not stale rows from a prior pass.
+    """
+    from research_agent.storage import db as _db
+
+    conn = _db.connect(job.db_path)
+    try:
+        if plan_version is None:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) AS v FROM plans WHERE job_id = ?",
+                (job.id,),
+            ).fetchone()
+            plan_version = int(row["v"]) if row is not None else 0
+
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM tasks"
+            " WHERE job_id = ? AND plan_version = ? GROUP BY status",
+            (job.id, plan_version),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    counts = {str(r["status"]): int(r["n"]) for r in rows}
+    done = counts.get("done", 0)
+    total = (
+        counts.get("pending", 0)
+        + counts.get("running", 0)
+        + counts.get("done", 0)
+        + counts.get("failed", 0)
+    )
+    return done, total
+
+
+async def _foreground_progress_task(
+    job: Job,
+    should_stop: asyncio.Event,
+    *,
+    interval_s: float | None = None,
+    stream: Any | None = None,
+    progress_factory: Any | None = None,
+) -> None:
+    """Drive a Rich ``Progress`` bar on stdout while the daemon runs.
+
+    Only runs when the chosen ``stream`` is a TTY and the
+    ``RESEARCH_DAEMON_PROGRESS`` env var is not ``"0"`` — under
+    :func:`spawn_daemon` stdout is the per-job log file (non-TTY), so this
+    coroutine returns immediately and never writes to disk. Tests inject a
+    fake ``progress_factory`` to capture updates without a real terminal.
+    """
+    chosen_stream = stream if stream is not None else sys.stdout
+    if not _should_show_foreground_progress(chosen_stream):
+        return
+
+    poll_s = interval_s if interval_s is not None else FOREGROUND_PROGRESS_INTERVAL_S
+
+    if progress_factory is None:
+        from rich.console import Console
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            TaskProgressColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+
+        def _factory() -> Any:
+            console = Console(file=chosen_stream, force_terminal=True)
+            return Progress(
+                TextColumn(f"[bold]{job.id}[/bold]"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TextColumn("•"),
+                TimeElapsedColumn(),
+                console=console,
+                transient=False,
+            )
+
+        progress = _factory()
+    else:
+        progress = progress_factory()
+
+    bar_id = progress.add_task("plan", total=1, completed=0)
+
+    try:
+        with progress:
+            while not should_stop.is_set():
+                try:
+                    done, total = _plan_completion(job, plan_version=None)
+                except Exception:  # noqa: BLE001 — bar must not crash the daemon
+                    logger.exception("foreground progress tick failed for job %s", job.id)
+                    done, total = 0, 0
+                progress.update(bar_id, total=max(1, total), completed=done)
+                try:
+                    await asyncio.wait_for(should_stop.wait(), timeout=poll_s)
+                except TimeoutError:
+                    continue
     except asyncio.CancelledError:
         return
 
@@ -540,6 +667,7 @@ async def run_daemon(
         disk_cap_gb = DEFAULT_DISK_CAP_GB
     cap_bytes = max(1, int(disk_cap_gb * 1024 * 1024 * 1024))
     disk_cap_task = aloop.create_task(_disk_cap_watcher(job, cap_bytes, should_stop))
+    progress_task = aloop.create_task(_foreground_progress_task(job, should_stop))
 
     from research_agent.llm.budgets import BudgetExceeded
 
@@ -655,6 +783,11 @@ async def run_daemon(
         disk_cap_task.cancel()
         try:
             await disk_cap_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        progress_task.cancel()
+        try:
+            await progress_task
         except (asyncio.CancelledError, Exception):
             pass
         if signals_installed:

@@ -51,6 +51,15 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         description="Override the default LM Studio base URL.",
         default="http://localhost:1234/v1",
     ),
+    EnvKey(
+        name="RESEARCH_DAEMON_PROGRESS",
+        required=False,
+        description=(
+            "Set to '0' to suppress the foreground Rich progress bar that the daemon"
+            " writes to stdout when run interactively. The spawned-daemon path is"
+            " unaffected (its stdout is a log file, so the bar stays dormant)."
+        ),
+    ),
 )
 
 
