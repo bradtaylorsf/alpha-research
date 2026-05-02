@@ -43,6 +43,7 @@ from tenacity import (
 )
 
 from research_agent.observability.events import emit
+from research_agent.orchestrator.checkpoint import checkpoint
 from research_agent.orchestrator.errors import FatalError, RetriableError
 from research_agent.orchestrator.plan import Plan, TaskKind, TaskSpec
 from research_agent.storage import db
@@ -179,7 +180,7 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         result = await critique(job, plan, latest_synth, router=router)
         if result.should_replan:
             critique_md = _load_critique_md(job, result.md_path)
-            await cloud_replan(job, plan, critique_md, router=router)
+            new_plan = await cloud_replan(job, plan, critique_md, router=router)
             emit(
                 job,
                 "INFO",
@@ -187,6 +188,15 @@ def default_handlers(router: Any) -> dict[str, Handler]:
                 "replan_triggered",
                 {
                     "from_version": plan.version,
+                    "critique_version": result.version,
+                },
+            )
+            checkpoint(
+                job,
+                "replan_done",
+                {
+                    "from_version": plan.version,
+                    "to_version": new_plan.version,
                     "critique_version": result.version,
                 },
             )
@@ -217,21 +227,6 @@ def default_handlers(router: Any) -> dict[str, Handler]:
 def _should_stop(job: Job) -> bool:
     """True when the operator dropped a ``STOP`` flag in the job folder."""
     return (job.root / "STOP").exists()
-
-
-def _checkpoint_hook(job: Job, plan: Plan, task: dict[str, Any]) -> None:
-    """Best-effort call into the (future) ``orchestrator.checkpoint`` module.
-
-    The checkpoint module ships in issue #29; until then the import simply
-    fails and the hook is a no-op so this loop can ship first.
-    """
-    try:
-        from research_agent.orchestrator.checkpoint import (
-            checkpoint,  # type: ignore[import-not-found]
-        )
-    except ImportError:
-        return
-    checkpoint(job, plan, task)
 
 
 def _should_synthesize(plan: Plan, tasks_done: int) -> bool:
@@ -381,6 +376,12 @@ async def run_loop(
     stopped = False
     cap_hit = False
 
+    checkpoint(
+        job,
+        "job_started",
+        {"plan_version": plan.version, "objective": plan.objective},
+    )
+
     while not _should_stop(job) and not plan.is_complete() and tasks_done < max_tasks:
         task = next_pending(job)
         if task is None:
@@ -394,7 +395,15 @@ async def run_loop(
             "task_pulled",
             {"task_id": task["id"], "kind": task["kind"]},
         )
-        _checkpoint_hook(job, plan, task)
+        checkpoint(
+            job,
+            "task_pulled",
+            {
+                "task_id": task["id"],
+                "kind": task["kind"],
+                "plan_version": plan.version,
+            },
+        )
 
         handler = handlers.get(task["kind"])
         if handler is None:
@@ -469,6 +478,11 @@ async def run_loop(
             "task_done",
             {"task_id": task["id"], "kind": task["kind"]},
         )
+        checkpoint(
+            job,
+            "task_done",
+            {"task_id": task["id"], "kind": task["kind"]},
+        )
 
         if follow_ups:
             _enqueue_follow_ups(job, list(follow_ups), task["plan_version"])
@@ -491,6 +505,7 @@ async def run_loop(
 
     if _should_stop(job):
         stopped = True
+        checkpoint(job, "stop_requested", {"tasks_done": tasks_done})
 
     return {
         "tasks_done": tasks_done,
@@ -524,6 +539,12 @@ async def _maybe_run_heuristic(
                     "warning",
                     {"heuristic": "synthesize", "error": str(exc)},
                 )
+            else:
+                checkpoint(
+                    job,
+                    "synthesis_done",
+                    {"tasks_done": tasks_done, "plan_version": plan.version},
+                )
     if _should_critique(plan, tasks_done):
         crit = handlers.get("critique")
         if crit is not None:
@@ -536,6 +557,12 @@ async def _maybe_run_heuristic(
                     "loop",
                     "warning",
                     {"heuristic": "critique", "error": str(exc)},
+                )
+            else:
+                checkpoint(
+                    job,
+                    "critique_done",
+                    {"tasks_done": tasks_done, "plan_version": plan.version},
                 )
 
 
