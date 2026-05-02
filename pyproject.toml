@@ -44,6 +44,17 @@ dev = [
 ui = []
 web = []
 
+# PEP 735 dependency groups. uv installs the `dev` group by default on
+# `uv run` / `uv sync`, so test/lint tools are available without an
+# explicit `--extra dev`. Mirrors `[project.optional-dependencies].dev`.
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
 [project.scripts]
 research = "research_agent.cli:app"
 
