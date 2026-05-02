@@ -600,6 +600,33 @@ def test_resume_pending_job_spawns_daemon(isolated_jobs_repo: Path, monkeypatch)
     assert "7777" in result.stdout
 
 
+def test_resume_clears_stale_stop_flag_before_spawn(isolated_jobs_repo: Path, monkeypatch):
+    """A `stop --graceful` leaves STOP on disk; resume must clear it pre-spawn.
+
+    Otherwise the freshly spawned daemon's first `_should_stop(job)` check sees
+    the stale flag and exits before doing any work.
+    """
+    job = _make_synthetic_job(isolated_jobs_repo)
+    (job.root / "STOP").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(cli.daemon, "is_daemon_alive", lambda _job_id: False)
+
+    spawn_observed: dict[str, bool] = {}
+
+    def _fake_spawn(job_id: str) -> int:
+        # The flag must be gone *before* spawn_daemon is called, not after.
+        spawn_observed["stop_present"] = (job.root / "STOP").exists()
+        return 4321
+
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", _fake_spawn)
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["resume", job.id])
+    assert result.exit_code == 0, result.stdout
+    assert spawn_observed["stop_present"] is False
+    assert not (job.root / "STOP").exists()
+
+
 def test_stop_graceful_then_resume_does_not_duplicate_findings(
     isolated_jobs_repo: Path, monkeypatch
 ):
@@ -688,10 +715,10 @@ def test_stop_graceful_then_resume_does_not_duplicate_findings(
     monkeypatch.setattr(cli.daemon, "is_daemon_alive", lambda _job_id: False)
 
     def _fake_spawn(job_id: str) -> int:
-        # Synchronously run another loop iteration in-process.
-        # All seeded tasks are STATUS_DONE, so next_pending() returns None
-        # and the loop exits without calling any handler.
-        (job.root / "STOP").unlink(missing_ok=True)
+        # Synchronously run another loop iteration in-process. The CLI's
+        # resume verb is responsible for clearing the stale STOP flag before
+        # this point — the loop sees a clean folder.
+        assert not (job.root / "STOP").exists()
         _asyncio.run(
             run_loop(
                 Job.load(job_id, jobs_root=isolated_jobs_repo / "jobs", db_path=db_path),

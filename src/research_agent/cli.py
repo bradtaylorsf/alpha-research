@@ -438,6 +438,17 @@ def resume_command(
         )
         raise typer.Exit(code=1)
 
+    # The orchestrator loop's first check is `_should_stop(job)`, which reads
+    # `jobs/<id>/STOP`. A prior `stop --graceful` leaves that flag on disk —
+    # left alone, the freshly spawned daemon would observe it and exit before
+    # touching the queue. Resume is an explicit intent to restart, so clear
+    # the stale flag here.
+    stop_flag = job.root / "STOP"
+    try:
+        stop_flag.unlink()
+    except FileNotFoundError:
+        pass
+
     pid = daemon.spawn_daemon(job.id)
     typer.echo(f"Resumed job {job.id} (daemon pid {pid}).")
 
