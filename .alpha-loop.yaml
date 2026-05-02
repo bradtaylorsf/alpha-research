@@ -6,6 +6,8 @@ agent: claude  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
 label: ready
 base_branch: main
 auto_merge: true
+batch_size: 5
+batch: true
 
 # --- Validation commands (Python 3.12 stack per research-agent-implementation-guide.md) ---
 # `uv` manages the venv and installs from pyproject.toml on first run, so these
@@ -19,15 +21,41 @@ auto_merge: true
 test_command: uv run pytest -q
 
 # dev_command is what `alpha-loop verify` would use to start a UI for Playwright.
-# This project is a CLI/daemon, not a UI — alpha-loop will detect non-UI diffs
-# and skip Playwright verify automatically. We point dev_command at the env
-# health check so any manual `--verify` run still does something useful.
+# Unused while skip_verify is true, but kept pointing at the env health check so
+# any manual `alpha-loop verify` still produces a useful signal.
 dev_command: uv run research doctor
+
+# setup_command runs once per fresh worktree before the agent starts.
+# Bootstraps the venv and editable install so the agent never sees `uv: not found`
+# or import errors mid-session. Failures are non-blocking (alpha-loop warns and
+# continues), so this is safe even before pyproject.toml exists.
+setup_command: uv sync && uv pip install -e .
+
+# This is a Python repo — skip the default `pnpm install` step.
+skip_install: true
+
+# CLI/daemon project, no UI to drive with Playwright — skip the verify stage entirely.
+skip_verify: true
+
+# Post-pipeline 60s smoke test. Fastest "did we break the CLI" check.
+# Runs after every issue completes. Once `research doctor` lands, extend to:
+#   smoke_test: uv run research --help && uv run research doctor
+smoke_test: uv run research --help
+
+# --- Per-step model routing (cost-aware) ---
+# Plan and review get Opus (correctness matters most); implement and learn get
+# Sonnet (bulk of token spend, quality is good enough).
+pipeline:
+  plan:      { model: opus }
+  implement: { model: sonnet }
+  review:    { model: opus }
+  learn:     { model: sonnet }
 
 # Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
   - claude
 
-# Safety limits (0 = unlimited)
-max_issues: 20
-max_session_duration: 7200  # 2 hours in seconds
+# --- Safety limits (0 = unlimited) ---
+max_issues: 60
+max_session_duration: 28800  # 8 hours in seconds
+agent_timeout: 3600          # 1 hour per issue (default 1800s = 30m, too short for large refactors)
