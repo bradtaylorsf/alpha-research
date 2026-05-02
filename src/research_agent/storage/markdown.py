@@ -260,6 +260,81 @@ def write_synthesis(
     return version
 
 
+def write_critique(
+    job: Job,
+    *,
+    payload: dict[str, Any],
+    content: str,
+    model: str,
+    cost_usd: float | None = None,
+    should_replan: bool = False,
+) -> int:
+    """Write the next critique version (md + json) and insert into ``critiques``.
+
+    The markdown body is the human-readable summary; the JSON sidecar carries
+    the raw structured payload so downstream consumers (planner, future UI)
+    can read the gaps/claims/suggestions without re-parsing markdown.
+    """
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("content must be a non-empty string")
+    if not isinstance(model, str) or not model:
+        raise ValueError("model must be a non-empty string")
+    if not isinstance(payload, dict):
+        raise ValueError(f"payload must be a dict; got {type(payload).__name__}")
+    if cost_usd is not None and (
+        isinstance(cost_usd, bool) or not isinstance(cost_usd, (int, float))
+    ):
+        raise ValueError(f"cost_usd must be a number or None; got {cost_usd!r}")
+
+    now = _now_epoch()
+    cost = float(cost_usd) if cost_usd is not None else None
+    payload_json = json.dumps(payload, sort_keys=True, default=str)
+
+    conn = db.connect(job.db_path)
+    try:
+        with conn:
+            version = _next_version(conn, "critiques", job.id)
+            md_rel = f"critique/{version:04d}.md"
+            json_rel = f"critique/{version:04d}.json"
+
+            md_body = content if content.endswith("\n") else content + "\n"
+            _atomic_write_text(job.root / md_rel, md_body)
+            _atomic_write_json(
+                job.root / json_rel,
+                {
+                    "version": version,
+                    "model": model,
+                    "cost_usd": cost,
+                    "should_replan": bool(should_replan),
+                    "payload": payload,
+                    "created_at": now,
+                },
+            )
+
+            conn.execute(
+                """
+                INSERT INTO critiques (
+                    job_id, version, md_path, model, cost_usd,
+                    should_replan, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.id,
+                    version,
+                    md_rel,
+                    model,
+                    cost,
+                    1 if should_replan else 0,
+                    payload_json,
+                    now,
+                ),
+            )
+    finally:
+        conn.close()
+
+    return version
+
+
 def write_report(job: Job, content: str) -> Path:
     """Rotate any prior ``report.md`` into ``report.history/`` then write fresh content."""
     if not isinstance(content, str):
@@ -286,6 +361,7 @@ def write_report(job: Job, content: str) -> Path:
 
 
 __all__ = [
+    "write_critique",
     "write_finding",
     "write_plan",
     "write_report",

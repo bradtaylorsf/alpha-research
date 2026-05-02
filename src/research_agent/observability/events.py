@@ -39,6 +39,8 @@ EventKind = Literal[
     "synthesis_done",
     "synthesis_written",
     "critique_done",
+    "critique_written",
+    "replan_triggered",
     "llm_call",
     "tool_call",
     "checkpoint",
