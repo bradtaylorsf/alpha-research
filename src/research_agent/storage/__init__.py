@@ -18,6 +18,7 @@ from research_agent.storage.markdown import (
     write_report,
     write_synthesis,
 )
+from research_agent.storage.search import search_fts
 from research_agent.storage.sources import (
     clean_content,
     content_sha256,
@@ -35,6 +36,7 @@ __all__ = [
     "content_sha256",
     "list_jobs",
     "migrate",
+    "search_fts",
     "write_finding",
     "write_plan",
     "write_report",

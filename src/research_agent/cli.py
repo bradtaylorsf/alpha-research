@@ -324,6 +324,60 @@ def smoke_tool_command(
         typer.echo(repr(result))
 
 
+@app.command(name="search")
+def search_command(
+    query: str = typer.Argument(..., help="FTS5 query string."),
+    job: str = typer.Option(None, "--job", help="Scope to a single job id."),
+    all_: bool = typer.Option(  # noqa: ARG001 — explicit flag; --all is the default
+        False,
+        "--all",
+        help="Search across all jobs (default when --job is not set).",
+    ),
+    kind: str = typer.Option(
+        "both",
+        "--kind",
+        help="What to search: findings | sources | both.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit machine-readable JSON instead of the Rich table.",
+    ),
+) -> None:
+    """Run FTS5 search over findings and/or sources."""
+    import sqlite3
+
+    from research_agent.storage.search import ALLOWED_KINDS, search_fts
+
+    if kind not in ALLOWED_KINDS:
+        typer.echo(
+            f"--kind must be one of {list(ALLOWED_KINDS)}; got {kind!r}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    job_id: str | None = None
+    if job is not None:
+        _load_job_or_exit(job)
+        job_id = job
+
+    try:
+        results = search_fts(query, job_id=job_id, kind=kind, db_path=db.DEFAULT_DB_PATH)
+    except sqlite3.OperationalError as e:
+        typer.echo(f"FTS5 query error: {e}", err=True)
+        raise typer.Exit(code=1) from e
+
+    if json_output:
+        typer.echo(render.search_results_to_json(results))
+        return
+
+    if not results:
+        typer.echo("(no results)")
+        return
+
+    Console().print(render.render_search_table(results))
+
+
 @app.command(name="logs")
 def logs_command(
     job_id: str = typer.Argument(..., help="Job id (e.g. 2026-05-02-some-slug)."),
