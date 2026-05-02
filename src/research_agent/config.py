@@ -41,6 +41,11 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         description="Set to '1' to launch Playwright in headed mode for debugging.",
     ),
     EnvKey(
+        name="RESEARCH_IGNORE_ROBOTS",
+        required=False,
+        description="Set to 1 to bypass robots.txt checks in web_fetch.",
+    ),
+    EnvKey(
         name="LMSTUDIO_BASE_URL",
         required=False,
         description="Override the default LM Studio base URL.",
