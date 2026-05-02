@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at INTEGER,
     last_activity_at INTEGER,
     pid INTEGER,
-    cost_so_far_usd REAL DEFAULT 0
+    cost_so_far_usd REAL DEFAULT 0,
+    completion_reason TEXT
 );
 
 -- Plan versions
@@ -261,6 +262,22 @@ def _migrate_sources_md_path_nullable(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_jobs_completion_reason(conn: sqlite3.Connection) -> None:
+    """Add ``jobs.completion_reason`` to legacy DBs that predate issue #39.
+
+    ``ALTER TABLE jobs ADD COLUMN`` is the only safe way to add a nullable
+    column without rebuilding the table; this helper checks
+    ``PRAGMA table_info(jobs)`` first so it is idempotent. Runs inside the
+    caller's transaction.
+    """
+    cols = conn.execute("PRAGMA table_info(jobs)").fetchall()
+    if not cols:
+        return  # table doesn't exist yet; SCHEMA_SQL will create it with the column
+    if any(c["name"] == "completion_reason" for c in cols):
+        return  # already migrated
+    conn.execute("ALTER TABLE jobs ADD COLUMN completion_reason TEXT")
+
+
 def migrate(
     conn: sqlite3.Connection | None = None,
     *,
@@ -276,4 +293,5 @@ def migrate(
     with conn:
         conn.executescript(SCHEMA_SQL)
         _migrate_sources_md_path_nullable(conn)
+        _migrate_jobs_completion_reason(conn)
     return conn

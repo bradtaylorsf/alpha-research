@@ -69,15 +69,18 @@ def render_jobs_table(jobs: list[dict[str, Any]], *, now: int | None = None) -> 
     table = Table(title="research jobs", show_lines=False)
     table.add_column("id", overflow="fold")
     table.add_column("status")
+    table.add_column("reason")
     table.add_column("goal")
     table.add_column("age")
     table.add_column("cost")
     table.add_column("last activity")
 
     for row in jobs:
+        reason = row.get("completion_reason") or ""
         table.add_row(
             str(row.get("id", "")),
             _status_cell(str(row.get("status", ""))),
+            str(reason),
             _truncate(str(row.get("goal", ""))),
             _humanize_age(now_epoch, row.get("created_at")),
             _format_cost(row.get("cost_so_far_usd")),

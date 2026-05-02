@@ -388,6 +388,126 @@ def _write_stub_output(job: Job) -> SynthesisOutput:
     )
 
 
+def _confidence_bucket(conf: float) -> str:
+    if conf >= 0.8:
+        return "high"
+    if conf >= 0.5:
+        return "medium"
+    return "low"
+
+
+def _render_template_stub(
+    *,
+    goal: str,
+    findings: list[dict[str, Any]],
+    sources: dict[int, dict[str, Any]],
+) -> str:
+    """Render a no-LLM markdown report from on-disk findings + sources.
+
+    Used when even ``frontier_speed`` precheck blows the cap: every byte
+    here comes from the SQLite mirror, so the user always gets a readable
+    report.md even with $0 left in the budget.
+    """
+    lines: list[str] = [
+        "# Report (budget cap — template stub)",
+        "",
+        "Research budget cap was reached before any synthesis call could run.",
+        "This report is a template-rendered summary of the findings already on",
+        "disk; no LLM call was made.",
+        "",
+        "## Goal",
+        "",
+        goal.strip(),
+        "",
+        "## Findings",
+        "",
+    ]
+
+    if not findings:
+        lines.append("_No findings recorded before the cap was hit._")
+        lines.append("")
+    else:
+        buckets: dict[str, list[dict[str, Any]]] = {"high": [], "medium": [], "low": []}
+        for f in findings:
+            buckets[_confidence_bucket(float(f["confidence"]))].append(f)
+
+        for bucket_name in ("high", "medium", "low"):
+            bucket = buckets[bucket_name]
+            if not bucket:
+                continue
+            lines.append(f"### {bucket_name.capitalize()} confidence")
+            lines.append("")
+            for f in bucket:
+                sids = f.get("source_ids") or []
+                sids_str = (
+                    " (sources: " + ", ".join(f"#{sid}" for sid in sids) + ")" if sids else ""
+                )
+                lines.append(f"- {f['claim']}{sids_str}")
+            lines.append("")
+
+    lines.append("## Sources")
+    lines.append("")
+    if not sources:
+        lines.append("_No sources cited by the findings above._")
+        lines.append("")
+    else:
+        for sid in sorted(sources.keys()):
+            src = sources[sid]
+            title = src.get("title") or "(untitled)"
+            url = src.get("url") or "(no url)"
+            lines.append(f"- [{sid}] {title} — {url}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_template_stub_output(job: Job) -> SynthesisOutput:
+    """Build a markdown report from on-disk findings/sources — no LLM call.
+
+    Falls back to :data:`_BUDGET_STUB_REPORT` only when there are zero
+    findings, since rendering an empty bullet list isn't useful.
+    """
+    findings = _load_top_findings(job, FINAL_TOP_N)
+    sources = _load_sources_for(job, findings)
+
+    if not findings:
+        content = _BUDGET_STUB_REPORT
+    else:
+        content = _render_template_stub(
+            goal=job.goal,
+            findings=findings,
+            sources=sources,
+        )
+
+    version = write_synthesis(
+        job,
+        content,
+        model="budget_capped_template",
+        cost_usd=None,
+    )
+    report_path = write_report(job, content)
+    emit(
+        job,
+        "INFO",
+        "synth",
+        "synthesis_written",
+        {
+            "version": version,
+            "tier": "template_stub",
+            "truncated": True,
+            "report_path": str(report_path),
+        },
+    )
+    return SynthesisOutput(
+        version=version,
+        content=content,
+        model="budget_capped_template",
+        cost_usd=None,
+        report_path=str(report_path),
+        truncated=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
@@ -426,10 +546,88 @@ async def final_synthesis(job: Job, plan: Plan, *, router: Router) -> SynthesisO
     )
 
 
+async def final_synthesis_after_cap(
+    job: Job,
+    plan: Plan,  # noqa: ARG001 — plan reserved for future prompt context
+    *,
+    router: Router,
+) -> SynthesisOutput:
+    """Final-pass synthesis triggered after the loop hit the per-job budget cap.
+
+    The ``frontier`` tier is skipped: we already know the cap was tripped, so
+    going straight to ``frontier_speed`` saves the precheck overhead and any
+    misleading "fell back to fallback" event noise. If even ``frontier_speed``
+    blows the precheck (truly $0 left), :func:`_write_template_stub_output`
+    renders a report from on-disk findings without making any LLM call.
+    """
+    findings = _load_top_findings(job, FINAL_TOP_N)
+    sources = _load_sources_for(job, findings)
+    prior = _load_prior_synthesis(job)
+    critique = _load_latest_critique(job)
+
+    context = _build_context(
+        goal=job.goal,
+        findings=findings,
+        sources=sources,
+        prior=prior,
+        critique=critique,
+        final=True,
+    )
+
+    fallback_tier = "frontier_speed"
+    try:
+        content = await _run_synth(job, router, fallback_tier, context)
+    except BudgetExceeded as exc:
+        logger.warning("synth: budget exceeded on %s tier (post-cap): %s", fallback_tier, exc)
+        emit(
+            job,
+            "WARN",
+            "synth",
+            "warning",
+            {"stage": fallback_tier, "error": str(exc), "budget_capped": True},
+        )
+        return _write_template_stub_output(job)
+    except Exception as exc:  # noqa: BLE001 — terminal retry exhaustion
+        logger.warning("synth: %s tier failed after retries (post-cap): %s", fallback_tier, exc)
+        return _write_failed_output(job, tier=fallback_tier, exc=exc, attempt_count=1)
+
+    cost = getattr(router.budget, "last_cost", None)
+    cost_val: float | None = float(cost) if isinstance(cost, (int, float)) else None
+    model_name = _model_name_for(router, fallback_tier)
+
+    version = write_synthesis(job, content, model=model_name, cost_usd=cost_val)
+    synth_md = (job.root / f"synthesis/{version:04d}.md").read_text(encoding="utf-8")
+    report_path = write_report(job, synth_md)
+
+    emit(
+        job,
+        "INFO",
+        "synth",
+        "synthesis_written",
+        {
+            "version": version,
+            "tier": fallback_tier,
+            "truncated": False,
+            "report_path": str(report_path),
+            "post_cap": True,
+        },
+    )
+
+    return SynthesisOutput(
+        version=version,
+        content=content,
+        model=model_name,
+        cost_usd=cost_val,
+        report_path=str(report_path),
+        truncated=False,
+    )
+
+
 __all__ = [
     "FINAL_TOP_N",
     "SynthesisOutput",
     "TOP_N_FINDINGS",
     "final_synthesis",
+    "final_synthesis_after_cap",
     "synthesize",
 ]

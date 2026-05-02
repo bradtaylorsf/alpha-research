@@ -751,6 +751,36 @@ def test_jobs_to_json_round_trips():
     assert payload == rows
 
 
+def test_render_jobs_table_includes_reason_column():
+    """Issue #39: ``research list`` surfaces ``completion_reason`` as its own column."""
+    rows = [
+        {
+            "id": "2026-05-02-x",
+            "status": "completed",
+            "goal": "g",
+            "created_at": 1,
+            "last_activity_at": 2,
+            "cost_so_far_usd": 1.5,
+            "completion_reason": "budget_cap",
+        },
+    ]
+    table = render.render_jobs_table(rows)
+    headers = [str(c.header) for c in table.columns]
+    assert "reason" in headers
+
+
+def test_list_jobs_returns_completion_reason_field(isolated_jobs_repo: Path):
+    """``list_jobs`` SELECT must include ``completion_reason`` so JSON output carries it."""
+    from research_agent.storage.jobs import list_jobs
+
+    job = _make_synthetic_job(isolated_jobs_repo, goal="reason coverage")
+    job.set_status("completed", completion_reason="budget_cap")
+
+    rows = list_jobs(db_path=isolated_jobs_repo / "data" / "index.sqlite")
+    assert rows
+    assert rows[0]["completion_reason"] == "budget_cap"
+
+
 def test_format_event_line_includes_ts_level_kind():
     line = render.format_event_line(
         {"ts": 1700000000, "level": "INFO", "kind": "job_started", "actor": "daemon"}

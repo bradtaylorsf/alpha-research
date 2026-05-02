@@ -253,3 +253,133 @@ def test_charge_then_rehydrate_preserves_total(job: Job, db_path: Path) -> None:
 
     bt2 = BudgetTracker(job.id, cap_usd=10.0, pricing=PRICING, db_path=db_path)
     assert bt2.spent == pytest.approx(cost)
+
+
+# ---------------------------------------------------------------------------
+# Post-cap final-pass enforcement (issue #39)
+# ---------------------------------------------------------------------------
+
+
+def test_post_cap_path_runs_template_stub(
+    job: Job, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``frontier_speed`` precheck also blows the cap, the template stub runs.
+
+    No LLM call must be made: any router.call invocation is configured to
+    raise so the assertion is unambiguous.
+    """
+    import asyncio
+
+    from research_agent.orchestrator import synth as synth_module
+    from research_agent.orchestrator.plan import Plan, Subgoal, TaskSpec
+    from research_agent.storage.markdown import write_finding, write_plan
+    from research_agent.storage.sources import write_source
+
+    plan = Plan(
+        version=1,
+        objective="post-cap goal",
+        subgoals=[Subgoal(id=1, description="x", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=2,
+    )
+    write_plan(job, plan.model_dump())
+
+    sid = write_source(
+        job, url="https://example.com/a", title="src A", raw_content="body", kind="web"
+    )
+    write_finding(job, "claim with high confidence", 0.95, [sid])
+    write_finding(job, "claim with medium confidence", 0.6, [sid])
+    write_finding(job, "claim with low confidence", 0.2, [sid])
+
+    # Drive the BudgetTracker past the cap so any precheck raises.
+    bt = BudgetTracker(job.id, cap_usd=1.0, pricing=PRICING, db_path=db_path)
+    bt.spent = 5.0
+    with pytest.raises(BudgetExceeded):
+        bt.precheck("frontier_speed")
+
+    class _ExplodingRouter:
+        def __init__(self, budget: BudgetTracker) -> None:
+            self.budget = budget
+            self.tiers = {
+                "frontier_speed": {"provider": "openrouter", "model": "haiku"},
+            }
+
+        def model_for(self, tier: str):
+            raise AssertionError(f"model_for must not be invoked post-cap; got {tier!r}")
+
+        async def call(self, *args, **kwargs):
+            raise AssertionError("router.call must not be invoked when precheck fails")
+
+    # Make _run_synth raise BudgetExceeded directly so we don't need pydantic_ai.
+    async def _fake_run_synth(_job, _router, tier, _context):
+        raise BudgetExceeded(_job.id, spent=5.0, cap=1.0)
+
+    monkeypatch.setattr(synth_module, "_run_synth", _fake_run_synth)
+
+    out = asyncio.run(
+        synth_module.final_synthesis_after_cap(job, plan, router=_ExplodingRouter(bt))
+    )
+
+    assert out.truncated is True
+    assert out.model == "budget_capped_template"
+    assert out.cost_usd is None
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "template stub" in report.lower()
+    assert "claim with high confidence" in report
+    assert "claim with medium confidence" in report
+    assert "claim with low confidence" in report
+    assert "src A" in report
+
+
+def test_post_cap_path_runs_frontier_speed_when_budget_remains(
+    job: Job, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Partial spend leaves headroom — frontier_speed succeeds and writes a real synthesis."""
+    import asyncio
+
+    from research_agent.orchestrator import synth as synth_module
+    from research_agent.orchestrator.plan import Plan, Subgoal, TaskSpec
+    from research_agent.storage.markdown import write_finding, write_plan
+    from research_agent.storage.sources import write_source
+
+    plan = Plan(
+        version=1,
+        objective="partial-spend goal",
+        subgoals=[Subgoal(id=1, description="x", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=2,
+    )
+    write_plan(job, plan.model_dump())
+    sid = write_source(
+        job, url="https://example.com/a", title="src A", raw_content="body", kind="web"
+    )
+    write_finding(job, "claim", 0.6, [sid])
+
+    class _PartialBudget:
+        def __init__(self) -> None:
+            self.last_cost = 0.001
+
+    class _StubRouter:
+        def __init__(self) -> None:
+            self.budget = _PartialBudget()
+            self.tiers = {"frontier_speed": {"provider": "openrouter", "model": "haiku"}}
+
+        def model_for(self, tier: str):
+            return tier
+
+        async def call(self, *args, **kwargs):
+            raise AssertionError("call must not be reached; _run_synth is stubbed")
+
+    async def _fake_run_synth(_job, _router, tier, _context):
+        assert tier == "frontier_speed"
+        return "# Recovered post-cap synthesis\n\nbody\n"
+
+    monkeypatch.setattr(synth_module, "_run_synth", _fake_run_synth)
+
+    out = asyncio.run(synth_module.final_synthesis_after_cap(job, plan, router=_StubRouter()))
+    assert out.truncated is False
+    assert out.model == "haiku"
+    assert out.cost_usd == pytest.approx(0.001)
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "Recovered post-cap synthesis" in report
