@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -263,9 +264,26 @@ def test_router_construction_validates_required_tiers(
 
 
 class _RecordingBudget:
-    def __init__(self) -> None:
+    """Test double for :class:`BudgetTracker`.
+
+    Mirrors the production contract: ``charge`` returns the priced cost and
+    is the single writer of the cloud ``llm_calls`` row, so cloud-tier tests
+    that assert ledger state see exactly what production would emit.
+    """
+
+    def __init__(
+        self,
+        *,
+        cost_per_call: float = 0.0,
+        db_path: Path | None = None,
+        job_id: str | None = None,
+    ) -> None:
         self.precheck_calls: list[str] = []
-        self.charge_calls: list[tuple[str, str, str, TokenUsage, float]] = []
+        self.charge_calls: list[tuple[str, str, str, TokenUsage]] = []
+        self._cost = cost_per_call
+        self._db_path = db_path
+        self._job_id = job_id
+        self.last_cost: float = 0.0
 
     def precheck(self, tier: str) -> None:
         self.precheck_calls.append(tier)
@@ -276,9 +294,38 @@ class _RecordingBudget:
         provider: str,
         model: str,
         usage: TokenUsage,
-        cost_usd: float,
-    ) -> None:
-        self.charge_calls.append((tier, provider, model, usage, cost_usd))
+    ) -> float:
+        self.charge_calls.append((tier, provider, model, usage))
+        cost = self._cost
+        if self._db_path is not None and self._job_id is not None:
+            ts = int(time.time())
+            conn = db.connect(self._db_path)
+            try:
+                with conn:
+                    conn.execute(
+                        "INSERT INTO llm_calls ("
+                        " job_id, ts, tier, provider, model,"
+                        " input_tokens, output_tokens, cached_tokens,"
+                        " latency_ms, cost_usd, finish_reason"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            self._job_id,
+                            ts,
+                            tier,
+                            provider,
+                            model,
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.cached_tokens,
+                            usage.latency_ms,
+                            cost,
+                            usage.finish_reason,
+                        ),
+                    )
+            finally:
+                conn.close()
+        self.last_cost = cost
+        return cost
 
 
 @pytest.mark.asyncio
@@ -298,7 +345,7 @@ async def test_call_runs_precheck_and_charge_for_cloud(
     assert result is agent.result
     assert budget.precheck_calls == ["frontier_speed"]
     assert len(budget.charge_calls) == 1
-    tier, provider, model, usage, _cost = budget.charge_calls[0]
+    tier, provider, model, usage = budget.charge_calls[0]
     assert tier == "frontier_speed"
     assert provider == "openrouter"
     assert model == "anthropic/claude-haiku-4-5"
@@ -338,8 +385,13 @@ async def test_ratelimit_falls_back_to_fallback_model_for_cloud(
     job: Job,
 ) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
-    budget = _RecordingBudget()
-    router = Router(models_config, budget, job=job, db_path=db_path)  # type: ignore[arg-type]
+    budget = BudgetTracker(
+        job.id,
+        cap_usd=None,
+        pricing=models_config.get("pricing"),
+        db_path=db_path,
+    )
+    router = Router(models_config, budget, job=job, db_path=db_path)
 
     fallback_agent = _FakeAgent(result=_FakeResult())
     monkeypatch.setattr(
@@ -355,11 +407,12 @@ async def test_ratelimit_falls_back_to_fallback_model_for_cloud(
     assert len(primary_agent.calls) == 1
     assert len(fallback_agent.calls) == 1
 
-    # llm_calls row should be tagged with the fallback model.
+    # llm_calls row should be tagged with the fallback model and carry the
+    # priced cost computed from frontier-tier rates.
     conn = db.connect(db_path)
     try:
         row = conn.execute(
-            "SELECT model, tier, provider FROM llm_calls WHERE job_id = ?",
+            "SELECT model, tier, provider, cost_usd FROM llm_calls WHERE job_id = ?",
             (job.id,),
         ).fetchone()
     finally:
@@ -368,6 +421,11 @@ async def test_ratelimit_falls_back_to_fallback_model_for_cloud(
     assert row["model"] == "openai/gpt-5"
     assert row["tier"] == "frontier"
     assert row["provider"] == "openrouter"
+    pricing = models_config["pricing"]["frontier"]
+    expected_cost = (
+        12 * float(pricing["input_usd_per_mtok"]) + 34 * float(pricing["output_usd_per_mtok"])
+    ) / 1_000_000
+    assert row["cost_usd"] == pytest.approx(expected_cost)
 
     # Event payload should mark fallback_used=True.
     events_path = job.root / "events.jsonl"
@@ -541,21 +599,13 @@ def test_budget_precheck_no_cap_is_noop(db_path: Path) -> None:
     bt.precheck("frontier")  # must not raise
 
 
-def test_budget_rehydrates_running_total_from_ledger(job: Job, db_path: Path) -> None:
+def test_budget_rehydrates_running_total_from_jobs_row(job: Job, db_path: Path) -> None:
     conn = db.connect(db_path)
     try:
         with conn:
             conn.execute(
-                "INSERT INTO llm_calls ("
-                " job_id, ts, tier, provider, model, cost_usd"
-                ") VALUES (?, ?, ?, ?, ?, ?)",
-                (job.id, 1, "frontier", "openrouter", "anthropic/claude-opus-4-7", 1.5),
-            )
-            conn.execute(
-                "INSERT INTO llm_calls ("
-                " job_id, ts, tier, provider, model, cost_usd"
-                ") VALUES (?, ?, ?, ?, ?, ?)",
-                (job.id, 2, "frontier", "openrouter", "anthropic/claude-opus-4-7", 0.75),
+                "UPDATE jobs SET cost_so_far_usd = ? WHERE id = ?",
+                (2.25, job.id),
             )
     finally:
         conn.close()
@@ -564,18 +614,27 @@ def test_budget_rehydrates_running_total_from_ledger(job: Job, db_path: Path) ->
     assert bt.spent == pytest.approx(2.25)
 
 
-def test_budget_charge_only_bumps_in_memory(db_path: Path) -> None:
-    bt = BudgetTracker("ledger-1", cap_usd=10.0, db_path=db_path)
-    usage = TokenUsage(input_tokens=10, output_tokens=20)
-    bt.charge("frontier", "openrouter", "anthropic/claude-opus-4-7", usage, 0.5)
-    assert bt.spent == pytest.approx(0.5)
+def test_budget_charge_persists_to_ledger_and_jobs_total(job: Job, db_path: Path) -> None:
+    pricing = {
+        "frontier": {"input_usd_per_mtok": 10.0, "output_usd_per_mtok": 30.0},
+    }
+    bt = BudgetTracker(job.id, cap_usd=10.0, pricing=pricing, db_path=db_path)
+    usage = TokenUsage(input_tokens=1_000_000, output_tokens=500_000)
+    cost = bt.charge("frontier", "openrouter", "anthropic/claude-opus-4-7", usage)
+
+    expected = 1_000_000 * 10.0 / 1_000_000 + 500_000 * 30.0 / 1_000_000
+    assert cost == pytest.approx(expected)
+    assert bt.spent == pytest.approx(expected)
 
     conn = db.connect(db_path)
     try:
-        rows = conn.execute(
-            "SELECT COUNT(*) FROM llm_calls WHERE job_id = ?", ("ledger-1",)
-        ).fetchone()
+        rows = conn.execute("SELECT cost_usd FROM llm_calls WHERE job_id = ?", (job.id,)).fetchall()
+        cost_so_far = conn.execute(
+            "SELECT cost_so_far_usd FROM jobs WHERE id = ?", (job.id,)
+        ).fetchone()[0]
     finally:
         conn.close()
-    # Router is the single writer of the ledger; charge() must not.
-    assert rows[0] == 0
+    # charge() is the single writer of the cloud ledger row.
+    assert len(rows) == 1
+    assert rows[0]["cost_usd"] == pytest.approx(expected)
+    assert cost_so_far == pytest.approx(expected)

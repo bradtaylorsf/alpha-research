@@ -66,3 +66,18 @@ tiers:
     purpose: |
       Fast cloud calls when a local model isn't enough but Opus is
       overkill. Adaptive intake follow-ups, micro-summaries.
+
+# Per-cloud-tier list prices (USD per 1M tokens). Manually maintained — the
+# OpenRouter pricing API is a future-deps item. Update whenever the upstream
+# provider changes a list price; `BudgetTracker.charge` reads this block to
+# compute cost from token counts. Local tiers omit pricing (cost is $0).
+pricing:
+  frontier:
+    input_usd_per_mtok: 15.00
+    output_usd_per_mtok: 75.00
+  frontier_alt:
+    input_usd_per_mtok: 0.60
+    output_usd_per_mtok: 2.50
+  frontier_speed:
+    input_usd_per_mtok: 1.00
+    output_usd_per_mtok: 5.00
