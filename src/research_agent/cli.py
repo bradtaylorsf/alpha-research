@@ -127,13 +127,22 @@ def list_command(
     Console().print(render.render_jobs_table(jobs))
 
 
+def _load_job_or_exit(job_id: str) -> Job:
+    """Load a job or emit a clean ``not found`` error and exit(1)."""
+    try:
+        return Job.load(job_id)
+    except (FileNotFoundError, KeyError, ValueError) as e:
+        typer.echo(f"job not found: {job_id} ({e})", err=True)
+        raise typer.Exit(code=1) from e
+
+
 @app.command(name="status")
 def status_command(
     job_id: str = typer.Argument(..., help="Job id (e.g. 2026-05-02-some-slug)."),
     watch: bool = typer.Option(False, "--watch", help="Refresh every 2 seconds."),
 ) -> None:
     """Show a detailed Rich panel for a single job."""
-    job = Job.load(job_id)
+    job = _load_job_or_exit(job_id)
     console = Console()
 
     def _panel():
@@ -197,7 +206,7 @@ def view_command(
     sources: bool = typer.Option(False, "--sources", help="View a list of job sources."),
 ) -> None:
     """View a research artifact (report, finding, or sources list)."""
-    job = Job.load(job_id)
+    job = _load_job_or_exit(job_id)
 
     if findings:
         path = _latest_finding_path(job.root)
@@ -230,7 +239,7 @@ def logs_command(
     level: str = typer.Option(None, "--level", help="Filter by event level (e.g. INFO, ERROR)."),
 ) -> None:
     """Tail a job's events.jsonl. With ``-f`` follows appended events."""
-    job = Job.load(job_id)
+    job = _load_job_or_exit(job_id)
     events_path = job.root / "events.jsonl"
     try:
         for event in render.tail_events_jsonl(events_path, follow=follow, level=level):

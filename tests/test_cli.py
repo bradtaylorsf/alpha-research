@@ -298,7 +298,11 @@ def test_status_renders_panel_for_pending_job(isolated_jobs_repo: Path):
 def test_status_unknown_job_errors(isolated_jobs_repo: Path):
     runner = CliRunner()
     result = runner.invoke(cli.app, ["status", "2026-05-02-does-not-exist"])
-    assert result.exit_code != 0
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "job not found" in combined
+    # No Python traceback should leak to the user.
+    assert "Traceback" not in combined
 
 
 def test_view_report_prints_content(isolated_jobs_repo: Path):
@@ -379,7 +383,21 @@ def test_logs_level_filter(isolated_jobs_repo: Path):
 def test_logs_unknown_job_errors(isolated_jobs_repo: Path):
     runner = CliRunner()
     result = runner.invoke(cli.app, ["logs", "2026-05-02-does-not-exist"])
-    assert result.exit_code != 0
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "job not found" in combined
+    assert "Traceback" not in combined
+
+
+def test_view_unknown_job_errors(isolated_jobs_repo: Path):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app, ["view", "2026-05-02-does-not-exist"], env={"EDITOR": ""}
+    )
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "job not found" in combined
+    assert "Traceback" not in combined
 
 
 # ---------------------------------------------------------------------------
