@@ -81,6 +81,10 @@ CREATE TABLE IF NOT EXISTS findings (
 CREATE INDEX IF NOT EXISTS idx_findings_job ON findings(job_id);
 
 -- Sources (deduplicated across jobs)
+-- ``md_path`` is nullable: the disk-cap watcher (issue #38) prunes the
+-- on-disk markdown for the lowest-relevance sources and clears this column
+-- to NULL while leaving the row in place for cross-job audit. A future
+-- fetch with the same sha256 rewrites the file and restores the path.
 CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sha256 TEXT NOT NULL UNIQUE,
@@ -88,7 +92,7 @@ CREATE TABLE IF NOT EXISTS sources (
     title TEXT,
     fetched_at INTEGER NOT NULL,
     archive_url TEXT,
-    md_path TEXT NOT NULL,
+    md_path TEXT,
     kind TEXT,
     embedding BLOB
 );
@@ -210,6 +214,53 @@ def connect_for_checkpoints(path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Conne
     return connect(path, synchronous="FULL")
 
 
+def _migrate_sources_md_path_nullable(conn: sqlite3.Connection) -> None:
+    """Drop the legacy ``NOT NULL`` constraint on ``sources.md_path``.
+
+    SQLite can't ``ALTER COLUMN`` to remove a NOT NULL, so we detect the old
+    schema via ``PRAGMA table_info(sources)`` and, when found, rebuild the
+    table: create ``sources_new`` with the relaxed column, copy rows, drop
+    the old table, rename. Idempotent — a no-op once the column is already
+    nullable. Runs inside the caller's transaction.
+    """
+    cols = conn.execute("PRAGMA table_info(sources)").fetchall()
+    if not cols:
+        return  # table doesn't exist yet; SCHEMA_SQL will create it nullable
+    md_path_col = next((c for c in cols if c["name"] == "md_path"), None)
+    if md_path_col is None or md_path_col["notnull"] == 0:
+        return  # already nullable
+
+    # FTS5 external-content tables reference ``sources`` by rowid; drop the
+    # virtual table first, rebuild ``sources``, then re-create + repopulate
+    # the FTS index from the new content table.
+    conn.executescript(
+        """
+        DROP TABLE IF EXISTS sources_fts;
+        CREATE TABLE sources_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sha256 TEXT NOT NULL UNIQUE,
+            url TEXT,
+            title TEXT,
+            fetched_at INTEGER NOT NULL,
+            archive_url TEXT,
+            md_path TEXT,
+            kind TEXT,
+            embedding BLOB
+        );
+        INSERT INTO sources_new
+            (id, sha256, url, title, fetched_at, archive_url, md_path, kind, embedding)
+            SELECT id, sha256, url, title, fetched_at, archive_url, md_path, kind, embedding
+            FROM sources;
+        DROP TABLE sources;
+        ALTER TABLE sources_new RENAME TO sources;
+        CREATE VIRTUAL TABLE sources_fts USING fts5(
+            title, content=sources, content_rowid=id
+        );
+        INSERT INTO sources_fts(sources_fts) VALUES('rebuild');
+        """
+    )
+
+
 def migrate(
     conn: sqlite3.Connection | None = None,
     *,
@@ -224,4 +275,5 @@ def migrate(
         conn = connect(path)
     with conn:
         conn.executescript(SCHEMA_SQL)
+        _migrate_sources_md_path_nullable(conn)
     return conn

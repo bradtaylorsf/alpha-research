@@ -95,6 +95,12 @@ def start_command(
         "--corpus",
         help="Path to a local corpus directory to scope the research.",
     ),
+    disk_cap_gb: float = typer.Option(
+        10.0,
+        "--disk-cap-gb",
+        help="Per-job disk cap in GB (default 10). Source markdown is pruned in"
+        " relevance order when usage exceeds the cap.",
+    ),
 ) -> None:
     """Register a new research job and spawn its background daemon."""
     if skip_intake:
@@ -106,6 +112,7 @@ def start_command(
             "domain": "general",
             "time_cap_hours": time_cap,
             "budget_cap_usd": budget_usd,
+            "disk_cap_gb": disk_cap_gb,
         }
         if corpus:
             intake_data["corpus"] = corpus
@@ -116,6 +123,7 @@ def start_command(
             "time_cap_hours": answers["time_cap"],
             "budget_cap_usd": answers["budget_usd"],
             "corpus": answers["corpus_path"],
+            "disk_cap_gb": disk_cap_gb,
         }
 
     # Make sure the schema exists so the testing back door is self-bootstrapping.

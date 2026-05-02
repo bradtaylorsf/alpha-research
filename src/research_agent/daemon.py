@@ -322,6 +322,11 @@ async def ensure_openrouter_reachable(router: Any, *, deadline_s: float = 60.0) 
 
 _STOP_POLL_INTERVAL_S = 2.0
 
+# Per-job disk cap watcher (issue #38). Module-level so tests can compress
+# the cadence to a fraction of a second.
+DISK_CAP_POLL_INTERVAL_S = 300.0
+DEFAULT_DISK_CAP_GB = 10.0
+
 
 def _build_router(job: Job) -> Any:
     """Build a :class:`Router` + :class:`BudgetTracker` for ``job``.
@@ -373,6 +378,50 @@ def _install_stop_signal_handlers(
 
     aloop.add_signal_handler(signal.SIGTERM, _on_signal)
     aloop.add_signal_handler(signal.SIGINT, _on_signal)
+
+
+async def _disk_cap_watcher(
+    job: Job,
+    cap_bytes: int,
+    should_stop: asyncio.Event,
+    *,
+    interval_s: float | None = None,
+) -> None:
+    """Poll job-folder disk usage; prune lowest-relevance sources when over cap.
+
+    Wakes every ``interval_s`` (default :data:`DISK_CAP_POLL_INTERVAL_S`,
+    300 s per issue #38) using ``asyncio.wait_for`` against ``should_stop``
+    so SIGTERM cancels the wait promptly. Each tick is wrapped in
+    try/except + a ``warning`` event so a transient OSError can't kill
+    the daemon.
+    """
+    from research_agent.storage.disk_cap import disk_usage_bytes, prune_to_target
+
+    poll_s = interval_s if interval_s is not None else DISK_CAP_POLL_INTERVAL_S
+    try:
+        while not should_stop.is_set():
+            try:
+                usage = disk_usage_bytes(job.root)
+                if usage > cap_bytes:
+                    prune_to_target(job, cap_bytes=cap_bytes, db_path=job.db_path)
+            except Exception as exc:  # noqa: BLE001 — never let the watcher die
+                logger.exception("disk cap watcher tick failed for job %s", job.id)
+                try:
+                    emit(
+                        job,
+                        "WARN",
+                        "disk_cap",
+                        "warning",
+                        {"stage": "disk_cap_tick", "error": str(exc)},
+                    )
+                except Exception:
+                    pass
+            try:
+                await asyncio.wait_for(should_stop.wait(), timeout=poll_s)
+            except TimeoutError:
+                continue
+    except asyncio.CancelledError:
+        return
 
 
 async def _stop_flag_watcher(
@@ -483,6 +532,15 @@ async def run_daemon(
 
     watcher_task = aloop.create_task(_stop_flag_watcher(job, should_stop))
 
+    intake = job.intake or {}
+    disk_cap_gb_raw = intake.get("disk_cap_gb", DEFAULT_DISK_CAP_GB)
+    try:
+        disk_cap_gb = float(disk_cap_gb_raw) if disk_cap_gb_raw is not None else DEFAULT_DISK_CAP_GB
+    except (TypeError, ValueError):
+        disk_cap_gb = DEFAULT_DISK_CAP_GB
+    cap_bytes = max(1, int(disk_cap_gb * 1024 * 1024 * 1024))
+    disk_cap_task = aloop.create_task(_disk_cap_watcher(job, cap_bytes, should_stop))
+
     exit_code = 0
     final_status = "stopped"
     try:
@@ -539,6 +597,11 @@ async def run_daemon(
         watcher_task.cancel()
         try:
             await watcher_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        disk_cap_task.cancel()
+        try:
+            await disk_cap_task
         except (asyncio.CancelledError, Exception):
             pass
         if signals_installed:
