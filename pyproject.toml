@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "research-agent"
+version = "0.1.0"
+description = "Autonomous CLI research agent (see research-agent-implementation-guide.md)"
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Alpha Research" }]
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-ai>=0.0.40",
+    "typer>=0.12",
+    "rich>=13.7",
+    "questionary>=2.0",
+    "httpx>=0.27",
+    "trafilatura>=1.12",
+    "readability-lxml>=0.8",
+    "playwright>=1.47",
+    "structlog>=24.1",
+    "sqlite-utils>=3.36",
+    "numpy>=1.26",
+    "tenacity>=8.2",
+    "watchfiles>=0.21",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "arxiv>=2.1",
+    "feedparser>=6.0",
+    "waybackpy>=3.0",
+    "pypdf>=4.2",
+    "unstructured>=0.14",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+ui = []
+web = []
+
+[project.scripts]
+research = "research_agent.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["research_agent*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+ignore_missing_imports = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
