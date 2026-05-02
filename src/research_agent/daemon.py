@@ -541,11 +541,34 @@ async def run_daemon(
     cap_bytes = max(1, int(disk_cap_gb * 1024 * 1024 * 1024))
     disk_cap_task = aloop.create_task(_disk_cap_watcher(job, cap_bytes, should_stop))
 
+    from research_agent.llm.budgets import BudgetExceeded
+
     exit_code = 0
     final_status = "stopped"
+    completion_reason: str | None = None
     try:
+        loop_result: dict[str, Any] | None = None
+        budget_capped = False
         try:
-            await _loop.run_loop(job, router)
+            loop_result = await _loop.run_loop(job, router)
+        except BudgetExceeded as exc:
+            logger.warning("daemon: budget cap reached mid-loop for job %s: %s", job.id, exc)
+            budget_capped = True
+            try:
+                emit(
+                    job,
+                    "WARN",
+                    "daemon",
+                    "warning",
+                    {
+                        "stage": "run_loop_budget_cap",
+                        "error": str(exc),
+                        "spent": getattr(exc, "spent", None),
+                        "cap": getattr(exc, "cap", None),
+                    },
+                )
+            except Exception:
+                pass
         except Exception as exc:
             logger.exception("daemon: run_loop crashed for job %s", job.id)
             try:
@@ -569,28 +592,58 @@ async def run_daemon(
             return 1
 
         plan = _loop._load_latest_plan(job)
-        try:
-            if plan is not None:
-                await _synth.final_synthesis(job, plan, router=router)
-        except Exception as exc:
-            logger.warning("daemon: final synthesis failed for job %s: %s", job.id, exc)
+        if budget_capped:
             try:
-                emit(
-                    job,
-                    "WARN",
-                    "daemon",
-                    "warning",
-                    {"stage": "final_synthesis", "error": str(exc)},
+                if plan is not None:
+                    await _synth.final_synthesis_after_cap(job, plan, router=router)
+            except Exception as exc:
+                logger.warning(
+                    "daemon: post-cap final synthesis failed for job %s: %s", job.id, exc
                 )
-            except Exception:
-                pass
-
-        if plan is not None and plan.is_complete():
+                try:
+                    emit(
+                        job,
+                        "WARN",
+                        "daemon",
+                        "warning",
+                        {"stage": "final_synthesis_after_cap", "error": str(exc)},
+                    )
+                except Exception:
+                    pass
             final_status = "completed"
+            completion_reason = "budget_cap"
         else:
-            final_status = "stopped"
+            try:
+                if plan is not None:
+                    await _synth.final_synthesis(job, plan, router=router)
+            except Exception as exc:
+                logger.warning("daemon: final synthesis failed for job %s: %s", job.id, exc)
+                try:
+                    emit(
+                        job,
+                        "WARN",
+                        "daemon",
+                        "warning",
+                        {"stage": "final_synthesis", "error": str(exc)},
+                    )
+                except Exception:
+                    pass
+
+            if _loop._should_stop(job):
+                final_status = "stopped"
+                completion_reason = "user_stopped"
+            elif loop_result is not None and loop_result.get("cap_hit"):
+                final_status = "completed"
+                completion_reason = "task_cap"
+            elif plan is not None and plan.is_complete():
+                final_status = "completed"
+                completion_reason = "goal_complete"
+            else:
+                final_status = "stopped"
+                completion_reason = "user_stopped"
+
         try:
-            job.set_status(final_status)
+            job.set_status(final_status, completion_reason=completion_reason)
         except Exception:
             logger.exception("daemon: failed to write final status for job %s", job.id)
     finally:

@@ -436,6 +436,64 @@ async def test_run_daemon_completed_status_when_plan_is_complete(
 
 
 @pytest.mark.asyncio
+async def test_run_daemon_handles_budget_exceeded_mid_loop(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``BudgetExceeded`` raised mid-loop turns into status=completed, reason=budget_cap."""
+    from research_agent.llm.budgets import BudgetExceeded
+    from research_agent.orchestrator import synth as _synth
+
+    async def _capping_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        raise BudgetExceeded(job.id, spent=10.0, cap=5.0)
+
+    captured: dict[str, Any] = {}
+
+    async def _post_cap_synth(job: Job, plan: Plan, *, router: Any):
+        captured["called"] = True
+        captured["plan_version"] = plan.version
+        # Simulate the helper writing a report.
+        (job.root / "report.md").write_text("# Report (post-cap)\n\nstub\n", encoding="utf-8")
+        return None
+
+    monkeypatch.setenv("RESEARCH_DAEMON_SKIP_HEALTH_CHECKS", "1")
+    monkeypatch.setattr(
+        "research_agent.orchestrator.loop.run_loop",
+        _capping_run_loop,
+    )
+    monkeypatch.setattr(_synth, "final_synthesis_after_cap", _post_cap_synth)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert exit_code == 0
+    assert captured.get("called"), "final_synthesis_after_cap must run after a cap"
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "completed"
+    assert refreshed.completion_reason == "budget_cap"
+    assert (seeded_job.root / "report.md").exists()
+
+    # A WARN event with stage=run_loop_budget_cap was emitted.
+    conn = db.connect(seeded_job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT level, kind, payload_json FROM events WHERE job_id = ? AND kind = 'warning'",
+            (seeded_job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert any('"stage": "run_loop_budget_cap"' in r["payload_json"] for r in rows), (
+        "expected a run_loop_budget_cap warning event"
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_daemon_uncaught_exception_marks_failed(
     seeded_job: Job, monkeypatch: pytest.MonkeyPatch
 ) -> None:

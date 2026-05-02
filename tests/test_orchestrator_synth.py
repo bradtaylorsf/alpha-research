@@ -405,3 +405,85 @@ def test_synthesize_emits_synthesis_written_event(job: Job, db_path: Path, plan:
     assert payload["tier"] == "frontier"
     assert payload["truncated"] is False
     assert payload["report_path"] == out.report_path
+
+
+# ---------------------------------------------------------------------------
+# Template-stub renderer (issue #39 — post-cap fallback with no LLM call)
+# ---------------------------------------------------------------------------
+
+
+def test_write_template_stub_output_renders_findings_and_sources(job: Job, db_path: Path) -> None:
+    """With findings on disk, stub renders header + grouped claims + sources."""
+    _seed_findings(job, [0.95, 0.6, 0.2])
+    out = synth_module._write_template_stub_output(job)
+
+    assert out.truncated is True
+    assert out.model == "budget_capped_template"
+    assert out.cost_usd is None
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "template stub" in report.lower()
+    assert job.goal in report
+    assert "High confidence" in report
+    assert "Medium confidence" in report
+    assert "Low confidence" in report
+    assert "claim 0" in report
+    assert "claim 1" in report
+    assert "claim 2" in report
+    # Sources block lists at least one of the seeded sources.
+    assert "https://example.com/0" in report
+
+    rows = _read_synthesis_rows(db_path, job.id)
+    assert len(rows) == 1
+    assert rows[0]["model"] == "budget_capped_template"
+    assert rows[0]["cost_usd"] is None
+
+    events = _read_event_rows(db_path, job.id)
+    written = [e for e in events if e["kind"] == "synthesis_written"]
+    assert len(written) == 1
+    payload = json.loads(written[0]["payload_json"])
+    assert payload["tier"] == "template_stub"
+    assert payload["truncated"] is True
+
+
+def test_write_template_stub_output_empty_findings_falls_back_to_constant(
+    job: Job, db_path: Path
+) -> None:
+    """No findings → fall back to the original ``_BUDGET_STUB_REPORT`` string."""
+    out = synth_module._write_template_stub_output(job)
+
+    assert out.truncated is True
+    assert out.model == "budget_capped_template"
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "Report (truncated)" in report
+    assert "budget cap was reached" in report.lower()
+
+
+def test_final_synthesis_after_cap_skips_frontier_tier(job: Job, db_path: Path, plan: Plan) -> None:
+    """Post-cap helper must call only ``frontier_speed`` — not the primary tier."""
+    _seed_findings(job, [0.7])
+    router = _StubRouter()
+
+    out = asyncio.run(synth_module.final_synthesis_after_cap(job, plan, router=router))
+    assert out.truncated is False
+    assert [c[0] for c in router.calls] == ["frontier_speed"]
+    assert out.model == "anthropic/claude-haiku-4-5"
+
+
+def test_final_synthesis_after_cap_falls_back_to_template_when_speed_capped(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    _seed_findings(job, [0.95, 0.4])
+    router = _StubRouter(
+        side_effect={
+            "frontier_speed": [synth_module.BudgetExceeded(job.id, spent=11.0, cap=5.0)],
+        },
+    )
+
+    out = asyncio.run(synth_module.final_synthesis_after_cap(job, plan, router=router))
+
+    assert out.truncated is True
+    assert out.model == "budget_capped_template"
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "template stub" in report.lower()
+    assert "claim 0" in report

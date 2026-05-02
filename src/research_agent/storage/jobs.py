@@ -43,6 +43,11 @@ _SUBDIRS = ("plan", "findings", "sources", "synthesis", "critique", "report.hist
 _JOB_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,59}$")
 _SLUG_FORBIDDEN = ("/", "\\", "..")
 
+# Allowed values for ``completion_reason`` per issue #39 §9.
+ALLOWED_COMPLETION_REASONS = frozenset(
+    {"goal_complete", "time_cap", "budget_cap", "task_cap", "user_stopped"}
+)
+
 
 def _slugify(text: str, max_len: int = 60) -> str:
     """Normalize ``text`` into a safe slug for a job folder name.
@@ -108,6 +113,7 @@ class Job:
     intake: dict[str, Any]
     created_at: int
     db_path: Path = field(default=db.DEFAULT_DB_PATH)
+    completion_reason: str | None = None
 
     # ---- Construction --------------------------------------------------
 
@@ -231,7 +237,8 @@ class Job:
         conn = db.connect(db_path_p)
         try:
             row = conn.execute(
-                "SELECT goal, domain, status, intake_json, created_at FROM jobs WHERE id = ?",
+                "SELECT goal, domain, status, intake_json, created_at, completion_reason"
+                " FROM jobs WHERE id = ?",
                 (job_id,),
             ).fetchone()
         finally:
@@ -249,23 +256,42 @@ class Job:
             intake=json.loads(row["intake_json"]),
             created_at=int(row["created_at"]),
             db_path=db_path_p,
+            completion_reason=row["completion_reason"],
         )
 
     # ---- Lifecycle ops -------------------------------------------------
 
-    def set_status(self, state: str) -> None:
-        """Update ``status`` + ``last_activity_at`` in the DB and mirror to ``job.json``."""
+    def set_status(self, state: str, completion_reason: str | None = None) -> None:
+        """Update ``status`` + ``last_activity_at`` in the DB and mirror to ``job.json``.
+
+        When ``completion_reason`` is provided it is written alongside the
+        status in a single UPDATE and mirrored into ``job.json`` so disk-only
+        consumers see the same value. Allowed reasons live in
+        :data:`ALLOWED_COMPLETION_REASONS`.
+        """
         if not isinstance(state, str) or not state:
             raise ValueError(f"status must be a non-empty string; got {state!r}")
+        if completion_reason is not None and completion_reason not in ALLOWED_COMPLETION_REASONS:
+            raise ValueError(
+                f"completion_reason must be one of {sorted(ALLOWED_COMPLETION_REASONS)};"
+                f" got {completion_reason!r}"
+            )
 
         now = _now_epoch()
         conn = db.connect(self.db_path)
         try:
             with conn:
-                conn.execute(
-                    "UPDATE jobs SET status = ?, last_activity_at = ? WHERE id = ?",
-                    (state, now, self.id),
-                )
+                if completion_reason is not None:
+                    conn.execute(
+                        "UPDATE jobs SET status = ?, last_activity_at = ?,"
+                        " completion_reason = ? WHERE id = ?",
+                        (state, now, completion_reason, self.id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE jobs SET status = ?, last_activity_at = ? WHERE id = ?",
+                        (state, now, self.id),
+                    )
         finally:
             conn.close()
 
@@ -275,6 +301,9 @@ class Job:
         meta = json.loads(job_json.read_text(encoding="utf-8"))
         meta["status"] = state
         meta["last_activity_at"] = now
+        if completion_reason is not None:
+            meta["completion_reason"] = completion_reason
+            self.completion_reason = completion_reason
         _atomic_write_json(job_json, meta)
 
     def request_stop(self) -> None:
@@ -326,7 +355,7 @@ def list_jobs(
     try:
         sql = (
             "SELECT id, goal, domain, status, created_at, last_activity_at,"
-            " cost_so_far_usd FROM jobs"
+            " cost_so_far_usd, completion_reason FROM jobs"
         )
         params: tuple[Any, ...] = ()
         if status is not None:
