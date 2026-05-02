@@ -54,4 +54,30 @@ research doctor --json      # same report as machine-readable JSON
 into CI as a pre-flight gate. Optional checks (LM Studio reachability, optional
 env keys) never affect the exit code.
 
-More subcommands land here as later issues introduce them.
+### Job verbs
+
+```bash
+# Register a new job (testing back door — the daemon is not yet wired up).
+research start --skip-intake --goal "Investigate Widget Co" \
+    [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes]
+
+research list                      # newest first; Rich table on a TTY, JSON otherwise
+research list --json               # force JSON output
+research list --status running     # filter by job status
+
+research status <job-id>           # detailed Rich panel
+research status <job-id> --watch   # refresh every 2 seconds
+
+research view <job-id>             # open report.md in $EDITOR (or print on non-TTY)
+research view <job-id> --report    # same as default
+research view <job-id> --findings  # latest findings/NNNNNN.md
+research view <job-id> --sources   # generated list of recorded sources
+
+research logs <job-id>             # print existing events.jsonl entries
+research logs <job-id> -f          # follow appended events
+research logs <job-id> --level ERROR
+```
+
+The interactive intake (`research start` without `--skip-intake`) lands in a
+later issue; until then `--skip-intake --goal "..."` is the supported entry
+point and the testing back door used throughout phases 1–4.
