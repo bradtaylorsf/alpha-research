@@ -215,9 +215,48 @@ a per-source breakdown grouped by `fetched_via` (`rss` vs `scrape`), and
 the top 5 hits. RSS is preferred; sites without a public feed get a
 per-source CSS selector recipe under `scrape:`. No paid news APIs.
 
+### Long-running soaks (macOS)
+
+Multi-hour `research start` runs (Phase 5's 4-hour close-terminal soak,
+Phase 6's 24-hour soak) need the laptop to stay awake. macOS will idle
+sleep on default Energy Saver settings after ~10–30 minutes of no user
+input, which freezes the daemon's loop and times out any in-flight
+OpenRouter HTTP keepalives — long activity gaps in `events.jsonl` are
+usually idle-sleep, not a bug in the daemon.
+
+After `research start` returns, capture the daemon PID and tie a
+`caffeinate` to it from a second terminal:
+
+```bash
+DAEMON_PID=$(cat jobs/<job-id>/daemon.pid)
+caffeinate -i -w "$DAEMON_PID" &
+```
+
+- `-i` blocks **idle sleep** specifically (the display can still dim,
+  which is fine — the soak doesn't need pixels).
+- `-w <pid>` ties caffeinate's lifetime to the daemon. When the daemon
+  exits — graceful stop, kill, or crash — caffeinate auto-exits with
+  it, so there's no orphan process holding the system awake. No manual
+  cleanup required.
+
+On non-macOS hosts, use the equivalent for your OS (e.g. Linux:
+`systemd-inhibit --what=idle`) and document the choice in the
+postmortem so the next operator knows what worked.
+
+The Phase 6 soak playbook walks through this end-to-end —
+prerequisites, launch, sleep prevention, walk-away health checks,
+graceful stop, and per-AC verification. See
+`tests/integration/test_phase6_soak_24h.md`.
+
 ## End-to-end testing
 
 The Phase 4 "done when" gate is exercised manually — too heavy and too
 cost-bearing for CI. See `tests/integration/test_phase4_e2e.md` for the
 playbook (canonical fixture goal, driver script, AC verification commands,
 and a triage table for common failures).
+
+The Phase 5 (4-hour daemon-lifecycle soak) and Phase 6 (24-hour real-goal
+soak) gates have their own playbooks alongside it:
+`tests/integration/test_phase5_lifecycle.md` and
+`tests/integration/test_phase6_soak_24h.md`. Phase 6 also captures its
+results in `tests/integration/soak_24h_postmortem.md`.
