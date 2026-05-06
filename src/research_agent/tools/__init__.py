@@ -267,6 +267,58 @@ def _smoke_fec(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_lda(query: str) -> str:
+    """Smoke wrapper: LDA registrant search + recent quarterly filings.
+
+    Per AC: ``research _smoke-tool lda "Heritage Foundation"`` should
+    surface the registrant record + recent quarterly filings. Lists the
+    top-5 registrant hits, then for the top hit lists the 5 most recent
+    LD-1/LD-2 filings so an operator can eyeball whether the REST API is
+    reachable and the optional API token (when set) is healthy.
+    """
+    from research_agent.tools import lda
+
+    async def _run() -> str:
+        registrants = await lda.search(query, kind="registrants", max_results=5)
+        if not registrants:
+            return f"lda search returned no registrants for {query!r}"
+        lines: list[str] = ["# Registrants"]
+        for hit in registrants:
+            address = hit.extras.get("address") or "?"
+            contact = hit.extras.get("contact") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title}\n"
+                f"  {address}\n"
+                f"  Contact: {contact}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+
+        top = registrants[0]
+        filings = await lda.search(top.title, kind="filings", max_results=5)
+        lines.append(f"\n# Recent filings for {top.title}")
+        if not filings:
+            lines.append("(no filings returned)")
+        else:
+            for hit in filings:
+                year = hit.extras.get("filing_year") or "?"
+                period = hit.extras.get("filing_period") or "?"
+                ftype = hit.extras.get("filing_type") or "?"
+                income = hit.extras.get("income")
+                expenses = hit.extras.get("expenses")
+                lines.append(
+                    f"- {hit.title}\n"
+                    f"  {ftype} — {year} {period} — income={income} expenses={expenses}\n"
+                    f"  {hit.url}"
+                )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_congress(query: str) -> str:
     """Smoke wrapper: Congress.gov v3 bill search returning the top-5 hits.
 
@@ -516,6 +568,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "nonprofits": _smoke_nonprofits,
     "fec": _smoke_fec,
     "congress": _smoke_congress,
+    "lda": _smoke_lda,
     "news": _smoke_news,
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,
