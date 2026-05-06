@@ -426,3 +426,63 @@ async def test_run_loop_raises_when_no_plan_persisted(jobs_root: Path, db_path: 
     )
     with pytest.raises(RuntimeError, match="no plan persisted"):
         await run_loop(j, router=None, retry_waits=(0,))
+
+
+@pytest.mark.asyncio
+async def test_loop_exits_when_subgoals_all_done(job: Job, db_path: Path) -> None:
+    """Synthesis closing every subgoal must end the loop with ``completed=True``.
+
+    When the heuristic-driven synthesize call mutates the persisted plan via
+    ``plan.update_subgoal_done`` and every subgoal lands done, the next loop
+    guard sees ``plan.is_complete()`` and exits cleanly. The daemon then
+    maps that to ``completion_reason='goal_complete'`` (see daemon.py:796).
+    """
+    from research_agent.orchestrator import plan as plan_module
+
+    seeded = Plan(
+        version=1,
+        objective="Investigate the target",
+        subgoals=[
+            Subgoal(id=1, description="background", done=False),
+            Subgoal(id=2, description="finances", done=False),
+        ],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=3,
+    )
+    write_plan(job, seeded.model_dump())
+
+    # Need at least HEURISTIC_CHECK_EVERY_N tasks done so the synth heuristic
+    # fires once. Seeding exactly N — the heuristic runs after task #25.
+    _seed_tasks(job, ["web_search"] * HEURISTIC_CHECK_EVERY_N)
+
+    synth_calls = {"n": 0}
+
+    async def synth(job_arg: Job, task: dict[str, Any]) -> dict[str, Any]:
+        synth_calls["n"] += 1
+        plan_module.update_subgoal_done(
+            job_arg, {1: "confirmed", 2: "refuted"}
+        )
+        return {"ok": True}
+
+    handlers: dict[str, Handler] = {"web_search": _ok_handler(), "synthesize": synth}
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=seeded,
+        handlers=handlers,
+        max_tasks=HEURISTIC_CHECK_EVERY_N + 5,
+        retry_waits=(0,),
+    )
+
+    assert synth_calls["n"] == 1
+    assert result["completed"] is True
+    assert result["cap_hit"] is False
+    assert result["stopped"] is False
+    assert result["tasks_done"] == HEURISTIC_CHECK_EVERY_N
+
+    rows = _read_task_rows(db_path, job.id)
+    done_count = sum(1 for r in rows if r["status"] == STATUS_DONE)
+    pending_count = sum(1 for r in rows if r["status"] == STATUS_PENDING)
+    assert done_count == HEURISTIC_CHECK_EVERY_N
+    assert pending_count == 0

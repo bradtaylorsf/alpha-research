@@ -860,6 +860,14 @@ async def run_loop(
 
         if tasks_done % HEURISTIC_CHECK_EVERY_N == 0:
             await _maybe_run_heuristic(job, plan, handlers, tasks_done)
+            # The synth/critique heuristics may have closed (or reopened)
+            # subgoals on the persisted plan. Reload so plan.is_complete()
+            # in the next loop guard sees the latest state and we exit
+            # cleanly with completion_reason='goal_complete' instead of
+            # running until task_cap or queue drain.
+            refreshed = _load_latest_plan(job)
+            if refreshed is not None:
+                plan = refreshed
 
     if tasks_done >= max_tasks and not _should_stop(job):
         cap_hit = True

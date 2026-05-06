@@ -74,6 +74,7 @@ class CritiqueOutput(BaseModel):
     unsupported_claims: list[str] = Field(default_factory=list)
     suggested_subgoals: list[str] = Field(default_factory=list)
     confidence_concerns: list[str] = Field(default_factory=list)
+    premature_subgoals: list[int] = Field(default_factory=list)
     should_replan: bool = False
 
     version: int = 0
@@ -227,6 +228,13 @@ def _render_critique_md(payload: CritiqueOutput) -> str:
     else:
         lines.append("- (none)\n")
 
+    lines.append("\n## Premature subgoal closures\n")
+    if payload.premature_subgoals:
+        for sid in payload.premature_subgoals:
+            lines.append(f"- subgoal {sid}\n")
+    else:
+        lines.append("- (none)\n")
+
     return "".join(lines)
 
 
@@ -341,6 +349,21 @@ async def critique(
             "replan_triggered": False,
         },
     )
+
+    if output.premature_subgoals:
+        from research_agent.orchestrator import plan as _plan_mod
+
+        _plan_mod.reopen_subgoals(job, list(output.premature_subgoals))
+        emit(
+            job,
+            "INFO",
+            "critique",
+            "subgoals_reopened",
+            {
+                "critique_version": version,
+                "subgoal_ids": list(output.premature_subgoals),
+            },
+        )
 
     return enriched
 
