@@ -319,6 +319,56 @@ def _smoke_lda(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_littlesis(query: str) -> str:
+    """Smoke wrapper: LittleSis entity search + top-hit relationships.
+
+    Per AC: ``research _smoke-tool littlesis "Peter Thiel"`` should surface
+    the entity row plus a snapshot of who they're connected to. Lists the
+    top-5 entity hits (name, primary_ext, permalink), then for the top hit
+    fetches relationships and prints a count + first 5 categorised edges.
+
+    LittleSis is user-contributed — output is a research lead, not evidence.
+    """
+    from research_agent.tools import littlesis
+
+    async def _run() -> str:
+        results = await littlesis.search(query, kind="entities", max_results=5)
+        if not results:
+            return f"littlesis search returned no results for {query!r}"
+        lines: list[str] = ["# Entities"]
+        for hit in results:
+            primary_ext = hit.extras.get("primary_ext") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {primary_ext}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+
+        top = results[0]
+        rels = await littlesis.search(top.title, kind="relationships", max_results=5)
+        lines.append(f"\n# Relationships for {top.title}")
+        if not rels:
+            lines.append("(no relationships returned)")
+        else:
+            lines.append(f"total: {len(rels)}")
+            for rel in rels[:5]:
+                category = rel.extras.get("category_label") or "?"
+                snippet = rel.snippet.replace("\n", " ")
+                if len(snippet) > 200:
+                    snippet = snippet[:200] + "…"
+                lines.append(
+                    f"- {rel.title}\n"
+                    f"  [{category}] {snippet}\n"
+                    f"  {rel.url}"
+                )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_usaspending(query: str) -> str:
     """Smoke wrapper: USAspending awards search returning the top-5 hits.
 
@@ -649,6 +699,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "fec": _smoke_fec,
     "congress": _smoke_congress,
     "lda": _smoke_lda,
+    "littlesis": _smoke_littlesis,
     "usaspending": _smoke_usaspending,
     "gdelt": _smoke_gdelt,
     "news": _smoke_news,
