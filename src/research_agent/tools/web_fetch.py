@@ -281,6 +281,11 @@ _YOUTUBE_HOSTS = frozenset(
 
 _PDF_CONTENT_TYPE = "application/pdf"
 
+_IMAGE_CONTENT_TYPES: frozenset[str] = frozenset(
+    {"image/jpeg", "image/png", "image/webp", "image/gif"}
+)
+_IMAGE_EXTENSIONS: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+
 
 def _is_pdf_url(url: str) -> bool:
     """Cheap path-based PDF detection — true when the URL ends in ``.pdf``.
@@ -316,6 +321,20 @@ def _is_audio_content_type(content_type: str | None) -> bool:
     return head in audio.AUDIO_CONTENT_TYPES
 
 
+def _is_image_url(url: str) -> bool:
+    """Path-based image detection. Mirrors :func:`_is_pdf_url`."""
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    return any(path.endswith(ext) for ext in _IMAGE_EXTENSIONS)
+
+
+def _is_image_content_type(content_type: str | None) -> bool:
+    if not content_type:
+        return False
+    head = content_type.split(";", 1)[0].strip().lower()
+    return head in _IMAGE_CONTENT_TYPES
+
+
 async def _build_pdf_source(
     url: str,
     *,
@@ -349,6 +368,45 @@ async def _build_pdf_source(
         raw_html=None,
         fetched_at=datetime.now(UTC),
         source_kind="pdf",
+        metadata=metadata,
+    )
+
+
+async def _build_image_source(
+    url: str,
+    *,
+    status_code: int | None,
+    content: bytes | None,
+) -> Source | None:
+    """Run :func:`ocr.extract` (or ``extract_from_bytes``) and wrap the result.
+
+    Mirrors :func:`_build_pdf_source`: returns None when OCR yielded no
+    usable text (typically: tesseract isn't installed and no VLM is
+    available) so the web_fetch contract stays uniform across kinds.
+    """
+    from research_agent.tools import ocr
+
+    if content:
+        suffix = ocr._suffix_for(url)
+        text = ocr.extract_from_bytes(content, suffix=suffix, source_label=url)
+    else:
+        text = await ocr.extract(url)
+
+    if not text.strip():
+        return None
+
+    title = url.rsplit("/", 1)[-1] or url
+    metadata: dict[str, Any] = {
+        "fetched_via": "ocr",
+        "status_code": status_code,
+    }
+    return Source(
+        url=url,
+        title=title,
+        cleaned_text=text,
+        raw_html=None,
+        fetched_at=datetime.now(UTC),
+        source_kind="image",
         metadata=metadata,
     )
 
@@ -450,6 +508,15 @@ async def fetch(
             _spawn_archive_task(source)
         return source
 
+    # Same again for ``.png`` / ``.jpg`` / ``.jpeg`` / ``.webp`` / ``.gif``
+    # URLs — screenshots and scanned documents are binary; route through
+    # the OCR pipeline rather than letting trafilatura eat the bytes.
+    if _is_image_url(url):
+        source = await _build_image_source(url, status_code=None, content=None)
+        if source is not None:
+            _spawn_archive_task(source)
+        return source
+
     html: str | None = None
     status_code: int | None = None
     content_bytes: bytes | None = None
@@ -476,6 +543,16 @@ async def fetch(
     # ``.mp3`` suffix). Reuse the bytes we already pulled.
     if _is_audio_content_type(content_type) and content_bytes:
         source = await _build_audio_source(
+            url, status_code=status_code, content=content_bytes
+        )
+        if source is not None:
+            _spawn_archive_task(source)
+        return source
+
+    # Same idea for server-declared images (URL has no suffix but the
+    # response is ``image/png`` etc). Reuse the bytes we already pulled.
+    if _is_image_content_type(content_type) and content_bytes:
+        source = await _build_image_source(
             url, status_code=status_code, content=content_bytes
         )
         if source is not None:

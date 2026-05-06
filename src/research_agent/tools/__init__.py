@@ -188,6 +188,27 @@ def _smoke_audio(path_or_url: str) -> str:
     )
 
 
+def _smoke_ocr(path_or_url: str) -> str:
+    """Smoke wrapper for ocr.extract: print source / char_count / preview.
+
+    Routes through :func:`ocr.extract_sync` so the verb works for on-disk
+    fixtures (``tests/fixtures/screenshot.png``) and HTTPS image URLs.
+    """
+    from research_agent.tools import ocr
+
+    text = ocr.extract_sync(path_or_url)
+    if not text:
+        return f"ocr extract returned empty markdown for {path_or_url}"
+    preview = text[:500].replace("\n", " ")
+    if len(text) > 500:
+        preview += "…"
+    return (
+        f"source: {path_or_url}\n"
+        f"char_count: {len(text)}\n"
+        f"preview: {preview}"
+    )
+
+
 def _smoke_youtube(query: str) -> str:
     """Smoke wrapper: run youtube.search and print up to 10 hits formatted.
 
@@ -265,6 +286,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,
     "audio": _smoke_audio,
+    "ocr": _smoke_ocr,
     "youtube": _smoke_youtube,
 }
 
