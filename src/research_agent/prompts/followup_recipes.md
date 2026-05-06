@@ -24,7 +24,12 @@ omit it; do not pad the section.
 - **Any licensed entity** (contractor, broker, attorney, physician, etc.)
   → check the relevant state licensing board's public discipline record,
   and recommend a FOIA / public-records request for the full disciplinary
-  file (board complaints, investigator notes, settlement agreements).
+  file (board complaints, investigator notes, settlement agreements). For
+  **California contractors** specifically, point operators at the CSLB
+  "Check License II" Disciplinary History tab
+  (`cslb.ca.gov/OnlineServices/CheckLicenseII/CheckLicense.aspx`) — board
+  complaints, citations, and license-status actions are visible there
+  without a public-records request.
 - **Any government action cited** (permit, contract award, enforcement
   letter) → recommend a FOIA / state public-records request for the
   underlying file (correspondence, internal memos, scoring sheets).

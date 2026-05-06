@@ -467,6 +467,64 @@ def _smoke_sos(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_licensing(query: str) -> str:
+    """Smoke wrapper: California State License Board (CSLB) lookup.
+
+    Per AC: ``research _smoke-tool licensing "<license# or contractor>"``
+    should return the v1 record (license number, status, expiration). Lists
+    the top-5 hits with license number / status / classification / expiration
+    / URL, then attempts ``fetch()`` on the top hit and prints a Disciplinary
+    History excerpt — the primary due-diligence signal.
+    """
+    from research_agent.tools import browser, licensing
+
+    async def _run() -> str:
+        try:
+            results = await licensing.search(query, state="CA", max_results=5)
+            if not results:
+                return f"licensing search returned no results for {query!r}"
+            lines: list[str] = []
+            for hit in results:
+                number = hit.extras.get("license_number") or "?"
+                status = hit.extras.get("status") or "?"
+                classification = hit.extras.get("classification") or "?"
+                expiration = hit.extras.get("expiration") or "?"
+                snippet = hit.snippet.replace("\n", " ")
+                if len(snippet) > 200:
+                    snippet = snippet[:200] + "…"
+                lines.append(
+                    f"- {hit.title} — {number} — {classification} — {status} —"
+                    f" exp {expiration}\n"
+                    f"  {hit.url}\n"
+                    f"  {snippet}"
+                )
+
+            top = results[0]
+            source = await licensing.fetch(top.url)
+            if source is None:
+                lines.append(
+                    f"\nfetch({top.url}) returned None — profile unavailable"
+                )
+            else:
+                disciplinary = source.metadata.get("disciplinary_history") or "—"
+                excerpt = disciplinary.replace("\n", " ")
+                if len(excerpt) > 400:
+                    excerpt = excerpt[:400] + "…"
+                lines.append(f"\nProfile for {top.title}")
+                lines.append(f"  license_number: {source.metadata.get('license_number') or '?'}")
+                lines.append(f"  status: {source.metadata.get('status') or '?'}")
+                lines.append(f"  expiration: {source.metadata.get('expiration') or '?'}")
+                lines.append(f"  disciplinary_history: {excerpt}")
+            return "\n".join(lines)
+        finally:
+            try:
+                await browser.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+
+    return asyncio.run(_run())
+
+
 def _smoke_sanctions(query: str) -> str:
     """Smoke wrapper: OFAC SDN / EU / UK sanctions lookup.
 
@@ -838,6 +896,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "littlesis": _smoke_littlesis,
     "opencorporates": _smoke_opencorporates,
     "sos": _smoke_sos,
+    "licensing": _smoke_licensing,
     "sanctions": _smoke_sanctions,
     "usaspending": _smoke_usaspending,
     "gdelt": _smoke_gdelt,

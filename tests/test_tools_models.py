@@ -37,6 +37,7 @@ EXPECTED_SOURCE_KINDS = (
     "opencorporates",
     "sanctions",
     "sos",
+    "licensing",
 )
 
 

@@ -93,6 +93,14 @@ Use `site:` operators when you actually want to scope a search to a
 known authoritative domain (e.g. `site:cslb.ca.gov "SBI Builders"`).
 Otherwise keep queries plain.
 
+**US construction / contracting companies.** When the goal names a
+California (or other US) construction or contracting company, include
+an early `web_search` task with a `site:cslb.ca.gov "<company>"` query
+so the loop surfaces the CSLB profile URL — license number, status,
+classification, and disciplinary history — before generic web hits.
+The `licensing` connector takes over from there once the URL is in
+hand; the planner only needs to seed the discovery query.
+
 ### Payload shapes
 
 - `web_search`: `{ query: "…", sub_question: "…", max_results: 10, engine: "auto", expand_top_k: 3 }`
