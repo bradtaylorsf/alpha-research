@@ -152,7 +152,6 @@ def _search_page(recipe: dict[str, Any], rows: list[_FakeLocator]) -> _FakePage:
             recipe["query_input"]: _FakeLocator(),
             recipe["submit_button"]: _FakeLocator(),
             recipe["row_selector"]: _FakeLocator(items=rows),
-            recipe.get("kind_tab_selector") or "": _FakeLocator(),
         }
     )
 
@@ -251,32 +250,23 @@ async def test_search_independent_expenditures_returns_parsed_rows(monkeypatch):
     assert top.extras["amount"] == "$120,000"
 
 
-async def test_search_lobbying_returns_parsed_rows(monkeypatch):
-    recipe = calaccess._KIND_RECIPES["lobbying"]
-    rows = [
-        _build_row(
-            recipe=recipe,
-            primary="Big Lobby Firm",
-            committee="Megacorp Inc.",
-            amount="$48,500",
-            date="Q3 2022",
-            href="/lobbying/firm-1",
-        ),
-    ]
-    page = _search_page(recipe, rows)
-    _stub_browser(monkeypatch, page)
+async def test_search_lobbying_is_documented_gap(monkeypatch, caplog):
+    """Power Search does not include lobbying — the connector returns ``[]``
+    with a clear WARN rather than scraping the wrong frameset.
+    """
 
-    results = await calaccess.search(
-        "Megacorp", kind="lobbying", max_results=5
-    )
+    @asynccontextmanager
+    async def _no_session(headful=None, block_media=True):
+        raise AssertionError("should not open browser for documented-gap kind")
+        yield  # pragma: no cover
 
-    assert len(results) == 1
-    top = results[0]
-    assert top.extras["kind"] == "lobbying"
-    assert top.extras["lobbyist"] == "Big Lobby Firm"
-    assert top.extras["donor"] == ""
-    assert top.extras["payee"] == ""
-    assert top.extras["committee"] == "Megacorp Inc."
+    monkeypatch.setattr(calaccess.browser, "browser_session", _no_session)
+
+    with caplog.at_level(logging.WARNING, logger=calaccess.logger.name):
+        results = await calaccess.search("Megacorp", kind="lobbying", max_results=5)
+
+    assert results == []
+    assert any("not implemented" in rec.message for rec in caplog.records)
 
 
 async def test_search_unknown_kind_warns_and_returns_empty(monkeypatch, caplog):
@@ -309,7 +299,6 @@ async def test_search_returns_empty_when_rows_never_render(
             recipe["query_input"]: _FakeLocator(),
             recipe["submit_button"]: _FakeLocator(),
             recipe["row_selector"]: _FakeLocator(raise_on_wait_for=True),
-            recipe["kind_tab_selector"]: _FakeLocator(),
         }
     )
     _stub_browser(monkeypatch, page)

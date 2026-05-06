@@ -3,22 +3,36 @@
 Public surface:
 
 * ``async def search(query, *, kind="contributions", max_results=25) -> list[SearchResult]``
-  runs the MapLight-powered Power Search at ``powersearch.sos.ca.gov``.
-  ``kind`` selects among ``contributions``, ``independent_expenditures``,
-  ``lobbying``. Returns donor / payee / committee, amount, date, permalink.
+  runs Power Search. ``kind`` selects among ``contributions``,
+  ``independent_expenditures``, ``lobbying``. Returns donor / payee /
+  committee, amount, date, permalink.
 * ``async def fetch(url) -> Source | None`` opens a Power Search detail page
   and returns markdown of the rolled-up record.
 
 State-level analog to FEC. Covers 2001–present California state campaigns,
-ballot measures, lobbying, and independent expenditures. No API, no auth —
-Power Search is JS-heavy (Vue/React mounts), so Playwright with explicit
-row waits is the only viable scrape path.
+ballot measures, and independent expenditures.
+
+DOM reality check (verified against the live site):
+
+* ``contributions`` is a server-rendered HTML form at
+  ``powersearch.sos.ca.gov/quick-search.php`` (POSTs to ``advanced.php``).
+  The results page is a plain ``<table>``; no SPA mount. Columns: Recipient
+  Name | Recipient Committee | Recipient Committee ID | Office Sought |
+  Ballot Measure(s) | Contributor Name | Contributor ID | Amount | Date |
+  Contributor Employer / Occupation / State.
+* ``independent_expenditures`` lives on a separate Node service at
+  ``powersearch.sos.ca.gov:3000``. Its UI *is* a SPA with radio-driven
+  filters; selectors are best-effort and may need follow-up calibration.
+* ``lobbying`` is *not* on Power Search — the SoS landing page itself
+  directs lobbying queries at CAL-ACCESS (frame-based legacy ASP at
+  ``cal-access.sos.ca.gov``). We log a clear gap message and return ``[]``
+  rather than guessing selectors against a frameset; a bulk-CSV loader
+  against ``cal-access.sos.ca.gov/.../downloads/`` is the right long-term
+  path and is tracked as a follow-up issue.
 
 Per-host rate gate at 0.5 RPS — the SoS site is public infrastructure and
-Playwright traffic is conspicuous.
-
-A future bulk-CSV loader (against ``cal-access.sos.ca.gov/.../downloads/``)
-would be more efficient for full-cycle analysis; track separately.
+Playwright traffic is conspicuous. The IE Node service on port 3000 is a
+distinct host:port pair and is gated separately.
 """
 
 from __future__ import annotations
@@ -39,6 +53,7 @@ logger = logging.getLogger(__name__)
 _DIAGNOSTICS_DIR = Path("data/diagnostics/calaccess")
 _PER_HOST_RPS = 0.5
 _HOST = "powersearch.sos.ca.gov"
+_IE_HOST = "powersearch.sos.ca.gov:3000"
 
 # Short per-call timeout for selector reads. Playwright's default 30s auto-wait
 # would hang the connector when a row column is missing; 2s is plenty for any
@@ -52,32 +67,32 @@ _SELECTOR_READ_TIMEOUT_MS = 2_000
 
 _KIND_RECIPES: dict[str, dict[str, Any]] = {
     "contributions": {
-        "search_url": "https://powersearch.sos.ca.gov/",
-        # Power Search exposes per-kind tabs along the top of the page; the
-        # contributions tab is the default view but we click it explicitly so
-        # state from a prior render can't leak in.
-        "kind_tab_selector": "a[href*='contributions' i], button:has-text('Contributions')",
-        "query_input": "input[type='search'], input[placeholder*='Search' i]",
-        "submit_button": "button[type='submit'], button:has-text('Search')",
-        "row_selector": "table tbody tr",
-        # Column indices align with the rendered table; donor / contributor /
-        # employer is cell-1, recipient committee is cell-2, amount is cell-3,
-        # date is cell-4. Per-kind selectors below override only the labels.
-        "donor_selector": "td:nth-child(1)",
+        # quick-search.php exposes a candidate-name field that POSTs to
+        # advanced.php; the results table is plain server-rendered HTML.
+        "search_url": "https://powersearch.sos.ca.gov/quick-search.php",
+        "query_input": "#search_candidates",
+        "submit_button": "button[value='Search Candidates']",
+        # Skip header rows by requiring at least one <td>.
+        "row_selector": "table tr:has(td)",
+        # Column map (verified): 1=Recipient Name, 2=Recipient Committee,
+        # 3=Recipient Committee ID, 4=Office Sought, 5=Ballot Measure(s),
+        # 6=Contributor Name, 7=Contributor ID, 8=Amount, 9=Date.
+        "donor_selector": "td:nth-child(6)",
         "committee_selector": "td:nth-child(2)",
-        "amount_selector": "td:nth-child(3)",
-        "date_selector": "td:nth-child(4)",
+        "amount_selector": "td:nth-child(8)",
+        "date_selector": "td:nth-child(9)",
+        # No per-row permalinks in the rendered table — fall back to the
+        # search URL via _absolute_url's empty-href guard.
         "permalink_selector": "td:nth-child(1) a, a.detail-link",
         "primary_label": "donor",
     },
     "independent_expenditures": {
-        "search_url": "https://powersearch.sos.ca.gov/independent-expenditures/",
-        "kind_tab_selector": (
-            "a[href*='independent' i], button:has-text('Independent Expenditures')"
-        ),
-        "query_input": "input[type='search'], input[placeholder*='Search' i]",
-        "submit_button": "button[type='submit'], button:has-text('Search')",
-        "row_selector": "table tbody tr",
+        # Separate Node service at port 3000; SPA with radio-driven filters.
+        "search_url": "https://powersearch.sos.ca.gov:3000/",
+        "query_input": "#specificCandidatesText",
+        # The "Search" trigger is an <a id="btnSearch"> styled as a button.
+        "submit_button": "a#btnSearch, button:has-text('Search')",
+        "row_selector": "table tr:has(td)",
         "payee_selector": "td:nth-child(1)",
         "committee_selector": "td:nth-child(2)",
         "amount_selector": "td:nth-child(3)",
@@ -86,26 +101,22 @@ _KIND_RECIPES: dict[str, dict[str, Any]] = {
         "primary_label": "payee",
     },
     "lobbying": {
-        "search_url": "https://powersearch.sos.ca.gov/lobbying/",
-        "kind_tab_selector": "a[href*='lobbying' i], button:has-text('Lobbying')",
-        "query_input": "input[type='search'], input[placeholder*='Search' i]",
-        "submit_button": "button[type='submit'], button:has-text('Search')",
-        "row_selector": "table tbody tr",
-        # Lobbying rows: lobbyist/firm cell-1, client cell-2, amount cell-3,
-        # period cell-4. We map "lobbyist" into the donor slot for the unified
-        # ``primary`` field at extraction time.
-        "lobbyist_selector": "td:nth-child(1)",
-        "committee_selector": "td:nth-child(2)",
-        "amount_selector": "td:nth-child(3)",
-        "date_selector": "td:nth-child(4)",
-        "permalink_selector": "td:nth-child(1) a, a.detail-link",
-        "primary_label": "lobbyist",
+        # Power Search does NOT include lobbying — the landing page banner
+        # itself redirects lobbying queries to CAL-ACCESS (frame-based legacy
+        # ASP). The honest behavior is a documented gap, not a guess against
+        # a frameset that won't expose form selectors.
+        "not_implemented": (
+            "Power Search does not expose lobbying data; CAL-ACCESS lobbying "
+            "search is a frame-based legacy UI better served by a future "
+            "bulk-CSV loader."
+        ),
     },
 }
 
 
 def _register_host_rate() -> None:
     browser.set_host_rate(_HOST, _PER_HOST_RPS)
+    browser.set_host_rate(_IE_HOST, _PER_HOST_RPS)
 
 
 _register_host_rate()
@@ -231,6 +242,11 @@ async def search(
     if recipe is None:
         logger.warning("calaccess: unknown kind %r", kind)
         return []
+    if recipe.get("not_implemented"):
+        logger.warning(
+            "calaccess: kind=%s not implemented — %s", kind, recipe["not_implemented"]
+        )
+        return []
     if not query or not query.strip():
         return []
 
@@ -241,16 +257,6 @@ async def search(
             page = await ctx.new_page()
             try:
                 await browser.navigate(page, search_url)
-
-                # Optional: click the kind tab. Power Search renders its tabs
-                # inside the same SPA shell, so a tab click is a synchronous
-                # re-render rather than a navigation.
-                tab_selector = recipe.get("kind_tab_selector")
-                if tab_selector:
-                    try:
-                        await page.locator(tab_selector).first.click()
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug("calaccess kind tab toggle failed: %s", exc)
 
                 try:
                     await page.locator(recipe["query_input"]).first.fill(query)
