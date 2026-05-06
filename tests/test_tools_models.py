@@ -38,6 +38,7 @@ EXPECTED_SOURCE_KINDS = (
     "sanctions",
     "sos",
     "licensing",
+    "bbb",
 )
 
 
