@@ -44,6 +44,7 @@ SourceKind = Literal[
     "sanctions",
     "sos",
     "licensing",
+    "bbb",
 ]
 
 

@@ -525,6 +525,58 @@ def _smoke_licensing(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_bbb(query: str) -> str:
+    """Smoke wrapper: BBB national search + top-hit profile rollup.
+
+    Per AC: ``research _smoke-tool bbb "SBI Builders"`` should return BBB
+    rating + complaint count. Lists the top-5 search hits with rating and
+    location, then attempts ``fetch()`` on the top hit and prints rating,
+    accreditation, and complaint counts (12mo / 3yr) so an operator can
+    eyeball whether the BBB profile DOM is still healthy.
+    """
+    from research_agent.tools import bbb, browser
+
+    async def _run() -> str:
+        try:
+            results = await bbb.search(query, max_results=5)
+            if not results:
+                return f"bbb search returned no results for {query!r}"
+            lines: list[str] = []
+            for hit in results:
+                rating = hit.extras.get("rating") or "?"
+                location = hit.extras.get("location") or "?"
+                lines.append(
+                    f"- {hit.title} — {rating} — {location}\n  {hit.url}"
+                )
+
+            top = results[0]
+            source = await bbb.fetch(top.url)
+            if source is None:
+                lines.append(
+                    f"\nfetch({top.url}) returned None — profile unavailable"
+                )
+            else:
+                lines.append(f"\nProfile for {top.title}")
+                lines.append(f"  rating: {source.metadata.get('rating') or '?'}")
+                lines.append(
+                    f"  accreditation: {source.metadata.get('accreditation') or '?'}"
+                )
+                lines.append(
+                    f"  complaints_12mo: {source.metadata.get('complaints_12mo') or '?'}"
+                )
+                lines.append(
+                    f"  complaints_3yr: {source.metadata.get('complaints_3yr') or '?'}"
+                )
+            return "\n".join(lines)
+        finally:
+            try:
+                await browser.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+
+    return asyncio.run(_run())
+
+
 def _smoke_sanctions(query: str) -> str:
     """Smoke wrapper: OFAC SDN / EU / UK sanctions lookup.
 
@@ -886,6 +938,8 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "web_fetch": _smoke_web_fetch,
     "local_corpus": _smoke_local_corpus,
     "arxiv": _smoke_arxiv,
+    "audio": _smoke_audio,
+    "bbb": _smoke_bbb,
     "edgar": _smoke_edgar,
     "courtlistener": _smoke_courtlistener,
     "fedregister": _smoke_fedregister,
@@ -903,7 +957,6 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "news": _smoke_news,
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,
-    "audio": _smoke_audio,
     "ocr": _smoke_ocr,
     "youtube": _smoke_youtube,
 }
