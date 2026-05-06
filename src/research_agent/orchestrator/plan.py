@@ -60,6 +60,8 @@ TaskKind = Literal[
     "critique",
 ]
 
+ScopeClass = Literal["narrow", "medium", "broad", "comprehensive"]
+
 
 class Subgoal(BaseModel):
     """A single subgoal within a Plan. ``done=True`` retires it from the loop."""
@@ -104,6 +106,7 @@ class Plan(BaseModel):
     subgoals: list[Subgoal]
     task_template: list[TaskSpec]
     expected_iterations: int = Field(ge=1)
+    scope_class: ScopeClass | None = None
 
     def is_complete(self) -> bool:
         if not self.subgoals:
@@ -155,6 +158,7 @@ def _emit_plan_created(job: Job, plan: Plan, *, tier: str, kind: str) -> None:
             "kind": kind,
             "subgoals": len(plan.subgoals),
             "tasks": len(plan.task_template),
+            "scope_class": plan.scope_class,
         },
     )
 
@@ -347,6 +351,7 @@ __all__ = [
     "Plan",
     "PlanParseError",
     "PlanVersionCapExceeded",
+    "ScopeClass",
     "Subgoal",
     "TaskKind",
     "TaskSpec",
