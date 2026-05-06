@@ -319,6 +319,43 @@ def _smoke_lda(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_usaspending(query: str) -> str:
+    """Smoke wrapper: USAspending awards search returning the top-5 hits.
+
+    Per AC: ``research _smoke-tool usaspending "Booz Allen Hamilton"`` should
+    surface recent federal contracts with recipient, award amount, type,
+    awarding agency, action date, and permalink so an operator can eyeball
+    whether the public POST search endpoint is reachable.
+    """
+    from research_agent.tools import usaspending
+
+    async def _run() -> str:
+        results = await usaspending.search(query, max_results=5)
+        if not results:
+            return f"usaspending search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            recipient = hit.extras.get("recipient_name") or "?"
+            amount = hit.extras.get("award_amount")
+            award_type = hit.extras.get("award_type") or "?"
+            agency = hit.extras.get("awarding_agency") or "?"
+            action_date = hit.extras.get("action_date") or "?"
+            no_bid = hit.extras.get("no_bid_flag")
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            no_bid_label = " [no-bid]" if no_bid else ""
+            lines.append(
+                f"- {recipient} — ${amount} — {award_type} — {agency} —"
+                f" {action_date}{no_bid_label}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_congress(query: str) -> str:
     """Smoke wrapper: Congress.gov v3 bill search returning the top-5 hits.
 
@@ -569,6 +606,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "fec": _smoke_fec,
     "congress": _smoke_congress,
     "lda": _smoke_lda,
+    "usaspending": _smoke_usaspending,
     "news": _smoke_news,
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,

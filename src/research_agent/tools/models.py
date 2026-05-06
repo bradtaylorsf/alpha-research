@@ -38,6 +38,7 @@ SourceKind = Literal[
     "nonprofits",
     "congress",
     "lda",
+    "usaspending",
 ]
 
 
