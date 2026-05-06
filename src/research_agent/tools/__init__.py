@@ -946,6 +946,21 @@ def _smoke_youtube(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_archive_today(url: str) -> str:
+    """Smoke wrapper: submit ``url`` to archive.today and return the archive URL.
+
+    Per AC: ``research _smoke-tool archive_today https://example.com`` should
+    return the resulting ``archive.today/<id>`` URL — or a clear "no URL"
+    message if archive.today served a captcha or otherwise refused.
+    """
+    from research_agent.tools import archive
+
+    archive_url = asyncio.run(archive.archive_today_save(url))
+    if archive_url is None:
+        return f"archive.today save returned no URL for {url}"
+    return archive_url
+
+
 def _smoke_web_fetch(url: str) -> str:
     """Smoke wrapper for web_fetch: print word count, path, preview, archive URL.
 
@@ -988,6 +1003,7 @@ def _smoke_web_fetch(url: str) -> str:
 TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "web_search": _smoke_web_search,
     "web_fetch": _smoke_web_fetch,
+    "archive_today": _smoke_archive_today,
     "local_corpus": _smoke_local_corpus,
     "arxiv": _smoke_arxiv,
     "audio": _smoke_audio,
