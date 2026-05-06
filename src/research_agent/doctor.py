@@ -184,6 +184,30 @@ def check_sqlite_wal() -> CheckResult:
     )
 
 
+def check_serpapi_cost_note() -> CheckResult:
+    """Surface the per-query SERPAPI cost so the operator sees the spend trajectory.
+
+    SERPAPI bills per call (≈ $0.015 against the $75/mo / 5k-search plan), so
+    ``research doctor`` calls this out when ``SERPAPI_KEY`` is set. When the
+    key is unset the check skips — the scholar connector can't run anyway.
+    """
+    name = "serpapi_cost_note"
+    raw = os.environ.get("SERPAPI_KEY")
+    if not raw:
+        return CheckResult(
+            name,
+            "skip",
+            required=False,
+            detail="SERPAPI_KEY unset — scholar connector disabled",
+        )
+    return CheckResult(
+        name,
+        "ok",
+        required=False,
+        detail="per-query ≈ $0.015 against SERPAPI plan (5k/mo @ $75)",
+    )
+
+
 def check_models_yaml(path: Path) -> CheckResult:
     """Parse ``config/models.yaml`` — fail if missing or invalid YAML."""
     name = "models_yaml"
@@ -213,6 +237,7 @@ def run_all_checks(
     results.append(check_writable_dirs(root))
     results.append(check_sqlite_wal())
     results.append(check_models_yaml(root / "config" / "models.yaml"))
+    results.append(check_serpapi_cost_note())
     return results
 
 
