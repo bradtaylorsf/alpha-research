@@ -356,6 +356,49 @@ def _smoke_usaspending(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_gdelt(query: str) -> str:
+    """Smoke wrapper: GDELT 2.0 DOC search + tone timeline.
+
+    Per AC: ``research _smoke-tool gdelt "Anysphere Cursor"`` should surface
+    recent global news / broadcast TV mentions plus a sentiment-over-time
+    series. Lists the top-5 article hits, then prints a one-line summary of
+    the ``tone_timeline`` series (point count + first/last datapoints) so
+    an operator can eyeball both surfaces in one shot.
+    """
+    from research_agent.tools import gdelt
+
+    async def _run() -> str:
+        results = await gdelt.search(query, max_results=5)
+        lines: list[str] = []
+        if not results:
+            lines.append(f"gdelt search returned no results for {query!r}")
+        else:
+            for hit in results:
+                domain = hit.extras.get("domain") or "?"
+                language = hit.extras.get("language") or "?"
+                seendate = hit.extras.get("seendate") or "?"
+                lines.append(
+                    f"- {hit.title}\n"
+                    f"  {hit.url}\n"
+                    f"  {domain} | {language} | {seendate}"
+                )
+
+        tone = await gdelt.tone_timeline(query)
+        lines.append(f"\ntone_points: {len(tone)}")
+        if tone:
+            first = tone[0]
+            last = tone[-1]
+            lines.append(
+                f"  first: {first['datetime'].isoformat()} value={first['value']}"
+            )
+            lines.append(
+                f"  last:  {last['datetime'].isoformat()} value={last['value']}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_congress(query: str) -> str:
     """Smoke wrapper: Congress.gov v3 bill search returning the top-5 hits.
 
@@ -607,6 +650,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "congress": _smoke_congress,
     "lda": _smoke_lda,
     "usaspending": _smoke_usaspending,
+    "gdelt": _smoke_gdelt,
     "news": _smoke_news,
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,
