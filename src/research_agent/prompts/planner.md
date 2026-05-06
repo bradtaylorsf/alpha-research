@@ -59,6 +59,36 @@ the payload. The loop will then:
 You do NOT enqueue `web_fetch`, `extract_findings`, `summarize_source`,
 `synthesize`, or `critique`. Trust the loop.
 
+### Query-writing rules — critical
+
+**Initial plans must use SHORT, BROAD queries.** A multi-clause query
+like `"SBI Builders, Inc. Santa Clara County construction lawsuits 2024"`
+returns zero hits from a web search engine — search engines reward
+broad keyword overlap, not narrative specificity.
+
+Good initial queries are 2–5 keywords:
+
+  - GOOD: `"SBI Builders construction"` — finds the company website +
+    industry directories.
+  - GOOD: `"Cursor pricing complaints"` — broad enough to hit news,
+    forums, and analysis posts.
+  - BAD: `"SBI Builders, Inc. licensed general contractor reviews
+    San Jose California 2024"` — too long; 0 hits.
+  - BAD: `"Cursor IDE June 2025 pricing structure changes user
+    backlash detailed analysis"` — too narrative; 0 hits.
+
+**Drilling down happens in `tactical_replan`, not the initial plan.**
+Once searches return real URLs, the loop's mid-run replan pass can
+emit narrower follow-ups (`"<company> CSLB license"`,
+`"<company> small claims court"`, `site:bbb.org <company>`, etc.). The
+initial plan's job is to surface the *anchor URLs* — the company's own
+site, primary news mentions, top forum threads — so the system has a
+factual foundation to refine from.
+
+Use `site:` operators when you actually want to scope a search to a
+known authoritative domain (e.g. `site:cslb.ca.gov "SBI Builders"`).
+Otherwise keep queries plain.
+
 ### Payload shapes
 
 - `web_search`: `{ query: "…", sub_question: "…", max_results: 10, engine: "auto", expand_top_k: 3 }`

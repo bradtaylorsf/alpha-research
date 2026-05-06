@@ -264,9 +264,19 @@ def _should_synthesize(plan: Plan, tasks_done: int) -> bool:
     return tasks_done > 0 and tasks_done % HEURISTIC_CHECK_EVERY_N == 0
 
 
+CRITIQUE_CADENCE_MULTIPLIER = 2
+
+
 def _should_critique(plan: Plan, tasks_done: int) -> bool:
-    """v1 critique heuristic: every 4× the synthesis cadence (default: 100)."""
-    return tasks_done > 0 and tasks_done % (HEURISTIC_CHECK_EVERY_N * 4) == 0
+    """v1 critique heuristic: every 2× the synthesis cadence (default: 50).
+
+    The original 4× (100 tasks) meant a 25-task SBI Builders run never
+    got a critique pass, so the loop never noticed that 5/8 searches
+    returned 0 hits and a tactical replan was needed. 2× catches that
+    case after one round of synthesis-and-look.
+    """
+    n = HEURISTIC_CHECK_EVERY_N * CRITIQUE_CADENCE_MULTIPLIER
+    return tasks_done > 0 and tasks_done % n == 0
 
 
 def _load_latest_plan(job: Job) -> Plan | None:
