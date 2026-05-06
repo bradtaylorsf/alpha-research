@@ -27,14 +27,17 @@ replanning.
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic_ai import Agent
 
 from research_agent.observability.events import emit
 from research_agent.prompts.loader import load_prompt
 from research_agent.storage import db
+from research_agent.storage.jobs import _atomic_write_text
 from research_agent.storage.markdown import write_plan
 
 if TYPE_CHECKING:
@@ -156,21 +159,118 @@ def _emit_plan_created(job: Job, plan: Plan, *, tier: str, kind: str) -> None:
     )
 
 
-async def initial_plan(job: Job, *, router: Router) -> Plan:
-    """Build the v1 plan for a fresh job using the cloud ``frontier`` tier.
+def _enqueue_plan_tasks(job: Job, plan: Plan) -> list[int]:
+    """Persist ``plan.task_template`` into the tasks queue.
 
-    Renders the ``planner.md`` system prompt with the job goal, runs a
-    Pydantic AI :class:`Agent` with ``output_type=Plan`` against the frontier
-    model, forces ``version = 1`` on the structured output, persists via
-    :func:`write_plan`, and emits ``plan_created``.
+    Without this the loop would pull ``None`` immediately after a fresh
+    plan and exit before doing any research. Deferred import — ``storage.tasks``
+    imports ``TaskSpec`` from this module, so a top-level import would cycle.
+    """
+    from research_agent.storage.tasks import enqueue
+
+    if not plan.task_template:
+        return []
+    return enqueue(job, list(plan.task_template), plan.version)
+
+
+_YAML_FENCE_RE = re.compile(r"```(?:yaml|yml)?\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
+
+
+class PlanParseError(RuntimeError):
+    """Raised when the planner's YAML output can't be parsed into a Plan.
+
+    The raw YAML is always written to ``jobs/<id>/plan/<v>.yaml`` before
+    parsing is attempted, so the operator can inspect what the model
+    actually emitted (in the error message we include the path).
+    """
+
+
+def _extract_yaml(raw: str) -> str:
+    """Return the contents of the first ```yaml fenced block, or ``raw`` itself.
+
+    Local models occasionally forget the fence, so we tolerate "the whole
+    response is YAML" as a fallback rather than failing immediately.
+    """
+    match = _YAML_FENCE_RE.search(raw)
+    if match:
+        return match.group(1).strip()
+    return raw.strip()
+
+
+def _persist_raw_plan_yaml(job: Job, version: int, raw: str) -> str:
+    """Write the planner's raw YAML to ``jobs/<id>/plan/<v>.yaml`` (return rel path).
+
+    The write is atomic and happens before parse/validate so a malformed
+    plan still leaves an artifact on disk for forensics + future learnings.
+    """
+    rel = f"plan/{version:04d}.yaml"
+    _atomic_write_text(job.root / rel, raw if raw.endswith("\n") else raw + "\n")
+    return rel
+
+
+def _parse_plan_yaml(raw: str, *, version: int, raw_path: str) -> Plan:
+    """Parse + validate a YAML plan; force ``version`` on the result.
+
+    ``raw_path`` is included in error messages so the operator can open
+    the on-disk artifact when validation fails.
+    """
+    yaml_text = _extract_yaml(raw)
+    try:
+        data = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as e:
+        raise PlanParseError(
+            f"planner YAML failed to parse ({raw_path}): {e}"
+        ) from e
+    if not isinstance(data, dict):
+        raise PlanParseError(
+            f"planner YAML root must be a mapping ({raw_path}); got {type(data).__name__}"
+        )
+    data["version"] = version
+    try:
+        return Plan.model_validate(data)
+    except ValidationError as e:
+        raise PlanParseError(
+            f"planner YAML failed Plan validation ({raw_path}): {e}"
+        ) from e
+
+
+async def _run_planner_for_yaml(
+    job: Job,
+    *,
+    tier: str,
+    router: Router,
+    user_message: str,
+) -> str:
+    """Call the configured tier with output_type=str and return raw text.
+
+    Local models choke on tool-call structured output for our nested
+    Plan schema; YAML-on-disk is the resilient path.
+    """
+    rendered = load_prompt("planner", job=job, goal=job.goal)
+    agent = Agent(router.model_for(tier), output_type=str, system_prompt=rendered)
+    result = await router.call(tier, agent, user_message)
+    output = result.output
+    if not isinstance(output, str):
+        output = str(output)
+    return output
+
+
+async def initial_plan(job: Job, *, router: Router) -> Plan:
+    """Build the v1 plan for a fresh job.
+
+    Asks the ``frontier`` tier for a YAML plan, writes the raw response to
+    ``jobs/<id>/plan/0001.yaml``, parses + validates against :class:`Plan`,
+    persists the validated structure via :func:`write_plan`, enqueues the
+    task template, and emits ``plan_created``.
     """
     _assert_under_cap(job)
-    rendered = load_prompt("planner", job=job, goal=job.goal)
-    agent = Agent(router.model_for("frontier"), output_type=Plan, system_prompt=rendered)
-    result = await router.call("frontier", agent, job.goal)
-    plan: Plan = result.output
-    plan = plan.model_copy(update={"version": 1})
+    raw = await _run_planner_for_yaml(
+        job, tier="frontier", router=router, user_message=job.goal
+    )
+    raw_path = _persist_raw_plan_yaml(job, version=1, raw=raw)
+    plan = _parse_plan_yaml(raw, version=1, raw_path=raw_path)
     write_plan(job, plan.model_dump())
+    _enqueue_plan_tasks(job, plan)
     _emit_plan_created(job, plan, tier="frontier", kind="initial")
     return plan
 
@@ -189,8 +289,7 @@ async def tactical_replan(
     returned plan's version is set to ``plan.version + 1`` and persisted.
     """
     _assert_under_cap(job)
-    rendered = load_prompt("planner", job=job, goal=job.goal)
-    agent = Agent(router.model_for("general"), output_type=Plan, system_prompt=rendered)
+    next_version = plan.version + 1
     context = json.dumps(
         {
             "prior_plan": plan.model_dump(),
@@ -199,10 +298,13 @@ async def tactical_replan(
         sort_keys=True,
         default=str,
     )
-    result = await router.call("general", agent, context)
-    new_plan: Plan = result.output
-    new_plan = new_plan.model_copy(update={"version": plan.version + 1})
+    raw = await _run_planner_for_yaml(
+        job, tier="general", router=router, user_message=context
+    )
+    raw_path = _persist_raw_plan_yaml(job, version=next_version, raw=raw)
+    new_plan = _parse_plan_yaml(raw, version=next_version, raw_path=raw_path)
     write_plan(job, new_plan.model_dump())
+    _enqueue_plan_tasks(job, new_plan)
     _emit_plan_created(job, new_plan, tier="general", kind="tactical_replan")
     return new_plan
 
@@ -220,8 +322,7 @@ async def cloud_replan(
     can't address. Increments the plan version, persists, emits.
     """
     _assert_under_cap(job)
-    rendered = load_prompt("planner", job=job, goal=job.goal)
-    agent = Agent(router.model_for("frontier"), output_type=Plan, system_prompt=rendered)
+    next_version = plan.version + 1
     context = json.dumps(
         {
             "prior_plan": plan.model_dump(),
@@ -230,10 +331,13 @@ async def cloud_replan(
         sort_keys=True,
         default=str,
     )
-    result = await router.call("frontier", agent, context)
-    new_plan: Plan = result.output
-    new_plan = new_plan.model_copy(update={"version": plan.version + 1})
+    raw = await _run_planner_for_yaml(
+        job, tier="frontier", router=router, user_message=context
+    )
+    raw_path = _persist_raw_plan_yaml(job, version=next_version, raw=raw)
+    new_plan = _parse_plan_yaml(raw, version=next_version, raw_path=raw_path)
     write_plan(job, new_plan.model_dump())
+    _enqueue_plan_tasks(job, new_plan)
     _emit_plan_created(job, new_plan, tier="frontier", kind="cloud_replan")
     return new_plan
 
@@ -241,6 +345,7 @@ async def cloud_replan(
 __all__ = [
     "MAX_PLAN_VERSIONS",
     "Plan",
+    "PlanParseError",
     "PlanVersionCapExceeded",
     "Subgoal",
     "TaskKind",

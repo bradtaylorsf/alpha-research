@@ -21,14 +21,19 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, quote_plus
 
+import httpx
 from playwright.async_api import Error as PlaywrightError
 
+from research_agent import config
 from research_agent.tools import browser
 from research_agent.tools.models import SearchResult
 
 logger = logging.getLogger(__name__)
 
-Engine = Literal["ddg", "google"]
+Engine = Literal["auto", "brave", "ddg", "google"]
+
+BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
+BRAVE_HTTP_TIMEOUT_S = 15.0
 
 DDG_HOST = "html.duckduckgo.com"
 GOOGLE_HOST = "www.google.com"
@@ -313,19 +318,103 @@ async def _capture_diagnostic(page, engine: str) -> Path:
     return path
 
 
+def _brave_api_key() -> str | None:
+    """Resolve the Brave Search API key from env / config, or None."""
+    return config.get("BRAVE_SEARCH_API_KEY")
+
+
+async def _search_brave(query: str, max_results: int) -> list[SearchResult]:
+    """Hit the Brave Search Web API and return up to ``max_results`` hits.
+
+    Uses httpx, no Playwright — clean JSON, no fingerprinting risk, no
+    selector drift. The free tier allows ~2000 queries/month.
+    """
+    api_key = _brave_api_key()
+    if not api_key:
+        logger.warning("brave search requested but BRAVE_SEARCH_API_KEY not set")
+        return []
+
+    headers = {
+        "X-Subscription-Token": api_key,
+        "Accept": "application/json",
+    }
+    # `count` is capped at 20 by the Brave API; clamp + we only return max_results.
+    params = {"q": query, "count": str(min(max_results, 20))}
+    try:
+        async with httpx.AsyncClient(timeout=BRAVE_HTTP_TIMEOUT_S) as client:
+            resp = await client.get(BRAVE_SEARCH_URL, headers=headers, params=params)
+    except httpx.HTTPError as exc:
+        logger.warning("brave search HTTP error for %r: %s", query, exc)
+        return []
+
+    if resp.status_code != 200:
+        logger.warning(
+            "brave search returned %s for %r: %s",
+            resp.status_code,
+            query,
+            resp.text[:200],
+        )
+        return []
+
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        logger.warning("brave search JSON decode failed: %s", exc)
+        return []
+
+    hits = ((data or {}).get("web") or {}).get("results") or []
+    results: list[SearchResult] = []
+    for hit in hits[:max_results]:
+        url = hit.get("url")
+        if not url:
+            continue
+        published: datetime | None = None
+        # Brave returns ISO timestamps in `page_age` for some hits.
+        age_raw = hit.get("page_age") or hit.get("age")
+        if isinstance(age_raw, str):
+            try:
+                published = datetime.fromisoformat(age_raw.replace("Z", "+00:00"))
+            except ValueError:
+                published = None
+        results.append(
+            SearchResult(
+                url=url,
+                title=hit.get("title") or url,
+                snippet=hit.get("description") or "",
+                published_at=published,
+                source_kind="web",
+                extras={"source_engine": "brave"},
+            )
+        )
+    return results
+
+
 async def search(
     query: str,
     max_results: int = 10,
-    engine: Engine = "ddg",
+    engine: Engine = "auto",
 ) -> list[SearchResult]:
     """Search ``query`` against ``engine`` and return up to ``max_results`` hits.
 
-    ``score`` and ``published_at`` are intentionally left unset — public SERPs
-    don't expose either consistently, so any value would be made up. Callers
-    that need ranking can re-rank these later.
+    Engine selection:
+
+    * ``"auto"`` (default) — Brave Search API when ``BRAVE_SEARCH_API_KEY`` is
+      set, else DDG-Playwright. Keeps callers blissfully unaware.
+    * ``"brave"`` — force Brave; returns ``[]`` if the key is missing.
+    * ``"ddg"`` / ``"google"`` — force the respective Playwright SERP scrape.
+
+    ``score`` and ``published_at`` are unset for SERP-scraped engines (they
+    don't expose either consistently); Brave includes ``page_age`` when the
+    crawler knows it.
     """
     if not query.strip():
         return []
+
+    if engine == "auto":
+        engine = "brave" if _brave_api_key() else "ddg"
+
+    if engine == "brave":
+        return await _search_brave(query, max_results)
 
     _ensure_serp_rates()
 

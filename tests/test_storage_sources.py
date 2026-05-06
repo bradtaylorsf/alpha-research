@@ -191,10 +191,14 @@ def test_write_source_dedups_across_jobs(job1: Job, job2: Job) -> None:
 
     sha = content_sha256(clean_content(raw))
 
-    # Canonical file lives under the first writer's job folder only.
+    # Both job folders carry the markdown — the original "first writer
+    # only" behavior was fragile to job-folder deletion (the orphaned
+    # row would point at a path that no longer existed). Each job is now
+    # self-contained on disk, while the SQLite ``sources`` table stays
+    # deduplicated by sha256.
     assert (job1.root / "sources" / f"{sha}.md").exists()
-    assert not (job2.root / "sources" / f"{sha}.md").exists()
-    assert not (job2.root / "sources" / f"{sha}.json").exists()
+    assert (job2.root / "sources" / f"{sha}.md").exists()
+    assert (job2.root / "sources" / f"{sha}.json").exists()
 
     conn = db.connect(job1.db_path)
     try:

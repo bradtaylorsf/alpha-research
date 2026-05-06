@@ -1,425 +1,277 @@
-"""Tests for `research_agent.tools.reddit` (issue #21)."""
+"""Tests for `research_agent.tools.reddit` (JSON endpoint version)."""
 
 from __future__ import annotations
 
-import logging
-from contextlib import asynccontextmanager
-from pathlib import Path
+import json
 from typing import Any
 
+import httpx
 import pytest
 
 from research_agent.tools import reddit
 
+
 # ---------------------------------------------------------------------------
-# Fake Playwright objects
+# httpx mocking helpers
 # ---------------------------------------------------------------------------
 
 
-class _FakeLocator:
-    """Minimal Playwright locator stand-in.
+class _StubResponse:
+    """Minimal httpx.Response stand-in for status + json decoding."""
 
-    Constructed with optional ``text``, ``attrs``, child locator map, and
-    a list of items returned by ``.all()``. ``.first`` returns ``self`` so
-    ``locator(sel).first`` chains work just like the real API.
+    def __init__(self, status_code: int, payload: Any) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        # ``text`` is read on non-200 paths for the WARN log.
+        self.text = json.dumps(payload) if isinstance(payload, (dict, list)) else str(payload)
+
+    def json(self) -> Any:
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+class _StubAsyncClient:
+    """Drop-in for httpx.AsyncClient used by reddit.search/fetch.
+
+    Captures the URL + headers each call sees and returns the configured
+    ``response`` (or raises ``raise_with`` to simulate transport errors).
     """
+
+    last_url: str | None = None
+    last_headers: dict[str, str] | None = None
 
     def __init__(
         self,
         *,
-        text: str = "",
-        attrs: dict[str, str] | None = None,
-        children: dict[str, _FakeLocator] | None = None,
-        items: list[_FakeLocator] | None = None,
-        raise_on_inner_text: bool = False,
+        response: _StubResponse | None = None,
+        raise_with: Exception | None = None,
     ) -> None:
-        self._text = text
-        self._attrs = attrs or {}
-        self._children = children or {}
-        self._items = items or []
-        self._raise_on_inner_text = raise_on_inner_text
+        self._response = response
+        self._raise = raise_with
 
-    @property
-    def first(self) -> _FakeLocator:
+    async def __aenter__(self) -> "_StubAsyncClient":
         return self
 
-    async def all(self) -> list[_FakeLocator]:
-        return list(self._items)
-
-    async def inner_text(self) -> str:
-        if self._raise_on_inner_text:
-            raise RuntimeError("inner_text boom")
-        return self._text
-
-    async def get_attribute(self, name: str) -> str | None:
-        return self._attrs.get(name)
-
-    def locator(self, selector: str) -> _FakeLocator:
-        return self._children.get(selector, _FakeLocator())
-
-
-class _FakePage:
-    """Tracks navigations, supports custom selector responses, screenshots."""
-
-    def __init__(self, selector_map: dict[str, _FakeLocator] | None = None) -> None:
-        self._selector_map = selector_map or {}
-        self.closed = False
-        self.screenshots: list[str] = []
-
-    def locator(self, selector: str) -> _FakeLocator:
-        return self._selector_map.get(selector, _FakeLocator())
-
-    async def close(self) -> None:
-        self.closed = True
-
-    async def screenshot(self, *, path: str) -> None:
-        self.screenshots.append(path)
-
-
-class _FakeContext:
-    def __init__(self, page: _FakePage) -> None:
-        self._page = page
-
-    async def new_page(self) -> _FakePage:
-        return self._page
-
-
-def _stub_browser(monkeypatch, page: _FakePage) -> dict[str, Any]:
-    captured: dict[str, Any] = {"navigations": []}
-
-    @asynccontextmanager
-    async def _session(headful=None, block_media=True):
-        yield _FakeContext(page)
-
-    async def _navigate(p, url, **kwargs):
-        captured["navigations"].append(url)
+    async def __aexit__(self, *exc_info: Any) -> None:
         return None
 
-    monkeypatch.setattr(reddit.browser, "browser_session", _session)
-    monkeypatch.setattr(reddit.browser, "navigate", _navigate)
-    return captured
+    async def get(self, url: str, headers: dict[str, str] | None = None, **_: Any) -> _StubResponse:
+        type(self).last_url = url
+        type(self).last_headers = dict(headers or {})
+        if self._raise is not None:
+            raise self._raise
+        assert self._response is not None
+        return self._response
 
 
-def _make_search_item(
-    *,
-    title: str,
-    href: str,
-    snippet: str = "",
-    subreddit: str = "",
-    score: str = "",
-    num_comments: str = "",
-    posted_at: str = "",
-) -> _FakeLocator:
-    """Build a fake ``div.search-result-link`` matching what reddit.py reads."""
-    children = {
-        "a.search-title": _FakeLocator(text=title, attrs={"href": href}),
-        "a.title": _FakeLocator(),
-        ".search-result-body": _FakeLocator(text=snippet),
-        ".md": _FakeLocator(),
-        "a.search-subreddit-link": _FakeLocator(text=subreddit),
-        ".search-score": _FakeLocator(text=score),
-        ".score.unvoted": _FakeLocator(),
-        ".search-comments": _FakeLocator(text=num_comments),
-        "a.comments": _FakeLocator(),
-        "time": _FakeLocator(attrs={"datetime": posted_at}),
-    }
-    return _FakeLocator(children=children, attrs={"data-subreddit": subreddit})
+def _patch_httpx(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> type[_StubAsyncClient]:
+    """Install a fresh stub class on httpx.AsyncClient. Returns the class."""
+    stub_cls = type("_Stub", (_StubAsyncClient,), {})
+    stub_cls.last_url = None
+    stub_cls.last_headers = None
+    instance = stub_cls(**kwargs)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: instance)
+    return stub_cls
 
 
 # ---------------------------------------------------------------------------
-# (a) /search URL with query+sort
+# search()
 # ---------------------------------------------------------------------------
 
 
-async def test_search_builds_global_search_url(monkeypatch):
-    page = _FakePage(
-        {
-            "div.search-result-link": _FakeLocator(items=[]),
-            "div.thing.link": _FakeLocator(items=[]),
-        }
-    )
-    captured = _stub_browser(monkeypatch, page)
-
-    # Empty-query path: no WARN even if zero results
-    await reddit.search("", sort="new")
-
-    assert captured["navigations"] == ["https://old.reddit.com/search?q=&sort=new"]
+def _fake_listing(*posts: dict[str, Any]) -> dict[str, Any]:
+    return {"data": {"children": [{"data": p} for p in posts]}}
 
 
-# ---------------------------------------------------------------------------
-# (b) /r/<sub>/search URL with restrict_sr
-# ---------------------------------------------------------------------------
-
-
-async def test_search_with_subreddit_builds_restrict_sr_url(monkeypatch):
-    page = _FakePage(
-        {
-            "div.search-result-link": _FakeLocator(items=[]),
-            "div.thing.link": _FakeLocator(items=[]),
-        }
-    )
-    captured = _stub_browser(monkeypatch, page)
-
-    await reddit.search("qwen", subreddit="LocalLLaMA", sort="relevance")
-
-    assert captured["navigations"] == [
-        "https://old.reddit.com/r/LocalLLaMA/search?q=qwen&restrict_sr=on&sort=relevance"
-    ]
-
-
-# ---------------------------------------------------------------------------
-# (c) parses title/url/subreddit/score/num_comments/posted_at
-# ---------------------------------------------------------------------------
-
-
-async def test_search_extracts_full_fields(monkeypatch):
-    item = _make_search_item(
-        title="Qwen 2.5 release notes",
-        href="/r/LocalLLaMA/comments/abc/qwen_25/",
-        snippet="long-form analysis",
-        subreddit="LocalLLaMA",
-        score="42 points",
-        num_comments="11 comments",
-        posted_at="2026-04-30T12:34:56+00:00",
-    )
-    page = _FakePage(
-        {
-            "div.search-result-link": _FakeLocator(items=[item]),
-            "div.thing.link": _FakeLocator(items=[]),
-        }
-    )
-    _stub_browser(monkeypatch, page)
-
-    results = await reddit.search("qwen")
-    assert len(results) == 1
-    hit = results[0]
-    assert hit.title == "Qwen 2.5 release notes"
-    assert hit.url == "https://old.reddit.com/r/LocalLLaMA/comments/abc/qwen_25/"
-    assert hit.snippet == "long-form analysis"
-    assert hit.source_kind == "reddit"
-    assert hit.extras["subreddit"] == "LocalLLaMA"
-    assert hit.extras["score"] == 42
-    assert hit.extras["num_comments"] == 11
-    assert hit.extras["sort"] == "relevance"
-    assert hit.extras["fetched_via"] == "old.reddit.com"
-    assert hit.published_at is not None
-    assert hit.published_at.year == 2026
-    assert hit.published_at.month == 4
-    assert hit.published_at.day == 30
-
-
-# ---------------------------------------------------------------------------
-# (c2) limit caps returned results
-# ---------------------------------------------------------------------------
-
-
-async def test_search_respects_limit(monkeypatch):
-    items = [_make_search_item(title=f"Post {i}", href=f"/p/{i}", subreddit="x") for i in range(10)]
-    page = _FakePage(
-        {
-            "div.search-result-link": _FakeLocator(items=items),
-            "div.thing.link": _FakeLocator(items=[]),
-        }
-    )
-    _stub_browser(monkeypatch, page)
-
-    results = await reddit.search("anything", limit=3)
-    assert len(results) == 3
-
-
-# ---------------------------------------------------------------------------
-# (c3) falls back to div.thing.link selector
-# ---------------------------------------------------------------------------
-
-
-async def test_search_falls_back_to_thing_link_selector(monkeypatch):
-    item = _make_search_item(
-        title="Listing-style",
-        href="/r/x/comments/zzz/listing/",
-        subreddit="x",
-    )
-    page = _FakePage(
-        {
-            "div.search-result-link": _FakeLocator(items=[]),
-            "div.thing.link": _FakeLocator(items=[item]),
-        }
-    )
-    _stub_browser(monkeypatch, page)
-
-    results = await reddit.search("anything")
-    assert len(results) == 1
-    assert results[0].title == "Listing-style"
-
-
-# ---------------------------------------------------------------------------
-# (d) selector drift + non-empty query → 0 results, WARN, screenshot
-# ---------------------------------------------------------------------------
-
-
-async def test_selector_drift_logs_warn_and_screenshots(monkeypatch, caplog, tmp_path):
-    page = _FakePage(
-        {
-            "div.search-result-link": _FakeLocator(items=[]),
-            "div.thing.link": _FakeLocator(items=[]),
-        }
-    )
-    _stub_browser(monkeypatch, page)
-    monkeypatch.setattr(reddit, "_DIAGNOSTICS_DIR", tmp_path / "diagnostics")
-
-    with caplog.at_level(logging.WARNING, logger=reddit.logger.name):
-        results = await reddit.search("non empty query string")
-
+@pytest.mark.asyncio
+async def test_search_empty_query_returns_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = _patch_httpx(monkeypatch, response=_StubResponse(200, _fake_listing()))
+    results = await reddit.search("   ")
     assert results == []
-    warn_msgs = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
-    assert len(warn_msgs) == 1
-    assert "selector drift" in warn_msgs[0].message
-    assert page.screenshots, "expected diagnostic screenshot saved"
-    assert page.screenshots[0].endswith(".png")
-    # Screenshot path lands under our patched diagnostics dir
-    assert str(tmp_path / "diagnostics") in page.screenshots[0]
+    assert stub.last_url is None  # never made the HTTP call
 
 
-async def test_empty_query_zero_results_is_silent(monkeypatch, caplog):
-    page = _FakePage(
-        {
-            "div.search-result-link": _FakeLocator(items=[]),
-            "div.thing.link": _FakeLocator(items=[]),
-        }
+@pytest.mark.asyncio
+async def test_search_global_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = _patch_httpx(
+        monkeypatch,
+        response=_StubResponse(
+            200,
+            _fake_listing(
+                {
+                    "title": "Cursor pricing complaints thread",
+                    "permalink": "/r/cursor/comments/abc/cursor_pricing/",
+                    "selftext": "I am unhappy with the new model.",
+                    "subreddit": "cursor",
+                    "score": 42,
+                    "num_comments": 8,
+                    "created_utc": 1700000000,
+                }
+            ),
+        ),
     )
-    _stub_browser(monkeypatch, page)
+    results = await reddit.search("cursor pricing", limit=5)
+    assert stub.last_url is not None
+    assert "search.json" in stub.last_url
+    assert "limit=5" in stub.last_url
+    assert "User-Agent" in stub.last_headers
+    assert len(results) == 1
+    r = results[0]
+    assert r.url == "https://www.reddit.com/r/cursor/comments/abc/cursor_pricing/"
+    assert r.title == "Cursor pricing complaints thread"
+    assert r.score == 42.0
+    assert r.extras["subreddit"] == "cursor"
+    assert r.extras["num_comments"] == 8
 
-    with caplog.at_level(logging.WARNING, logger=reddit.logger.name):
-        results = await reddit.search("")
 
-    assert results == []
-    assert not [rec for rec in caplog.records if rec.levelno == logging.WARNING]
-    assert page.screenshots == []
-
-
-# ---------------------------------------------------------------------------
-# (e) fetch returns Source with body + depth-1 comments
-# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_search_subreddit_url_uses_restrict_sr(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = _patch_httpx(monkeypatch, response=_StubResponse(200, _fake_listing()))
+    await reddit.search("billing", subreddit="cursor")
+    assert "/r/cursor/search.json" in stub.last_url
+    assert "restrict_sr=on" in stub.last_url
 
 
-def _make_comment(*, author: str, body: str, classes: str = "thing comment") -> _FakeLocator:
-    return _FakeLocator(
-        attrs={"class": classes},
-        children={
-            "a.author": _FakeLocator(text=author),
-            ".usertext-body .md": _FakeLocator(text=body),
+@pytest.mark.asyncio
+async def test_search_clamps_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = _patch_httpx(monkeypatch, response=_StubResponse(200, _fake_listing()))
+    await reddit.search("anything", limit=999)
+    # Reddit caps at 100; our build_search_url clamps to 100.
+    assert "limit=100" in stub.last_url
+
+
+@pytest.mark.asyncio
+async def test_search_http_error_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_httpx(monkeypatch, raise_with=httpx.ConnectError("boom"))
+    assert await reddit.search("anything") == []
+
+
+@pytest.mark.asyncio
+async def test_search_non_200_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_httpx(monkeypatch, response=_StubResponse(429, {"error": "rate-limited"}))
+    assert await reddit.search("anything") == []
+
+
+@pytest.mark.asyncio
+async def test_search_skips_posts_missing_title_or_permalink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _fake_listing(
+        {"title": "", "permalink": "/r/x/comments/1/y"},
+        {"title": "ok", "permalink": ""},
+        {
+            "title": "good",
+            "permalink": "/r/x/comments/3/z/",
+            "subreddit": "x",
+            "score": 1,
         },
     )
-
-
-async def test_fetch_returns_source_with_comments(monkeypatch):
-    page = _FakePage(
-        {
-            "a.title": _FakeLocator(text="Post title"),
-            ".expando .md": _FakeLocator(text="Body of the post"),
-            "div.usertext-body .md": _FakeLocator(),
-            "a.subreddit": _FakeLocator(text="LocalLLaMA"),
-            ".sitetable .score.unvoted": _FakeLocator(text="99"),
-            ".sitetable a.comments": _FakeLocator(text="2 comments"),
-            "div.commentarea > div.sitetable > div.thing.comment": _FakeLocator(
-                items=[
-                    _make_comment(author="alice", body="great post"),
-                    _make_comment(author="bob", body="agreed"),
-                    _make_comment(
-                        author="",
-                        body="should be skipped",
-                        classes="thing morechildren",
-                    ),
-                ]
-            ),
-        }
-    )
-    captured = _stub_browser(monkeypatch, page)
-
-    source = await reddit.fetch("https://www.reddit.com/r/LocalLLaMA/comments/abc/post/")
-    assert source is not None
-    assert source.url == "https://old.reddit.com/r/LocalLLaMA/comments/abc/post/"
-    assert captured["navigations"] == ["https://old.reddit.com/r/LocalLLaMA/comments/abc/post/"]
-    assert source.title == "Post title"
-    assert source.source_kind == "reddit"
-    assert "Body of the post" in source.cleaned_text
-    assert "alice: great post" in source.cleaned_text
-    assert "bob: agreed" in source.cleaned_text
-    # ``.morechildren`` placeholder skipped — no body for it
-    assert "should be skipped" not in source.cleaned_text
-    assert "---" in source.cleaned_text  # body/comment separator
-    assert source.metadata["subreddit"] == "LocalLLaMA"
-    assert source.metadata["score"] == 99
-    assert source.metadata["comment_count"] == 2
-    assert page.closed is True
-
-
-async def test_fetch_missing_title_and_body_returns_none(monkeypatch, tmp_path):
-    page = _FakePage(
-        {
-            "a.title": _FakeLocator(text=""),
-            ".expando .md": _FakeLocator(text=""),
-            "div.usertext-body .md": _FakeLocator(text=""),
-            "div.commentarea > div.sitetable > div.thing.comment": _FakeLocator(items=[]),
-        }
-    )
-    _stub_browser(monkeypatch, page)
-    monkeypatch.setattr(reddit, "_DIAGNOSTICS_DIR", tmp_path / "diagnostics")
-
-    source = await reddit.fetch("https://old.reddit.com/r/x/comments/zzz/empty/")
-    assert source is None
-    assert page.screenshots, "expected diagnostic screenshot on empty post"
-
-
-# ---------------------------------------------------------------------------
-# (f) regression: no REDDIT_* env vars referenced
-# ---------------------------------------------------------------------------
-
-
-def test_no_reddit_env_vars_referenced_in_source():
-    src = Path(reddit.__file__).read_text(encoding="utf-8")
-    assert "REDDIT_CLIENT_ID" not in src
-    assert "REDDIT_CLIENT_SECRET" not in src
-    assert "REDDIT_USER_AGENT" not in src
-
-
-# ---------------------------------------------------------------------------
-# (g) smoke registry includes 'reddit'
-# ---------------------------------------------------------------------------
-
-
-def test_smoke_registry_includes_reddit():
-    from research_agent.tools import TOOL_REGISTRY
-
-    assert "reddit" in TOOL_REGISTRY
-    assert callable(TOOL_REGISTRY["reddit"])
-
-
-# ---------------------------------------------------------------------------
-# Misc
-# ---------------------------------------------------------------------------
-
-
-async def test_search_failure_does_not_crash(monkeypatch):
-    @asynccontextmanager
-    async def _session(headful=None, block_media=True):
-        raise RuntimeError("playwright went boom")
-        yield  # pragma: no cover
-
-    monkeypatch.setattr(reddit.browser, "browser_session", _session)
-
+    _patch_httpx(monkeypatch, response=_StubResponse(200, payload))
     results = await reddit.search("anything")
-    assert results == []
+    assert len(results) == 1
+    assert results[0].title == "good"
 
 
-def test_module_constants_match_polite_budget():
-    # 1 nav / 2 s == 0.5 rps. Locking the constant in via test ensures
-    # future drift is intentional, not accidental.
-    assert reddit._HOST == "old.reddit.com"
-    assert pytest.approx(reddit._HOST_RPS, rel=1e-6) == 0.5
+# ---------------------------------------------------------------------------
+# fetch()
+# ---------------------------------------------------------------------------
 
-    # Calling set_host_rate again is idempotent and registers the bucket
-    # at the documented rate.
-    reddit.browser.set_host_rate(reddit._HOST, reddit._HOST_RPS)
-    bucket = reddit.browser._host_buckets.get(reddit._HOST)
-    assert bucket is not None
-    assert pytest.approx(bucket.rps, rel=1e-6) == reddit._HOST_RPS
+
+def _fake_post_with_comments(
+    *, title: str, body: str, comments: list[str], permalink: str = "/r/x/comments/1/y/"
+) -> list[dict[str, Any]]:
+    post_listing = {
+        "data": {
+            "children": [
+                {
+                    "data": {
+                        "title": title,
+                        "selftext": body,
+                        "permalink": permalink,
+                        "subreddit": "x",
+                        "score": 99,
+                        "num_comments": len(comments),
+                    }
+                }
+            ]
+        }
+    }
+    comments_listing = {
+        "data": {
+            "children": [{"data": {"body": c}} for c in comments],
+        }
+    }
+    return [post_listing, comments_listing]
+
+
+@pytest.mark.asyncio
+async def test_fetch_returns_source_with_body_and_comments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _fake_post_with_comments(
+        title="Cursor pricing thread",
+        body="I have complaints",
+        comments=["agreed", "switched to copilot", "[deleted]"],
+        permalink="/r/cursor/comments/abc/post/",
+    )
+    _patch_httpx(monkeypatch, response=_StubResponse(200, payload))
+    src = await reddit.fetch("https://www.reddit.com/r/cursor/comments/abc/post/")
+    assert src is not None
+    assert src.title == "Cursor pricing thread"
+    assert "Cursor pricing thread" in src.cleaned_text
+    assert "I have complaints" in src.cleaned_text
+    assert "agreed" in src.cleaned_text
+    assert "switched to copilot" in src.cleaned_text
+    # [deleted] / [removed] comments are filtered out.
+    assert "[deleted]" not in src.cleaned_text
+    assert src.source_kind == "reddit"
+    assert src.metadata["subreddit"] == "x"
+
+
+@pytest.mark.asyncio
+async def test_fetch_rejects_non_post_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_httpx(monkeypatch, response=_StubResponse(200, []))
+    # Subreddit listing — not a post permalink.
+    assert await reddit.fetch("https://www.reddit.com/r/cursor/") is None
+    # User page.
+    assert await reddit.fetch("https://www.reddit.com/u/someone/") is None
+    # Off-site URL.
+    assert await reddit.fetch("https://example.com/whatever") is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_normalizes_old_reddit_to_www(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _fake_post_with_comments(
+        title="t",
+        body="b",
+        comments=[],
+        permalink="/r/cursor/comments/abc/post/",
+    )
+    stub = _patch_httpx(monkeypatch, response=_StubResponse(200, payload))
+    src = await reddit.fetch("https://old.reddit.com/r/cursor/comments/abc/post/")
+    assert src is not None
+    # Outbound URL was normalized to www.reddit.com + .json.
+    assert stub.last_url.startswith("https://www.reddit.com/")
+    assert stub.last_url.endswith(".json")
+
+
+@pytest.mark.asyncio
+async def test_fetch_empty_body_and_comments_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _fake_post_with_comments(
+        title="",  # blank title
+        body="",
+        comments=[],
+        permalink="/r/x/comments/1/y/",
+    )
+    _patch_httpx(monkeypatch, response=_StubResponse(200, payload))
+    src = await reddit.fetch("https://www.reddit.com/r/x/comments/1/y/")
+    assert src is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_http_error_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_httpx(monkeypatch, raise_with=httpx.ConnectError("nope"))
+    assert await reddit.fetch("https://www.reddit.com/r/x/comments/1/y/") is None

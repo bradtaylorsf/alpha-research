@@ -100,17 +100,18 @@ def write_source(
                 (sha,),
             ).fetchone()
 
+            sidecar: dict[str, Any] = {
+                "sha256": sha,
+                "url": url,
+                "title": title,
+                "fetched_at": fetched,
+                "archive_url": archive_url or "",
+                "kind": kind,
+                "md_path": md_rel,
+            }
+
             if existing is None:
                 _atomic_write_text(job.root / md_rel, cleaned + "\n")
-                sidecar: dict[str, Any] = {
-                    "sha256": sha,
-                    "url": url,
-                    "title": title,
-                    "fetched_at": fetched,
-                    "archive_url": archive_url or "",
-                    "kind": kind,
-                    "md_path": md_rel,
-                }
                 _atomic_write_json(job.root / json_rel, sidecar)
 
                 cur = conn.execute(
@@ -125,21 +126,19 @@ def write_source(
                 source_id = int(cur.lastrowid)
             else:
                 source_id = int(existing["id"])
-                # Pruned ≠ banned: a row whose md_path was nulled by the disk-cap
-                # watcher (issue #38) gets its file rewritten under the current job
-                # and the column repointed. The canonical sha is unchanged.
-                if not existing["md_path"]:
-                    _atomic_write_text(job.root / md_rel, cleaned + "\n")
-                    sidecar = {
-                        "sha256": sha,
-                        "url": url,
-                        "title": title,
-                        "fetched_at": fetched,
-                        "archive_url": archive_url or "",
-                        "kind": kind,
-                        "md_path": md_rel,
-                    }
+                # Always materialize the markdown + sidecar into THIS job's
+                # folder, even on dedup hit. The DB's md_path column is a
+                # repo-relative path under each job, so a job whose folder
+                # was deleted (or never had this source written into it)
+                # would otherwise have a sources row but no on-disk content
+                # for ``_load_source_text`` to read.
+                target = job.root / md_rel
+                if not target.exists():
+                    _atomic_write_text(target, cleaned + "\n")
                     _atomic_write_json(job.root / json_rel, sidecar)
+                # If the row was pruned (md_path NULLed by the disk-cap
+                # watcher), repoint to the freshly-written file.
+                if not existing["md_path"]:
                     conn.execute(
                         "UPDATE sources SET md_path = ?, fetched_at = ? WHERE id = ?",
                         (md_rel, fetched, source_id),

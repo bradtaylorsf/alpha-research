@@ -30,6 +30,11 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         description="OpenRouter API key for cloud synthesis tier (Claude Opus / Haiku).",
     ),
     EnvKey(
+        name="BRAVE_SEARCH_API_KEY",
+        required=False,
+        description="Brave Search API key. When set, web_search 'auto' picks Brave over DDG-Playwright.",
+    ),
+    EnvKey(
         name="RESEARCH_USER_AGENT",
         required=False,
         description="Override default User-Agent sent by httpx and Playwright.",

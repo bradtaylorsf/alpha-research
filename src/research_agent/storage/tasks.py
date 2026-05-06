@@ -142,7 +142,10 @@ def mark_done(
 ) -> None:
     """Mark a task done with optional ``result`` payload (single atomic UPDATE)."""
     now = _now_epoch()
-    result_json = None if result is None else json.dumps(result, sort_keys=True)
+    # ``default=str`` coerces unknown types (datetime, Path, sets) to their
+    # str() form rather than crashing the daemon. Handlers should still
+    # pre-serialize via ``model_dump(mode='json')`` for clean ISO strings.
+    result_json = None if result is None else json.dumps(result, sort_keys=True, default=str)
     conn = db.connect(db_path)
     try:
         with conn:

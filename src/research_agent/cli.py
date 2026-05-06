@@ -101,6 +101,19 @@ def start_command(
         help="Per-job disk cap in GB (default 10). Source markdown is pruned in"
         " relevance order when usage exceeds the cap.",
     ),
+    max_tasks: int = typer.Option(
+        None,
+        "--max-tasks",
+        help="Override the per-job task cap. Useful for short smoke runs"
+        " (e.g. --max-tasks 5). Defaults to MAX_TASKS_PER_JOB (10000).",
+    ),
+    local: bool = typer.Option(
+        False,
+        "--local",
+        help="Route every tier (planner, synth, workers) through LM Studio."
+        " Skips the OpenRouter health check and uses config/models.local.yaml."
+        " Cost is always $0; useful for validation runs.",
+    ),
 ) -> None:
     """Register a new research job and spawn its background daemon."""
     if skip_intake:
@@ -125,6 +138,23 @@ def start_command(
             "corpus": answers["corpus_path"],
             "disk_cap_gb": disk_cap_gb,
         }
+
+    if max_tasks is not None:
+        if max_tasks < 1:
+            typer.echo("--max-tasks must be >= 1", err=True)
+            raise typer.Exit(code=2)
+        intake_data["max_tasks"] = max_tasks
+
+    if local:
+        # Spawned daemon inherits parent env; setting these here propagates
+        # to the child without a daemon-side flag.
+        local_cfg = Path("config/models.local.yaml")
+        if not local_cfg.exists():
+            typer.echo(f"--local requires {local_cfg} (not found)", err=True)
+            raise typer.Exit(code=2)
+        os.environ["RESEARCH_MODELS_CONFIG"] = str(local_cfg)
+        os.environ["RESEARCH_DAEMON_SKIP_HEALTH_CHECKS"] = "1"
+        intake_data["local"] = True
 
     # Make sure the schema exists so the testing back door is self-bootstrapping.
     db.migrate().close()
@@ -288,6 +318,60 @@ def _print_smoke_result(result) -> None:  # type: ignore[no-untyped-def]
     ]
     for line in lines:
         console.print(line, highlight=False)
+
+
+@app.command(name="_reset-job", hidden=True)
+def reset_job_command(
+    job_id: str = typer.Argument(..., help="Job id to wipe (folder + all DB rows)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Hidden dev helper: nuke a job's folder + every DB row that references it.
+
+    Includes ``sources`` and ``job_sources`` so re-running the same goal in
+    dev does not trip the cross-job dedup → "source not found" failure mode.
+    """
+    import shutil
+
+    if not yes:
+        confirmed = typer.confirm(f"Wipe all state for job {job_id!r}?")
+        if not confirmed:
+            raise typer.Exit(code=1)
+
+    from research_agent.storage.jobs import DEFAULT_JOBS_ROOT
+
+    folder = Path(DEFAULT_JOBS_ROOT) / job_id
+    if folder.exists():
+        shutil.rmtree(folder)
+        typer.echo(f"removed {folder}")
+
+    conn = db.connect()
+    try:
+        with conn:
+            # Order matters: delete dependent rows first to satisfy FKs.
+            for tbl in (
+                "job_sources",
+                "tasks",
+                "critiques",
+                "findings",
+                "events",
+                "checkpoints",
+                "syntheses",
+                "llm_calls",
+                "plans",
+            ):
+                conn.execute(f"DELETE FROM {tbl} WHERE job_id = ?", (job_id,))
+            # ``sources`` is shared across jobs (sha256 dedup). After
+            # removing the join rows above, drop any source row that no
+            # longer has a job referencing it — keeps the dedup table tight
+            # and avoids the "deleted-job-folder leaves orphan rows" trap.
+            conn.execute(
+                "DELETE FROM sources WHERE id NOT IN"
+                " (SELECT source_id FROM job_sources)"
+            )
+            conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    finally:
+        conn.close()
+    typer.echo(f"cleared DB rows for {job_id}")
 
 
 @app.command(name="_smoke-llm", hidden=True)

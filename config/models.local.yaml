@@ -1,0 +1,76 @@
+# Local-only tier mapping — no OpenRouter, no cloud, $0 per call.
+#
+# Every tier routes to LM Studio. The `frontier*` tiers stay named for
+# code-path compatibility (router + synth/critique reference them by name)
+# but resolve to local gemma models. Cost is always $0; the `pricing` block
+# is intentionally empty so BudgetTracker computes cost = 0.
+#
+# Loaded models (verify with `curl -s http://localhost:1234/v1/models`):
+#   - google/gemma-4-26b-a4b   (large MoE, ~4B active — planner/synth/critique)
+#   - google/gemma-4-e4b       (efficient 4B dense — workers, summaries)
+#   - text-embedding-nomic-embed-text-v1.5
+#
+# Vision tier maps to gemma-4-26b-a4b as a placeholder; image inputs will
+# either be ignored or fail at the connector boundary depending on caller.
+# Until a true VLM is loaded, avoid emitting vision-tier tasks.
+
+tiers:
+  fast:
+    provider: lmstudio
+    model: google/gemma-4-e4b
+    timeout_s: 60
+    fallback_tier: general
+    purpose: Classification, dedup, simple relevance scoring.
+
+  general:
+    provider: lmstudio
+    model: google/gemma-4-e4b
+    timeout_s: 120
+    fallback_tier: reasoner
+    purpose: Worker default — extract_findings, summarize_source, query rewriting.
+
+  reasoner:
+    provider: lmstudio
+    model: google/gemma-4-26b-a4b
+    timeout_s: 300
+    fallback_tier: frontier
+    purpose: Planner, complex extraction, hypothesis ranking.
+
+  vision:
+    provider: lmstudio
+    model: google/gemma-4-26b-a4b
+    timeout_s: 120
+    fallback_tier: general
+    purpose: Placeholder — no true VLM loaded; avoid vision tasks for now.
+
+  embeddings:
+    provider: lmstudio
+    model: text-embedding-nomic-embed-text-v1.5
+    timeout_s: 60
+    purpose: Semantic search over findings + sources.
+
+  # The "frontier" family stays local in this preset. Synth, critique, and
+  # planner rewrites all hit gemma-4-26b-a4b. Same model for `frontier_alt`
+  # so critique runs on the same weights as the synthesizer (loses
+  # productive disagreement, but keeps the run truly local + free).
+  frontier:
+    provider: lmstudio
+    model: google/gemma-4-26b-a4b
+    timeout_s: 600
+    purpose: Synthesis, critique, final report (local, $0).
+
+  frontier_alt:
+    provider: lmstudio
+    model: google/gemma-4-26b-a4b
+    timeout_s: 600
+    purpose: Critique alt — same model as frontier in local mode.
+
+  frontier_speed:
+    provider: lmstudio
+    model: google/gemma-4-e4b
+    timeout_s: 120
+    purpose: Fast fallback when frontier hits its cap.
+
+# Empty pricing block: BudgetTracker reads tier→price from this map; missing
+# entries resolve to 0. So every local call is $0 by construction.
+pricing: {}

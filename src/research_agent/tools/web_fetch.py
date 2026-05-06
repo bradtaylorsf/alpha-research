@@ -265,6 +265,11 @@ def _spawn_archive_task(source: Source) -> asyncio.Task[None] | None:
 # ---------------------------------------------------------------------------
 
 
+_REDDIT_HOSTS = frozenset(
+    {"reddit.com", "www.reddit.com", "old.reddit.com", "new.reddit.com"}
+)
+
+
 async def fetch(
     url: str,
     requires_js: bool = False,
@@ -276,9 +281,21 @@ async def fetch(
     yield enough text, or the URL is malformed. Wayback archival happens in
     a background task; the returned ``Source.archive_url`` is None unless the
     save completes before the consumer reads it.
+
+    Host-based dispatch: ``reddit.com`` URLs route to
+    :func:`research_agent.tools.reddit.fetch`, which uses Reddit's JSON
+    endpoint and returns post-body + top-level comments. The generic
+    Playwright + trafilatura path strips reddit pages to empty content
+    (their SPA shell defeats readability extractors), so without this
+    dispatch every reddit follow-up would task_failed.
     """
     if not url or not urlparse(url).netloc:
         return None
+
+    if urlparse(url).netloc in _REDDIT_HOSTS:
+        from research_agent.tools import reddit
+
+        return await reddit.fetch(url)
 
     user_agent = _resolve_user_agent()
 

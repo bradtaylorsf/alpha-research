@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -95,12 +96,42 @@ def _entry_published(entry: Any) -> datetime | None:
     return None
 
 
+_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9\-]+")
+_STOPWORDS = frozenset(
+    {
+        "the", "a", "an", "and", "or", "of", "in", "on", "for", "to",
+        "with", "by", "at", "from", "is", "was", "were", "are", "be",
+        "this", "that", "what", "who", "how", "why", "when", "where",
+        "do", "did", "does", "have", "had", "has", "about", "into",
+    }
+)
+
+
+def _tokenize(text: str) -> set[str]:
+    return {t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS and len(t) > 1}
+
+
 def _matches_query(query: str, title: str, snippet: str) -> bool:
+    """True iff at least 2 (or all, for short queries) query tokens appear.
+
+    The original ``needle in haystack`` substring check needed an exact
+    phrase match, so any non-trivial query returned 0 hits against current
+    RSS feeds. Token-overlap is the right semantics for "is this RSS item
+    plausibly about my research question": tolerant of word order, plurals
+    falling off, etc., while still requiring genuine topical overlap.
+    """
     if not query or not query.strip():
         return True
-    needle = query.lower()
-    haystack = f"{title} {snippet}".lower()
-    return needle in haystack
+    qtokens = _tokenize(query)
+    if not qtokens:
+        return True
+    haystack = _tokenize(f"{title} {snippet}")
+    overlap = qtokens & haystack
+    # Short queries (≤2 meaningful tokens) must match all of them; longer
+    # queries need at least 2 tokens in common — tolerant of "Cursor 2025
+    # pricing" matching "Cursor pricing controversy hits Pro plan users".
+    threshold = max(1, min(2, len(qtokens)))
+    return len(overlap) >= threshold
 
 
 def _build_rss_result(entry: Any, *, feed_url: str, source_label: str) -> SearchResult | None:

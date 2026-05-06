@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from research_agent.llm.budgets import BudgetTracker
@@ -202,9 +203,14 @@ class _StubUsage:
 
 
 class _StubResult:
-    """Mimics ``AgentRunResult`` — exposes ``output``/``usage()``/``finish_reason``."""
+    """Mimics ``AgentRunResult`` — exposes ``output``/``usage()``/``finish_reason``.
 
-    def __init__(self, output: Plan) -> None:
+    The planner now consumes ``output: str`` (raw YAML), not a structured
+    :class:`Plan`; tests serialize a Plan fixture to YAML and hand the
+    string back here.
+    """
+
+    def __init__(self, output: str) -> None:
         self.output = output
         self.finish_reason = "stop"
 
@@ -212,13 +218,19 @@ class _StubResult:
         return _StubUsage()
 
 
+def _plan_to_yaml(plan: Plan) -> str:
+    """Render a Plan as the fenced YAML block the live model would emit."""
+    body = yaml.safe_dump(plan.model_dump(), sort_keys=False)
+    return f"```yaml\n{body}```"
+
+
 class _StubAgent:
     """Stub stand-in for :class:`pydantic_ai.Agent`.
 
     Captures construction kwargs (so tests can verify ``output_type`` and the
-    rendered ``system_prompt``) and returns a configurable :class:`Plan` from
-    :meth:`run`. Each test resets the class-level ``next_plan`` before
-    triggering the planner.
+    rendered ``system_prompt``) and returns a YAML serialization of the
+    configured :class:`Plan` from :meth:`run`. Each test resets the
+    class-level ``next_plan`` before triggering the planner.
     """
 
     instances: list[_StubAgent] = []
@@ -243,7 +255,7 @@ class _StubAgent:
         self.run_calls.append((args, kwargs))
         plan = _StubAgent.next_plan
         assert plan is not None, "test forgot to set _StubAgent.next_plan"
-        return _StubResult(output=plan)
+        return _StubResult(output=_plan_to_yaml(plan))
 
 
 @pytest.fixture(autouse=True)
@@ -367,7 +379,9 @@ def test_initial_plan_renders_planner_prompt_with_goal(
 
     assert _StubAgent.instances, "Agent was never constructed"
     constructed = _StubAgent.instances[0]
-    assert constructed.output_type is Plan
+    # YAML-on-disk path: planner now requests raw text from the model and
+    # parses YAML ourselves, so output_type is str (not Plan).
+    assert constructed.output_type is str
     # The planner prompt template contains the goal literal once rendered.
     assert constructed.system_prompt is not None
     assert job.goal in constructed.system_prompt

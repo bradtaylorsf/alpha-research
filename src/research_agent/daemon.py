@@ -594,6 +594,7 @@ async def run_daemon(
     ``tmp_path`` override so the suite never touches the real index.
     """
     from research_agent.orchestrator import loop as _loop
+    from research_agent.orchestrator import plan as _plan
     from research_agent.orchestrator import synth as _synth
     from research_agent.storage import db as _db
 
@@ -645,6 +646,31 @@ async def run_daemon(
 
     job.set_status("running")
 
+    if _loop._load_latest_plan(job) is None:
+        try:
+            await _plan.initial_plan(job, router=router)
+        except Exception as exc:
+            logger.exception("daemon: initial_plan failed for job %s", job.id)
+            try:
+                emit(
+                    job,
+                    "ERROR",
+                    "daemon",
+                    "error",
+                    {
+                        "stage": "initial_plan",
+                        "error": str(exc),
+                        "traceback": traceback.format_exc(),
+                    },
+                )
+            except Exception:
+                pass
+            try:
+                job.set_status("failed")
+            except Exception:
+                pass
+            return 1
+
     should_stop = asyncio.Event()
     aloop = asyncio.get_running_loop()
     signals_installed = False
@@ -677,8 +703,12 @@ async def run_daemon(
     try:
         loop_result: dict[str, Any] | None = None
         budget_capped = False
+        max_tasks_override = intake.get("max_tasks")
+        loop_kwargs: dict[str, Any] = {}
+        if isinstance(max_tasks_override, int) and max_tasks_override >= 1:
+            loop_kwargs["max_tasks"] = max_tasks_override
         try:
-            loop_result = await _loop.run_loop(job, router)
+            loop_result = await _loop.run_loop(job, router, **loop_kwargs)
         except BudgetExceeded as exc:
             logger.warning("daemon: budget cap reached mid-loop for job %s: %s", job.id, exc)
             budget_capped = True

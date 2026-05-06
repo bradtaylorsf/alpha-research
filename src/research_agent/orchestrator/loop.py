@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -99,16 +100,34 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         results = await web_search.search(
             payload.get("query", ""),
             max_results=payload.get("max_results", 10),
-            engine=payload.get("engine", "ddg"),
+            engine=payload.get("engine", "auto"),
         )
-        return {"results": [r.model_dump() for r in results]}
+        return _expand_search_to_fetches(job, payload, results)
 
     async def _web_fetch(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        """Fetch ``url`` and queue an ``extract_findings`` follow-up.
+
+        The follow-up carries the actual ``source_id`` from this fetch
+        plus the ``sub_question`` propagated by ``_web_search`` (or the
+        job goal as a fallback). This is where the source_id-to-extract
+        binding actually happens — the planner can't predict it.
+        """
+        from research_agent.orchestrator.plan import TaskSpec
         from research_agent.tools import web_fetch
 
         payload = task["payload"]
         source = await web_fetch.fetch(payload["url"])
-        return {"source": source.model_dump() if source is not None else None}
+        result = _persist_fetched_source(job, source)
+
+        source_id = result.get("source_id")
+        if isinstance(source_id, int):
+            sub_question = payload.get("sub_question") or job.goal
+            follow_up = TaskSpec(
+                kind="extract_findings",
+                payload={"source_id": source_id, "sub_question": sub_question},
+            )
+            result["follow_up_tasks"] = [follow_up.model_dump()]
+        return result
 
     async def _arxiv_search(job: Job, task: dict[str, Any]) -> dict[str, Any]:
         from research_agent.tools import arxiv_tool
@@ -118,28 +137,34 @@ def default_handlers(router: Any) -> dict[str, Handler]:
             payload.get("query", ""),
             max_results=payload.get("max_results", 10),
         )
-        return {"results": [r.model_dump() for r in results]}
+        return {"results": [r.model_dump(mode="json") for r in results]}
 
     async def _arxiv_fetch(job: Job, task: dict[str, Any]) -> dict[str, Any]:
         from research_agent.tools import arxiv_tool
 
         payload = task["payload"]
         source = await arxiv_tool.fetch(payload["arxiv_id"])
-        return {"source": source.model_dump() if source is not None else None}
+        return _persist_fetched_source(job, source)
+
+    async def _extract_findings(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        return await _run_extract_findings(job, task, router=router)
+
+    async def _summarize_source(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        return await _run_summarize_source(job, task, router=router)
 
     async def _news_search(job: Job, task: dict[str, Any]) -> dict[str, Any]:
         from research_agent.tools import news
 
         payload = task["payload"]
         results = await news.search(payload.get("query", ""))
-        return {"results": [r.model_dump() for r in results]}
+        return _expand_search_to_fetches(job, payload, results)
 
     async def _reddit_search(job: Job, task: dict[str, Any]) -> dict[str, Any]:
         from research_agent.tools import reddit
 
         payload = task["payload"]
         results = await reddit.search(payload.get("query", ""))
-        return {"results": [r.model_dump() for r in results]}
+        return _expand_search_to_fetches(job, payload, results)
 
     async def _local_corpus_query(job: Job, task: dict[str, Any]) -> dict[str, Any]:
         from research_agent.tools import local_corpus
@@ -212,8 +237,8 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         "local_corpus_query": _local_corpus_query,
         "github_search": _not_implemented_handler,
         "github_fetch": _not_implemented_handler,
-        "extract_findings": _not_implemented_handler,
-        "summarize_source": _not_implemented_handler,
+        "extract_findings": _extract_findings,
+        "summarize_source": _summarize_source,
         "synthesize": _synthesize,
         "critique": _critique,
     }
@@ -341,6 +366,320 @@ def _enqueue_follow_ups(
 
 
 # ---------------------------------------------------------------------------
+# Source persistence + finding extraction (replace _not_implemented stubs)
+# ---------------------------------------------------------------------------
+
+
+def _expand_search_to_fetches(
+    job: Job,
+    payload: dict[str, Any],
+    results: list[Any],
+) -> dict[str, Any]:
+    """Turn a search-handler return into a result + ``follow_up_tasks`` dict.
+
+    Bridges the static plan graph to live URLs. Used by web_search,
+    reddit_search, and news_search — anything that returns
+    :class:`SearchResult` rows. Each top-K hit becomes a ``web_fetch``
+    follow-up carrying ``sub_question`` so the fetch handler's own
+    ``extract_findings`` follow-up inherits context.
+
+    ``payload`` knobs:
+      * ``expand_top_k`` (default 3) — cap follow-ups per search to keep
+        the queue from exploding.
+      * ``sub_question`` — overrides the auto-derived question.
+      * ``query`` — used as the sub_question fallback if neither
+        ``sub_question`` nor ``job.goal`` are set.
+    """
+    from research_agent.orchestrator.plan import TaskSpec
+
+    top_k = int(payload.get("expand_top_k", 3))
+    sub_question = payload.get("sub_question") or payload.get("query") or job.goal
+
+    follow_ups: list[TaskSpec] = [
+        TaskSpec(
+            kind="web_fetch",
+            payload={"url": hit.url, "sub_question": sub_question},
+        )
+        for hit in results[:top_k]
+        if getattr(hit, "url", None)
+    ]
+
+    return {
+        "results": [r.model_dump(mode="json") for r in results],
+        "follow_up_tasks": [t.model_dump() for t in follow_ups],
+    }
+
+
+def _persist_fetched_source(job: Job, source: Any) -> dict[str, Any]:
+    """Write the fetched ``Source`` to disk + the sources table.
+
+    Returns a result dict the loop persists into ``tasks.result_json``:
+    ``source_id`` is the rowid the new ``extract_findings`` handler uses
+    to look the content back up. ``source`` is the serialized model so
+    downstream consumers (UI, debugging, follow-up planners) don't have
+    to re-query.
+
+    Raises :class:`FatalError` when ``source is None`` (placeholder URL,
+    blocked fetch, parse failure) so the loop marks the task ``failed``
+    rather than silently storing ``source_id=None`` that downstream
+    ``extract_findings`` tasks then trip on.
+    """
+    if source is None:
+        raise FatalError("web_fetch returned None — URL unreachable, blocked, or empty body")
+    from research_agent.storage.sources import write_source
+
+    # mode='json' so the dict we hand back to the loop has ISO-string
+    # datetimes — mark_done's json.dumps would otherwise need default=str
+    # to swallow them.
+    source_dict = source.model_dump(mode="json")
+    raw_content = source_dict.get("cleaned_text") or ""
+    if not raw_content.strip():
+        # 404 / empty body / boilerplate-only page — treat as a fetch miss
+        # rather than letting write_source's ValueError leak past the loop's
+        # FatalError handler and kill the daemon.
+        raise FatalError(
+            f"web_fetch produced empty content for {source_dict.get('url')!r}"
+        )
+    fetched_epoch: int | None
+    if hasattr(source, "fetched_at") and source.fetched_at is not None:
+        try:
+            fetched_epoch = int(source.fetched_at.timestamp())
+        except Exception:
+            fetched_epoch = None
+    else:
+        fetched_epoch = None
+
+    source_id = write_source(
+        job,
+        url=source_dict.get("url"),
+        title=source_dict.get("title"),
+        raw_content=raw_content,
+        kind=source_dict.get("source_kind"),
+        archive_url=source_dict.get("archive_url"),
+        fetched_at=fetched_epoch,
+    )
+    return {"source": source_dict, "source_id": source_id}
+
+
+def _load_source_text(job: Job, source_id: int) -> tuple[str, dict[str, Any]] | None:
+    """Read ``sources/<sha>.md`` for ``source_id``; return ``(text, meta)`` or None.
+
+    ``meta`` carries ``url``/``title``/``archive_url`` so the LLM prompt can
+    cite without an extra query. Returns ``None`` if the row is missing or
+    its on-disk file was pruned by the disk-cap watcher.
+    """
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, url, title, md_path, archive_url FROM sources WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or not row["md_path"]:
+        return None
+    md_path = job.root / row["md_path"]
+    if not md_path.exists():
+        return None
+    text = md_path.read_text(encoding="utf-8")
+    meta = {
+        "id": int(row["id"]),
+        "url": row["url"],
+        "title": row["title"],
+        "archive_url": row["archive_url"],
+    }
+    return text, meta
+
+
+_EXTRACT_TEXT_LIMIT = 20000  # ~5k tokens; well under any tier's window
+_FINDINGS_PER_SOURCE_LIMIT = 8
+
+
+def _truncate_for_prompt(text: str, limit: int = _EXTRACT_TEXT_LIMIT) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n\n[…truncated]"
+
+
+_YAML_FENCE_RE = re.compile(r"```(?:yaml|yml)?\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
+
+
+def _extract_yaml_block(raw: str) -> str:
+    """Return the first fenced YAML block, or the whole string if none.
+
+    Local models occasionally forget the fence, so we tolerate "the whole
+    response is YAML" as a fallback rather than failing immediately.
+    """
+    match = _YAML_FENCE_RE.search(raw)
+    if match:
+        return match.group(1).strip()
+    return raw.strip()
+
+
+def _persist_raw_findings_yaml(
+    job: Job, source_id: int, raw: str
+) -> str:
+    """Write the researcher's raw YAML to ``findings/raw/<source_id>.yaml``.
+
+    Saved before parse so a malformed extraction still leaves an artifact
+    on disk for forensics + future learnings.
+    """
+    rel = f"findings/raw/{source_id:06d}.yaml"
+    from research_agent.storage.jobs import _atomic_write_text
+
+    _atomic_write_text(job.root / rel, raw if raw.endswith("\n") else raw + "\n")
+    return rel
+
+
+async def _run_extract_findings(
+    job: Job,
+    task: dict[str, Any],
+    *,
+    router: Any,
+) -> dict[str, Any]:
+    """Read a source and ask the ``general`` tier for findings as YAML.
+
+    Payload contract: ``{"source_id": int, "sub_question": str (optional)}``.
+    The model emits a YAML list of ``{claim, confidence, quote, tags}``
+    findings, which we parse + validate + write via :func:`write_finding`.
+    Raw output is also persisted under ``findings/raw/`` for forensics.
+    Empty extractions are valid and return ``findings_written = 0``.
+    """
+    import yaml
+    from pydantic_ai import Agent
+
+    from research_agent.prompts.loader import load_prompt
+    from research_agent.storage.markdown import write_finding
+
+    payload = task.get("payload") or {}
+    source_id = payload.get("source_id")
+    if not isinstance(source_id, int):
+        raise FatalError("extract_findings: payload.source_id (int) is required")
+
+    loaded = _load_source_text(job, source_id)
+    if loaded is None:
+        raise FatalError(f"extract_findings: source {source_id} not found or pruned")
+    text, meta = loaded
+
+    sub_question = payload.get("sub_question") or job.goal
+
+    rendered = load_prompt("researcher", job=job, goal=job.goal)
+    agent = Agent(router.model_for("general"), output_type=str, system_prompt=rendered)
+    context = (
+        f"Sub-question: {sub_question}\n"
+        f"Source URL: {meta.get('url')}\n"
+        f"Source title: {meta.get('title')}\n\n"
+        f"Source content:\n{_truncate_for_prompt(text)}"
+    )
+    result = await router.call("general", agent, context)
+    raw = result.output if isinstance(result.output, str) else str(result.output)
+
+    raw_path = _persist_raw_findings_yaml(job, source_id, raw)
+
+    yaml_text = _extract_yaml_block(raw)
+    try:
+        parsed = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as exc:
+        raise FatalError(
+            f"extract_findings: YAML parse failed for source {source_id} "
+            f"({raw_path}): {exc}"
+        ) from exc
+
+    if parsed is None:
+        parsed = []
+    if not isinstance(parsed, list):
+        raise FatalError(
+            f"extract_findings: YAML root must be a list (source {source_id}, "
+            f"{raw_path}); got {type(parsed).__name__}"
+        )
+
+    written: list[int] = []
+    skipped = 0
+    for item in parsed[:_FINDINGS_PER_SOURCE_LIMIT]:
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
+        claim_raw = item.get("claim")
+        conf_raw = item.get("confidence")
+        if not isinstance(claim_raw, str) or not claim_raw.strip():
+            skipped += 1
+            continue
+        try:
+            conf = float(conf_raw)
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+        if conf < 0.0 or conf > 1.0:
+            skipped += 1
+            continue
+        tags_raw = item.get("tags") or []
+        tags_list = [str(t) for t in tags_raw if isinstance(t, (str, int))] or None
+        try:
+            fid = write_finding(
+                job,
+                claim=claim_raw.strip(),
+                confidence=conf,
+                source_ids=[source_id],
+                tags=tags_list,
+            )
+            written.append(fid)
+        except (ValueError, TypeError):
+            skipped += 1
+            continue
+
+    return {
+        "source_id": source_id,
+        "findings_written": len(written),
+        "finding_ids": written,
+        "skipped": skipped,
+        "raw_path": raw_path,
+    }
+
+
+async def _run_summarize_source(
+    job: Job,
+    task: dict[str, Any],
+    *,
+    router: Any,
+) -> dict[str, Any]:
+    """Compress a long source into a paragraph using the ``general`` tier.
+
+    Payload contract: ``{"source_id": int, "max_words": int (optional)}``.
+    The summary is returned in ``result_json`` and not written as a finding —
+    summaries are scaffolding for the next ``extract_findings`` pass, not
+    the citable output the synthesizer reads.
+    """
+    from pydantic_ai import Agent
+
+    payload = task.get("payload") or {}
+    source_id = payload.get("source_id")
+    if not isinstance(source_id, int):
+        raise FatalError("summarize_source: payload.source_id (int) is required")
+
+    loaded = _load_source_text(job, source_id)
+    if loaded is None:
+        raise FatalError(f"summarize_source: source {source_id} not found or pruned")
+    text, meta = loaded
+
+    max_words = int(payload.get("max_words") or 250)
+    system = (
+        "You compress a single source into a tight paragraph for downstream "
+        "extraction. Stay factual; no editorializing."
+    )
+    agent = Agent(router.model_for("general"), output_type=str, system_prompt=system)
+    context = (
+        f"Goal: {job.goal}\n"
+        f"Source URL: {meta.get('url')}\n"
+        f"Source title: {meta.get('title')}\n"
+        f"Compress the source below to at most {max_words} words.\n\n"
+        f"{_truncate_for_prompt(text)}"
+    )
+    result = await router.call("general", agent, context)
+    summary = str(result.output)
+    return {"source_id": source_id, "summary": summary}
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -455,6 +794,26 @@ async def run_loop(
                     "kind": task["kind"],
                     "error": str(exc),
                     "retries_exhausted": True,
+                },
+            )
+            tasks_done += 1
+            continue
+        except Exception as exc:  # noqa: BLE001 — catch-all guard
+            # Defensive: a handler raising an unexpected exception type (e.g.
+            # ValueError from a downstream library) must NOT bubble up and
+            # kill the daemon. Mark the single task failed and keep draining.
+            mark_failed(task["id"], str(exc), db_path=job.db_path)
+            emit(
+                job,
+                "ERROR",
+                "loop",
+                "task_failed",
+                {
+                    "task_id": task["id"],
+                    "kind": task["kind"],
+                    "error": str(exc),
+                    "exception_type": type(exc).__name__,
+                    "uncaught": True,
                 },
             )
             tasks_done += 1

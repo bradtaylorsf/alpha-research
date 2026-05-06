@@ -48,6 +48,7 @@ that list, so there is no drift.
 | Key | Required | Purpose |
 |---|---|---|
 | `OPENROUTER_API_KEY` | yes | Cloud synthesis tier (Claude Opus / Haiku via OpenRouter). |
+| `BRAVE_SEARCH_API_KEY` | no | Brave Search API key (free tier ~2000 queries/month). When set, `web_search` engine `auto` picks Brave over the DDG-Playwright scraper. |
 | `RESEARCH_USER_AGENT` | no | Override default UA sent by httpx + Playwright. |
 | `RESEARCH_HEADFUL` | no | Set to `1` to launch Playwright in headed mode for debugging. |
 | `RESEARCH_IGNORE_ROBOTS` | no | Set to `1` to bypass robots.txt checks in `web_fetch`. |
