@@ -95,6 +95,22 @@ def _looks_like_url(value: str) -> bool:
     return value.startswith(("http://", "https://"))
 
 
+def _write_temp_pdf(data: bytes) -> Path:
+    """Write ``data`` to a temp ``.pdf`` file and return its path.
+
+    Uses ``mkstemp`` (not ``NamedTemporaryFile`` — we need to keep the file
+    around past this call) and *closes* the OS file descriptor it hands back.
+    Naïvely doing ``Path(tempfile.mkstemp(...)[1])`` leaks the descriptor on
+    every call.
+    """
+    fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    return Path(tmp_path)
+
+
 async def fetch_pdf_bytes(url: str, *, timeout: float = _FETCH_TIMEOUT_S) -> bytes:
     """Fetch a PDF over HTTP(S) and return the raw bytes.
 
@@ -513,8 +529,7 @@ async def extract(
         except (httpx.HTTPError, OSError) as exc:
             logger.warning("pdf fetch failed for %s: %s", raw, exc)
             return ""
-        tmp = Path(tempfile.mkstemp(suffix=".pdf")[1])
-        tmp.write_bytes(data)
+        tmp = _write_temp_pdf(data)
         cleanup_temp = tmp
         path = tmp
         source_label = raw
@@ -595,8 +610,7 @@ def extract_from_bytes(
     """
     if not data:
         return ""
-    tmp = Path(tempfile.mkstemp(suffix=".pdf")[1])
-    tmp.write_bytes(data)
+    tmp = _write_temp_pdf(data)
     try:
         return _extract_sync(tmp, max_pages, max_chars, source_label, job)
     finally:
@@ -626,8 +640,7 @@ def extract_sync(
         except (httpx.HTTPError, OSError) as exc:
             logger.warning("pdf fetch failed for %s: %s", raw, exc)
             return ""
-        tmp = Path(tempfile.mkstemp(suffix=".pdf")[1])
-        tmp.write_bytes(data)
+        tmp = _write_temp_pdf(data)
         try:
             return _extract_sync(tmp, max_pages, max_chars, raw, job)
         finally:
