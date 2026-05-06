@@ -59,6 +59,7 @@ that list, so there is no drift.
 | `RESEARCH_HEADFUL` | no | Set to `1` to launch Playwright in headed mode for debugging. |
 | `RESEARCH_IGNORE_ROBOTS` | no | Set to `1` to bypass robots.txt checks in `web_fetch`. |
 | `RESEARCH_PDF_VLM_ESCALATION` | no | Set to `1` to enable Opus 4.7 vision escalation for PDFs that fail every cheaper layer. Off by default — costs real money; emits a `pdf_vlm_escalation` WARN event when fired. |
+| `RESEARCH_OCR_VLM_ESCALATION` | no | Set to `1` to enable Opus 4.7 vision escalation for image OCR when Tesseract and the local VLM both fail. Off by default — costs real money; emits an `ocr_vlm_escalation` WARN event when fired. |
 | `LMSTUDIO_BASE_URL` | no | Override the default `http://localhost:1234/v1`. |
 | `YOUTUBE_API_KEY` | no | YouTube Data API v3 key (free quota: 10,000 units/day). When set, `tools/youtube.py:search` uses the official API; absent, it falls back to scraping the public results page via Playwright. |
 | `RESEARCH_DAEMON_PROGRESS` | no | Set to `0` to suppress the foreground Rich progress bar the daemon writes to stdout when run interactively. |
