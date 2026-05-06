@@ -53,6 +53,7 @@ EventKind = Literal[
     "checkpoint",
     "prompt_loaded",
     "source_pruned",
+    "pdf_vlm_escalation",
     "error",
     "warning",
 ]

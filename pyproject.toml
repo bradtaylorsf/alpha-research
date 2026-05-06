@@ -31,6 +31,10 @@ dependencies = [
     "feedparser>=6.0",
     "waybackpy>=3.0",
     "pypdf>=4.2",
+    "pdfplumber>=0.11",
+    "pytesseract>=0.3",
+    "pypdfium2>=4.30",
+    "pillow>=10",
     "unstructured>=0.14",
 ]
 
