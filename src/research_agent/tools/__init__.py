@@ -577,6 +577,58 @@ def _smoke_bbb(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_calaccess(query: str) -> str:
+    """Smoke wrapper: California Cal-Access / Power Search campaign finance.
+
+    Per AC: ``research _smoke-tool calaccess "Gavin Newsom"`` should return
+    recent donations. Lists the top-5 contribution hits with donor /
+    committee / amount / date / permalink, then attempts ``fetch()`` on the
+    top hit and prints the rolled-up record so an operator can eyeball
+    whether the Power Search SPA is still healthy.
+    """
+    from research_agent.tools import browser, calaccess
+
+    async def _run() -> str:
+        try:
+            results = await calaccess.search(
+                query, kind="contributions", max_results=5
+            )
+            if not results:
+                return f"calaccess search returned no results for {query!r}"
+            lines: list[str] = []
+            for hit in results:
+                donor = hit.extras.get("donor") or "?"
+                committee = hit.extras.get("committee") or "?"
+                amount = hit.extras.get("amount") or "?"
+                date = hit.extras.get("date") or "?"
+                lines.append(
+                    f"- {donor} → {committee} — {amount} — {date}\n  {hit.url}"
+                )
+
+            top = results[0]
+            source = await calaccess.fetch(top.url)
+            if source is None:
+                lines.append(
+                    f"\nfetch({top.url}) returned None — detail page unavailable"
+                )
+            else:
+                lines.append(f"\nRollup for {top.title}")
+                lines.append(f"  amount: {source.metadata.get('amount') or '?'}")
+                lines.append(f"  date: {source.metadata.get('date') or '?'}")
+                lines.append(f"  parties: {source.metadata.get('parties') or '?'}")
+                lines.append(
+                    f"  filing_reference: {source.metadata.get('filing_reference') or '?'}"
+                )
+            return "\n".join(lines)
+        finally:
+            try:
+                await browser.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+
+    return asyncio.run(_run())
+
+
 def _smoke_sanctions(query: str) -> str:
     """Smoke wrapper: OFAC SDN / EU / UK sanctions lookup.
 
@@ -940,6 +992,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "arxiv": _smoke_arxiv,
     "audio": _smoke_audio,
     "bbb": _smoke_bbb,
+    "calaccess": _smoke_calaccess,
     "edgar": _smoke_edgar,
     "courtlistener": _smoke_courtlistener,
     "fedregister": _smoke_fedregister,

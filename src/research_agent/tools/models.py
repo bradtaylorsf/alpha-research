@@ -45,6 +45,7 @@ SourceKind = Literal[
     "sos",
     "licensing",
     "bbb",
+    "calaccess",
 ]
 
 
