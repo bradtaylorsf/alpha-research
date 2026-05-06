@@ -34,6 +34,7 @@ EXPECTED_SOURCE_KINDS = (
     "lda",
     "usaspending",
     "littlesis",
+    "opencorporates",
 )
 
 

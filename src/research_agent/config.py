@@ -117,6 +117,16 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
             " key raises rate limits. Sent as `Authorization: Token <key>`."
         ),
     ),
+    EnvKey(
+        name="OPENCORPORATES_API_KEY",
+        required=False,
+        description=(
+            "OpenCorporates API token (?api_token=...). Anonymous tier is"
+            " ~50 calls/day with limited fields; richer fields require a key."
+            " Public-benefit access by emailing service desk; commercial"
+            " pricing £2,250–£12,000/yr."
+        ),
+    ),
 )
 
 
