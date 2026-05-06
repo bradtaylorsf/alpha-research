@@ -210,12 +210,21 @@ def _disable_robots(monkeypatch):
 
 
 def _stub_archive(monkeypatch, archive_url: str | None = None):
-    """Replace the Wayback save with an instant no-op (or a fixed return)."""
+    """Replace Wayback save (and the archive.today fallback) with no-ops.
+
+    Both saves are stubbed because :func:`_spawn_archive_task` falls through
+    to archive.today when Wayback returns None — without a stub the test
+    would hit the real archive.today endpoint.
+    """
 
     async def _save(url, timeout: float = 30.0):
         return archive_url
 
+    async def _archive_today_save(url, timeout: float = 30.0):
+        return None
+
     monkeypatch.setattr(web_fetch.archive, "save", _save)
+    monkeypatch.setattr(web_fetch.archive, "archive_today_save", _archive_today_save)
 
 
 async def test_fetch_returns_source_via_httpx(monkeypatch):
@@ -383,7 +392,11 @@ async def test_fetch_does_not_crash_when_archive_save_raises(monkeypatch):
     async def _boom(url, timeout: float = 30.0):
         raise RuntimeError("wayback exploded")
 
+    async def _archive_today_none(url, timeout: float = 30.0):
+        return None
+
     monkeypatch.setattr(web_fetch.archive, "save", _boom)
+    monkeypatch.setattr(web_fetch.archive, "archive_today_save", _archive_today_none)
 
     async def _fake_httpx(url, timeout, user_agent):
         return 200, ARTICLE_HTML, ARTICLE_HTML.encode("utf-8"), "text/html"
@@ -396,6 +409,75 @@ async def test_fetch_does_not_crash_when_archive_save_raises(monkeypatch):
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert source.archive_url is None
+
+
+async def test_fetch_falls_back_to_archive_today_when_wayback_fails(monkeypatch):
+    """Wayback returning None must trigger the archive.today fallback, with
+    the archive.today URL written back onto the Source."""
+    _disable_robots(monkeypatch)
+
+    archive_today_completed = asyncio.Event()
+
+    async def _wayback_save(url, timeout: float = 30.0):
+        return None  # Wayback refuses (404, robots-blocked, etc.)
+
+    async def _archive_today_save(url, timeout: float = 30.0):
+        archive_today_completed.set()
+        return "https://archive.today/abc12"
+
+    monkeypatch.setattr(web_fetch.archive, "save", _wayback_save)
+    monkeypatch.setattr(web_fetch.archive, "archive_today_save", _archive_today_save)
+
+    async def _fake_httpx(url, timeout, user_agent):
+        return 200, ARTICLE_HTML, ARTICLE_HTML.encode("utf-8"), "text/html"
+
+    monkeypatch.setattr(web_fetch, "_fetch_via_httpx", _fake_httpx)
+
+    source = await web_fetch.fetch("https://x.example/y")
+    assert source is not None
+    await archive_today_completed.wait()
+    await asyncio.sleep(0)
+    assert source.archive_url == "https://archive.today/abc12"
+
+
+async def test_fetch_logs_warning_when_both_archives_fail(monkeypatch, caplog):
+    """When both Wayback and archive.today return None, we surface a WARN
+    with both errors so the operator can see the archive_failed signal."""
+    import logging
+
+    _disable_robots(monkeypatch)
+
+    failures_complete = asyncio.Event()
+
+    async def _wayback_save(url, timeout: float = 30.0):
+        return None
+
+    async def _archive_today_save(url, timeout: float = 30.0):
+        failures_complete.set()
+        return None
+
+    monkeypatch.setattr(web_fetch.archive, "save", _wayback_save)
+    monkeypatch.setattr(web_fetch.archive, "archive_today_save", _archive_today_save)
+
+    async def _fake_httpx(url, timeout, user_agent):
+        return 200, ARTICLE_HTML, ARTICLE_HTML.encode("utf-8"), "text/html"
+
+    monkeypatch.setattr(web_fetch, "_fetch_via_httpx", _fake_httpx)
+
+    with caplog.at_level(logging.WARNING, logger=web_fetch.logger.name):
+        source = await web_fetch.fetch("https://x.example/y")
+        assert source is not None
+        await failures_complete.wait()
+        await asyncio.sleep(0)
+
+    assert source.archive_url is None
+    assert any(
+        "archive_failed" in rec.getMessage()
+        and "wayback=failed" in rec.getMessage()
+        and "archive_today=failed" in rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING
+    )
 
 
 # ---------------------------------------------------------------------------
