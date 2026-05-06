@@ -66,6 +66,7 @@ that list, so there is no drift.
 | `COURTLISTENER_API_TOKEN` | no | CourtListener API token (free w/ signup) — required by `tools/courtlistener.py`. Authenticated tier is 5,000 req/hr; anonymous traffic is throttled to the point of unusability. |
 | `DATA_GOV_API_KEY` | no | api.data.gov key (free w/ signup at <https://api.data.gov/signup/>) — used by `tools/fec.py` (OpenFEC). Authenticated tier is 1,000 req/hr; falls back to `DEMO_KEY` (~40 req/hr per IP) when unset. |
 | `LDA_API_KEY` | no | Senate Lobbying Disclosure Act API key (free, optional, register at <https://lda.senate.gov/api/register/>) — used by `tools/lda.py`. Anonymous works for low-volume; authenticated raises rate limits. Sent via `Authorization: Token <key>`. |
+| `OPENCORPORATES_API_KEY` | no | OpenCorporates API token — used by `tools/opencorporates.py`. Anonymous tier is ~50 calls/day with limited fields; richer fields require a token (sent as `?api_token=<key>`). Public-benefit access by emailing service desk; commercial pricing £2,250–£12,000/yr. |
 
 ## LM Studio
 

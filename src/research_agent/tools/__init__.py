@@ -369,6 +369,41 @@ def _smoke_littlesis(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_opencorporates(query: str) -> str:
+    """Smoke wrapper: OpenCorporates company search returning the top-5 hits.
+
+    Per AC: ``research _smoke-tool opencorporates "SBI Builders"`` should
+    surface the California LLC entry alongside its registered agent. Each
+    line shows the company number, name, jurisdiction, status, agent name,
+    and permalink so an operator can eyeball whether the public API is
+    reachable on the anonymous tier.
+    """
+    from research_agent.tools import opencorporates
+
+    async def _run() -> str:
+        results = await opencorporates.search(query, max_results=5)
+        if not results:
+            return f"opencorporates search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            number = hit.extras.get("company_number") or "?"
+            jurisdiction = hit.extras.get("jurisdiction_code") or "?"
+            status = hit.extras.get("current_status") or "?"
+            agent = hit.extras.get("registered_agent_name") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {number} — {jurisdiction} — {status} —"
+                f" agent: {agent}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_usaspending(query: str) -> str:
     """Smoke wrapper: USAspending awards search returning the top-5 hits.
 
@@ -700,6 +735,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "congress": _smoke_congress,
     "lda": _smoke_lda,
     "littlesis": _smoke_littlesis,
+    "opencorporates": _smoke_opencorporates,
     "usaspending": _smoke_usaspending,
     "gdelt": _smoke_gdelt,
     "news": _smoke_news,
