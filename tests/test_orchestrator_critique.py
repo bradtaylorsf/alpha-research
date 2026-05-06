@@ -17,6 +17,7 @@ from research_agent.orchestrator.critique import (
     DEFAULT_TIER,
     CritiqueOutput,
     Gap,
+    PaidOpportunity,
     critique,
 )
 from research_agent.orchestrator.plan import Plan, Subgoal, TaskSpec
@@ -544,3 +545,118 @@ def test_critique_empty_premature_subgoals_is_noop(
 
     events = _read_event_rows(db_path, job.id)
     assert not [e for e in events if e["kind"] == "subgoals_reopened"]
+
+
+# ---------------------------------------------------------------------------
+# Paid resource opportunities (issue #113)
+# ---------------------------------------------------------------------------
+
+
+def test_critic_prompt_flags_paid_opportunities() -> None:
+    """The critic prompt must instruct the model to emit paid_opportunities."""
+    body = prompts_loader.load_prompt("critic")
+    assert "Paid-resource opportunities" in body
+    assert "paid_opportunities" in body
+    assert "paid_unblock_recipes" in body
+    # The catalog hard rule: only flag when the gap is evidenced.
+    assert "actual evidenced gap" in body or "evidenced gap" in body
+    # Spot-check a few catalog services the prompt should reference.
+    assert "LinkedIn" in body
+    assert "PACER" in body or "Westlaw" in body
+
+
+def test_critique_paid_opportunities_rendered(job: Job, db_path: Path, plan: Plan) -> None:
+    """A non-empty paid_opportunities list lands in critique md + JSON sidecar."""
+    _seed_findings(job, [0.6])
+    output = CritiqueOutput(
+        gaps=[],
+        unsupported_claims=[],
+        suggested_subgoals=[],
+        confidence_concerns=[],
+        paid_opportunities=[
+            PaidOpportunity(
+                service="LinkedIn Premium",
+                cost_range="$60–$150/mo",
+                gap=(
+                    "would clarify employment history of CEO Jane Doe, because "
+                    "the report can only cite a single press release [1]"
+                ),
+                tier="high",
+            ),
+            PaidOpportunity(
+                service="ENR (Engineering News-Record)",
+                cost_range="$200–$500/yr",
+                gap=(
+                    "would surface trade-press coverage of Acme Co's regional "
+                    "contract awards, because the report cites paywalled "
+                    "previews only [2]"
+                ),
+                tier="low",
+            ),
+        ],
+        should_replan=False,
+    )
+    router = _StubRouter(output=output)
+
+    out = asyncio.run(critique(job, plan, "# Synth\n", router=router))
+
+    assert out.paid_opportunities
+    assert {p.service for p in out.paid_opportunities} == {
+        "LinkedIn Premium",
+        "ENR (Engineering News-Record)",
+    }
+
+    md = (job.root / "critique/0001.md").read_text(encoding="utf-8")
+    assert "Paid resource opportunities" in md
+    assert "LinkedIn Premium" in md
+    assert "$60–$150/mo" in md
+    assert "**high**" in md
+    assert "**low**" in md
+    assert "ENR (Engineering News-Record)" in md
+
+    sidecar = json.loads((job.root / "critique/0001.json").read_text(encoding="utf-8"))
+    paid = sidecar["payload"]["paid_opportunities"]
+    assert len(paid) == 2
+    assert {p["service"] for p in paid} == {
+        "LinkedIn Premium",
+        "ENR (Engineering News-Record)",
+    }
+    assert {p["tier"] for p in paid} == {"high", "low"}
+
+    rows = _read_critique_rows(db_path, job.id)
+    db_payload = json.loads(rows[0]["payload_json"])
+    assert len(db_payload["paid_opportunities"]) == 2
+
+
+def test_critique_empty_paid_opportunities_renders_none(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    """When the model returns no paid opportunities the md says ``(none)``."""
+    _seed_findings(job, [0.6])
+    router = _StubRouter()  # default output has no paid_opportunities
+
+    asyncio.run(critique(job, plan, "# Synth\n", router=router))
+
+    md = (job.root / "critique/0001.md").read_text(encoding="utf-8")
+    assert "Paid resource opportunities" in md
+    # Anchor on the list bullet so we don't false-match the heading.
+    paid_section = md.split("Paid resource opportunities", 1)[1]
+    assert "- (none)" in paid_section
+
+
+def test_critique_passes_paid_unblock_recipes_in_context(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    """The critic's context payload carries the paid-unblock catalog."""
+    _seed_findings(job, [0.6])
+    router = _StubRouter()
+
+    asyncio.run(critique(job, plan, "# Synth\n", router=router))
+
+    tier, args, _kwargs = router.calls[0]
+    assert tier == "frontier_alt"
+    payload = json.loads(args[0])
+    paid = payload.get("paid_unblock_recipes")
+    assert isinstance(paid, str) and paid
+    assert "LinkedIn" in paid
+    assert "PACER" in paid

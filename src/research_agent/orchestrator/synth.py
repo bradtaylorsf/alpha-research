@@ -60,6 +60,9 @@ FINAL_TOP_N = 200
 _FOLLOWUP_RECIPES: str | None = None
 _FOLLOWUP_RECIPES_WARN_LOGGED = False
 
+_PAID_UNBLOCK_RECIPES: str | None = None
+_PAID_UNBLOCK_RECIPES_WARN_LOGGED = False
+
 
 def _load_followup_recipes() -> str:
     """Read ``prompts/followup_recipes.md`` raw and cache the body.
@@ -81,6 +84,28 @@ def _load_followup_recipes() -> str:
             _FOLLOWUP_RECIPES_WARN_LOGGED = True
         body = ""
     _FOLLOWUP_RECIPES = body
+    return body
+
+
+def _load_paid_unblock_recipes() -> str:
+    """Read ``prompts/paid_unblock_recipes.md`` raw and cache the body.
+
+    Same contract as :func:`_load_followup_recipes` — reference data,
+    tolerates a missing file with a one-time WARN log.
+    """
+    global _PAID_UNBLOCK_RECIPES, _PAID_UNBLOCK_RECIPES_WARN_LOGGED
+    if _PAID_UNBLOCK_RECIPES is not None:
+        return _PAID_UNBLOCK_RECIPES
+    try:
+        body = (files("research_agent.prompts") / "paid_unblock_recipes.md").read_text(
+            encoding="utf-8"
+        )
+    except (FileNotFoundError, OSError) as exc:
+        if not _PAID_UNBLOCK_RECIPES_WARN_LOGGED:
+            logger.warning("synth: paid_unblock_recipes.md unavailable: %s", exc)
+            _PAID_UNBLOCK_RECIPES_WARN_LOGGED = True
+        body = ""
+    _PAID_UNBLOCK_RECIPES = body
     return body
 
 _BUDGET_STUB_REPORT = (
@@ -223,6 +248,7 @@ def _build_context(
     prior: str | None,
     critique: str | None,
     followup_recipes: str,
+    paid_unblock_recipes: str,
     final: bool = False,
 ) -> str:
     payload: dict[str, Any] = {
@@ -236,6 +262,7 @@ def _build_context(
         "prior_synthesis": prior,
         "critique": critique,
         "followup_recipes": followup_recipes,
+        "paid_unblock_recipes": paid_unblock_recipes,
     }
     if final:
         payload["final"] = True
@@ -354,6 +381,7 @@ async def _do_synthesis(
     prior = _load_prior_synthesis(job)
     critique = _load_latest_critique(job)
     followup_recipes = _load_followup_recipes()
+    paid_unblock_recipes = _load_paid_unblock_recipes()
 
     context = _build_context(
         goal=job.goal,
@@ -363,6 +391,7 @@ async def _do_synthesis(
         prior=prior,
         critique=critique,
         followup_recipes=followup_recipes,
+        paid_unblock_recipes=paid_unblock_recipes,
         final=final,
     )
 
@@ -683,6 +712,7 @@ async def final_synthesis_after_cap(
     prior = _load_prior_synthesis(job)
     critique = _load_latest_critique(job)
     followup_recipes = _load_followup_recipes()
+    paid_unblock_recipes = _load_paid_unblock_recipes()
 
     context = _build_context(
         goal=job.goal,
@@ -692,6 +722,7 @@ async def final_synthesis_after_cap(
         prior=prior,
         critique=critique,
         followup_recipes=followup_recipes,
+        paid_unblock_recipes=paid_unblock_recipes,
         final=True,
     )
 
