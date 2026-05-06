@@ -110,6 +110,42 @@ def _smoke_edgar(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_courtlistener(query: str) -> str:
+    """Smoke wrapper: CourtListener opinions search returning the top-5 hits.
+
+    Per AC #6: ``research _smoke-tool courtlistener "first amendment retaliation"``
+    should surface federal court opinions. Each line shows the case name, court,
+    file date, citation, permalink, and a short snippet so an operator can
+    eyeball whether the REST API is reachable and the token is healthy.
+    """
+    from research_agent.tools import courtlistener
+
+    async def _run() -> str:
+        results = await courtlistener.search(
+            query, kind="opinions", max_results=5
+        )
+        if not results:
+            return f"courtlistener search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            court = hit.extras.get("court") or "?"
+            file_date = (
+                hit.published_at.date().isoformat() if hit.published_at else "?"
+            )
+            citation = hit.extras.get("citation") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {court} — {file_date} — {citation}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_news(query: str) -> str:
     """Smoke wrapper: aggregate news hits and report per-source contributions.
 
@@ -315,6 +351,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "local_corpus": _smoke_local_corpus,
     "arxiv": _smoke_arxiv,
     "edgar": _smoke_edgar,
+    "courtlistener": _smoke_courtlistener,
     "news": _smoke_news,
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,
