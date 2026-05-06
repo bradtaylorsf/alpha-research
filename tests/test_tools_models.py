@@ -35,6 +35,7 @@ EXPECTED_SOURCE_KINDS = (
     "usaspending",
     "littlesis",
     "opencorporates",
+    "sanctions",
 )
 
 

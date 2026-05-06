@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdnList>
+  <sdnEntry>
+    <uid>23028</uid>
+    <firstName>Yevgeniy</firstName>
+    <lastName>Prigozhin</lastName>
+    <sdnType>Individual</sdnType>
+    <publishDate>2018-03-15</publishDate>
+    <sanctioningAgency>OFAC</sanctioningAgency>
+    <listKind>SDN</listKind>
+    <programList>
+      <program>UKRAINE-EO13661</program>
+      <program>RUSSIA-EO14024</program>
+    </programList>
+    <akaList>
+      <aka>
+        <type>a.k.a.</type>
+        <firstName>Evgeny</firstName>
+        <lastName>Prigozhin</lastName>
+      </aka>
+      <aka>
+        <type>a.k.a.</type>
+        <firstName>Yevgeny</firstName>
+        <lastName>Prigozhin</lastName>
+      </aka>
+      <aka>
+        <type>a.k.a.</type>
+        <firstName>Evgenii</firstName>
+        <lastName>Prigozhin</lastName>
+      </aka>
+    </akaList>
+    <idList>
+      <id>
+        <idType>Passport</idType>
+        <idNumber>722123456</idNumber>
+      </id>
+    </idList>
+    <addressList>
+      <address>
+        <city>St. Petersburg</city>
+        <country>Russia</country>
+      </address>
+    </addressList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>40512</uid>
+    <lastName>CONCORD MANAGEMENT AND CONSULTING LLC</lastName>
+    <sdnType>Entity</sdnType>
+    <publishDate>2018-02-16</publishDate>
+    <sanctioningAgency>OFAC</sanctioningAgency>
+    <listKind>SDN</listKind>
+    <programList>
+      <program>RUSSIA-EO14024</program>
+    </programList>
+    <akaList>
+      <aka>
+        <type>a.k.a.</type>
+        <lastName>CONCORD CONSULTING</lastName>
+      </aka>
+    </akaList>
+    <idList>
+      <id>
+        <idType>Tax ID No.</idType>
+        <idNumber>7841329844</idNumber>
+      </id>
+      <id>
+        <idType>EIN</idType>
+        <idNumber>11-2233445</idNumber>
+      </id>
+    </idList>
+    <addressList>
+      <address>
+        <address1>14 Savushkina Street</address1>
+        <city>St. Petersburg</city>
+        <country>Russia</country>
+      </address>
+    </addressList>
+  </sdnEntry>
+</sdnList>

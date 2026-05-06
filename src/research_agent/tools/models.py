@@ -41,6 +41,7 @@ SourceKind = Literal[
     "usaspending",
     "littlesis",
     "opencorporates",
+    "sanctions",
 ]
 
 
