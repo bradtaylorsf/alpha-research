@@ -783,6 +783,7 @@ def test_build_context_exposes_goal_and_licensing_board_guidance(
         prior=None,
         critique=None,
         followup_recipes=synth_module._load_followup_recipes(),
+        paid_unblock_recipes=synth_module._load_paid_unblock_recipes(),
         final=False,
     )
     payload = json.loads(context_json)
@@ -792,6 +793,50 @@ def test_build_context_exposes_goal_and_licensing_board_guidance(
     assert "licensing board" in recipes
     assert "spokesperson" in recipes or "press contact" in recipes
     assert "FOIA" in recipes
+
+    # SBI Builders acceptance criterion: paid catalog must surface
+    # LinkedIn (for company employees) and a regional / trade-press
+    # subscription that an investigation of a regional builder would
+    # plausibly need.
+    paid = payload["paid_unblock_recipes"]
+    assert isinstance(paid, str) and paid
+    assert "LinkedIn" in paid
+    assert "ENR" in paid or "Crain" in paid or "trade press" in paid.lower()
+
+
+# ---------------------------------------------------------------------------
+# Paid Resources That Would Unblock This Investigation (issue #113)
+# ---------------------------------------------------------------------------
+
+
+def test_paid_unblock_recipes_in_context(job: Job, db_path: Path, plan: Plan) -> None:
+    """The synthesizer's context payload carries the paid-unblock catalog."""
+    _seed_findings(job, [0.7])
+    router = _StubRouter()
+
+    asyncio.run(synthesize(job, plan, router=router))
+
+    assert router.calls
+    _tier, args, _kwargs = router.calls[0]
+    payload = json.loads(args[0])
+    paid = payload.get("paid_unblock_recipes")
+    assert isinstance(paid, str) and paid
+    # Spot-check several specific services from the seeded catalog so a
+    # regression that drops one is caught.
+    assert "LinkedIn" in paid
+    assert "PACER" in paid
+    assert "Westlaw" in paid
+
+
+def test_synthesizer_prompt_requires_paid_resources_section() -> None:
+    """The synthesizer prompt must instruct the model to emit the new section."""
+    body = prompts_loader.load_prompt("synthesizer", goal="x")
+    assert "Paid Resources That Would Unblock This Investigation" in body
+    assert "High value" in body
+    assert "Lower value" in body
+    assert "because" in body
+    # The section must be conditional on the critique's flagged opportunities.
+    assert "paid_opportunities" in body
 
 
 def test_synthesize_accepts_fence_with_space_before_json_lang(
