@@ -16,6 +16,7 @@ from research_agent.tools.models import SearchResult, Source, SourceKind
 EXPECTED_SOURCE_KINDS = (
     "web",
     "pdf",
+    "audio",
     "github",
     "arxiv",
     "news",
@@ -34,9 +35,9 @@ EXPECTED_SOURCE_KINDS = (
 # ---------------------------------------------------------------------------
 
 
-def test_source_kind_covers_all_12_verticals() -> None:
+def test_source_kind_covers_all_verticals() -> None:
     assert set(get_args(SourceKind)) == set(EXPECTED_SOURCE_KINDS)
-    assert len(get_args(SourceKind)) == 12
+    assert len(get_args(SourceKind)) == len(EXPECTED_SOURCE_KINDS)
 
 
 @pytest.mark.parametrize("kind", EXPECTED_SOURCE_KINDS)

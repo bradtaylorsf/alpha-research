@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 SourceKind = Literal[
     "web",
     "pdf",
+    "audio",
     "github",
     "arxiv",
     "news",
