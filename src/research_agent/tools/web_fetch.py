@@ -275,6 +275,10 @@ _REDDIT_HOSTS = frozenset(
     {"reddit.com", "www.reddit.com", "old.reddit.com", "new.reddit.com"}
 )
 
+_YOUTUBE_HOSTS = frozenset(
+    {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}
+)
+
 _PDF_CONTENT_TYPE = "application/pdf"
 
 
@@ -410,10 +414,16 @@ async def fetch(
     if not url or not urlparse(url).netloc:
         return None
 
-    if urlparse(url).netloc in _REDDIT_HOSTS:
+    netloc = urlparse(url).netloc.lower()
+    if netloc in _REDDIT_HOSTS:
         from research_agent.tools import reddit
 
         return await reddit.fetch(url)
+
+    if netloc in _YOUTUBE_HOSTS:
+        from research_agent.tools import youtube
+
+        return await youtube.fetch(url)
 
     user_agent = _resolve_user_agent()
 

@@ -188,6 +188,35 @@ def _smoke_audio(path_or_url: str) -> str:
     )
 
 
+def _smoke_youtube(query: str) -> str:
+    """Smoke wrapper: run youtube.search and print up to 10 hits formatted.
+
+    Lets a human eyeball whether the Data API key (when set) or the SERP
+    fallback parser still picks up videos for ``query``.
+    """
+    from research_agent.tools import youtube
+
+    async def _run() -> str:
+        results = await youtube.search(query, max_results=10)
+        if not results:
+            return f"youtube search returned no results for {query!r}"
+        lines: list[str] = [f"total: {len(results)}"]
+        for hit in results[:10]:
+            channel = hit.extras.get("channel") or "?"
+            published = (
+                hit.published_at.isoformat()
+                if hit.published_at
+                else (hit.extras.get("published_text") or "?")
+            )
+            views = hit.extras.get("view_count_text") or "?"
+            lines.append(
+                f"- {hit.title}\n  {hit.url}\n  {channel} | views={views} | published={published}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_web_fetch(url: str) -> str:
     """Smoke wrapper for web_fetch: print word count, path, preview, archive URL.
 
@@ -236,6 +265,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,
     "audio": _smoke_audio,
+    "youtube": _smoke_youtube,
 }
 
 __all__ = ["TOOL_REGISTRY", "SearchResult", "Source", "SourceKind"]
