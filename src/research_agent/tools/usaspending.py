@@ -552,7 +552,7 @@ def _amount_block(
     lines = ["## Amount", ""]
     lines.append(
         f"- **Base award:** {_fmt_money(base)} "
-        " *(file analysis on this value, not modifications)*"
+        "*(file analysis on this value, not modifications)*"
     )
     if total_obligation not in (None, "", "null"):
         lines.append(f"- **Total obligated:** {_fmt_money(total_obligation)}")
