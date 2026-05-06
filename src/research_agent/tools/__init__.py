@@ -404,6 +404,51 @@ def _smoke_opencorporates(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_sos(query: str) -> str:
+    """Smoke wrapper: California Secretary of State business registry.
+
+    Per AC: ``research _smoke-tool sos "SBI Builders"`` should return the
+    LLC entry with its registered agent. Lists the top-5 entity hits with
+    their entity number / type / status / formed date, then follows up on
+    the top hit with ``fetch()`` so the registered agent surfaces too.
+    """
+    from research_agent.tools import sos
+
+    async def _run() -> str:
+        results = await sos.search(query, state="CA", max_results=5)
+        if not results:
+            return f"sos search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            number = hit.extras.get("entity_number") or "?"
+            entity_type = hit.extras.get("entity_type") or "?"
+            status = hit.extras.get("status") or "?"
+            formed = hit.extras.get("formed_date") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {number} — {entity_type} — {status} —"
+                f" formed {formed}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+
+        top = results[0]
+        source = await sos.fetch(top.url)
+        if source is None:
+            lines.append(f"\nfetch({top.url}) returned None — agent unavailable")
+        else:
+            agent = source.metadata.get("registered_agent") or "?"
+            principal = source.metadata.get("principal_address") or "?"
+            lines.append(f"\nProfile for {top.title}")
+            lines.append(f"  registered_agent: {agent}")
+            lines.append(f"  principal_address: {principal}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_sanctions(query: str) -> str:
     """Smoke wrapper: OFAC SDN / EU / UK sanctions lookup.
 
@@ -774,6 +819,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "lda": _smoke_lda,
     "littlesis": _smoke_littlesis,
     "opencorporates": _smoke_opencorporates,
+    "sos": _smoke_sos,
     "sanctions": _smoke_sanctions,
     "usaspending": _smoke_usaspending,
     "gdelt": _smoke_gdelt,
