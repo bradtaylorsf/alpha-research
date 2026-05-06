@@ -236,6 +236,31 @@ _MEMBER_COSPONSORED_PAYLOAD = {
 }
 
 
+_HEARING_DETAIL_PAYLOAD = {
+    "hearing": {
+        "jacketNumber": 51234,
+        "congress": 118,
+        "chamber": "House",
+        "title": "Oversight of the Department of Justice",
+        "citation": "H.Hrg. 118-45",
+        "dates": [{"date": "2024-03-12"}],
+        "committees": [
+            {"name": "Committee on the Judiciary", "systemCode": "hsju00"}
+        ],
+        "formats": [
+            {
+                "type": "Formatted Text",
+                "url": "https://www.govinfo.gov/content/pkg/CHRG-118hhrg51234/html/CHRG-118hhrg51234.htm",
+            },
+            {
+                "type": "PDF",
+                "url": "https://www.govinfo.gov/content/pkg/CHRG-118hhrg51234/pdf/CHRG-118hhrg51234.pdf",
+            },
+        ],
+    }
+}
+
+
 # ---------------------------------------------------------------------------
 # httpx mock plumbing
 # ---------------------------------------------------------------------------
@@ -615,6 +640,51 @@ async def test_fetch_member_voting_record_url_in_metadata_not_inlined(
     assert md["sponsored_count"] == 1
     assert md["cosponsored_count"] == 1
     assert "Committee on the Budget" in md["committees"]
+
+
+# ---------------------------------------------------------------------------
+# fetch() — hearing happy path
+# ---------------------------------------------------------------------------
+
+
+def _hearing_responder(url, _params):
+    if "/hearing/118/house/51234" in url:
+        return 200, json.dumps(_HEARING_DETAIL_PAYLOAD)
+    return 404, ""
+
+
+async def test_fetch_hearing_rolls_up_committees_and_transcript(
+    monkeypatch, cache_dir: Path
+):
+    _patch_httpx(monkeypatch, responder=_hearing_responder)
+
+    url = "https://www.congress.gov/congressional-hearings/118th-congress/house/51234"
+    source = await congress.fetch(url)
+
+    assert source is not None
+    assert source.source_kind == "congress"
+    assert source.url == url
+    assert source.title == "Oversight of the Department of Justice"
+
+    body = source.cleaned_text
+    assert body.startswith("# Oversight of the Department of Justice")
+    assert "118th Congress" in body
+    assert "2024-03-12" in body
+    assert "H.Hrg. 118-45" in body
+    assert "## Committees" in body
+    assert "Committee on the Judiciary" in body
+    assert "## Transcript" in body
+    assert "CHRG-118hhrg51234.htm" in body
+
+    md = source.metadata
+    assert md["congress"] == 118
+    assert md["chamber"] == "house"
+    assert md["jacket_number"] == "51234"
+    assert md["citation"] == "H.Hrg. 118-45"
+    assert md["dates"] == ["2024-03-12"]
+    assert "Committee on the Judiciary" in md["committees"]
+    assert md["transcript_url"].endswith("CHRG-118hhrg51234.htm")
+    assert md["transcript_format"] == "Formatted Text"
 
 
 async def test_fetch_returns_none_on_404(monkeypatch, cache_dir: Path):

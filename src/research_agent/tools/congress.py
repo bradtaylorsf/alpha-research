@@ -6,8 +6,11 @@ Public surface:
   hits ``api.congress.gov/v3/`` for ``bill``, ``member``, ``committee``,
   ``hearing``, or ``congressional-record``.
 * ``async def fetch(url) -> Source | None`` opens a bill / member / hearing
-  page on ``www.congress.gov`` and returns rolled-up content (bill text +
-  actions; member voting record + committees; hearing witnesses + transcripts).
+  page and returns rolled-up content (bill text + actions; member voting
+  record + committees; hearing committees + transcript URL). Hearings are
+  fetched via the v3 API endpoint — the synthesised
+  ``congress.gov/congressional-hearings/...`` permalink that ``search()``
+  produces is recognised and routed through.
 
 Auth: api.data.gov key in ``DATA_GOV_API_KEY`` — same key used by the FEC
 connector (one signup at https://api.data.gov/signup/ unlocks both). The
@@ -77,10 +80,13 @@ _BILL_URL_RE = re.compile(
     r"(?P<bill_slug>[a-z\-]+)/(?P<number>\d+)/?$"
 )
 _MEMBER_URL_RE = re.compile(r"^/member/(?P<bioguide>[A-Za-z0-9]+)/?$")
+# Matches the hearing permalink that ``search()`` synthesises for hearing hits:
+# ``/congressional-hearings/{congress}th-congress/{chamber}/{jacket}``. The
+# www.congress.gov site does not host a stable HTML page at this path, so
+# ``fetch()`` routes the URL straight to the v3 API hearing endpoint.
 _HEARING_URL_RE = re.compile(
-    r"^/(?:committee|congressional-hearings)/"
-    r"(?P<chamber>house|senate|joint)/"
-    r"(?P<extra>.+?)/(?P<jacket>\d+)/?$"
+    r"^/congressional-hearings/(?P<congress>\d+)(?:[a-z]{2})?-congress/"
+    r"(?P<chamber>house|senate|joint)/(?P<jacket>\d+)/?$"
 )
 
 _rate_lock = asyncio.Lock()
@@ -633,6 +639,18 @@ def _classify_url(url: str) -> tuple[str | None, dict[str, Any]]:
     if m:
         return "member", {"bioguide_id": m.group("bioguide")}
 
+    m = _HEARING_URL_RE.match(path)
+    if m:
+        try:
+            congress = int(m.group("congress"))
+        except ValueError:
+            return None, {}
+        return "hearing", {
+            "congress": congress,
+            "chamber": m.group("chamber"),
+            "jacket_number": m.group("jacket"),
+        }
+
     return None, {}
 
 
@@ -1070,19 +1088,140 @@ async def _fetch_member(bioguide_id: str, source_url: str, timeout: float) -> So
 
 
 # ---------------------------------------------------------------------------
+# fetch() — hearing
+# ---------------------------------------------------------------------------
+
+
+def _hearing_transcript_pick(formats: Any) -> tuple[str | None, str | None]:
+    """Pick the preferred transcript URL from a hearing ``formats`` list."""
+    if not isinstance(formats, list):
+        return None, None
+    by_type = {
+        (f.get("type") or "").strip(): (f.get("url") or "").strip()
+        for f in formats
+        if isinstance(f, dict)
+    }
+    for label in ("Formatted Text", "PDF", "Formatted XML"):
+        if by_type.get(label):
+            return label, by_type[label]
+    if formats and isinstance(formats[0], dict):
+        return (
+            (formats[0].get("type") or "").strip() or None,
+            (formats[0].get("url") or "").strip() or None,
+        )
+    return None, None
+
+
+async def _fetch_hearing(
+    congress: int, chamber: str, jacket: str, source_url: str, timeout: float
+) -> Source | None:
+    common_params = {"api_key": _resolve_api_key(), "format": "json"}
+    cache_id = f"{congress}-{chamber}-{jacket}"
+
+    payload = await _fetch_json_cached(
+        "hearing",
+        cache_id,
+        urljoin(_BASE_URL, f"hearing/{congress}/{chamber}/{jacket}"),
+        timeout,
+        params=common_params,
+    )
+    if not payload:
+        return None
+    hearing = payload.get("hearing")
+    if not isinstance(hearing, dict):
+        return None
+
+    title = (hearing.get("title") or "").strip() or f"Hearing {jacket}"
+    citation = (hearing.get("citation") or "").strip()
+
+    dates_field = hearing.get("dates") or []
+    hearing_dates: list[str] = []
+    if isinstance(dates_field, list):
+        for d in dates_field:
+            if isinstance(d, dict):
+                v = d.get("date") or d.get("hearingDate")
+                if v:
+                    hearing_dates.append(str(v))
+            elif isinstance(d, str):
+                hearing_dates.append(d)
+
+    committees_field = hearing.get("committees") or []
+    committee_names: list[str] = []
+    if isinstance(committees_field, list):
+        for c in committees_field:
+            if isinstance(c, dict):
+                cn = (c.get("name") or "").strip()
+                if cn:
+                    committee_names.append(cn)
+
+    transcript_label, transcript_url = _hearing_transcript_pick(
+        hearing.get("formats")
+    )
+
+    sections: list[str] = [f"# {title}"]
+    meta_bits: list[str] = [f"{congress}th Congress", chamber.title()]
+    if hearing_dates:
+        meta_bits.append("/".join(hearing_dates))
+    if citation:
+        meta_bits.append(citation)
+    sections.append("_" + " · ".join(meta_bits) + "_")
+
+    if committee_names:
+        sections.append(
+            "## Committees\n\n" + "\n".join(f"- {c}" for c in committee_names)
+        )
+
+    if transcript_url:
+        sections.append(
+            "## Transcript\n\n"
+            f"_Witnesses are listed inside the official transcript; the v3 "
+            f"hearing endpoint does not surface them as structured data._\n\n"
+            f"- Format: {transcript_label or '—'}\n"
+            f"- URL: {transcript_url}"
+        )
+    else:
+        sections.append("## Transcript\n\n_No public transcript available yet._")
+
+    cleaned_text = "\n\n".join(sections).strip()
+
+    metadata: dict[str, Any] = {
+        "congress": congress,
+        "chamber": chamber,
+        "jacket_number": jacket,
+        "citation": citation,
+        "dates": hearing_dates,
+        "committees": committee_names,
+        "transcript_url": transcript_url,
+        "transcript_format": transcript_label,
+    }
+
+    return Source(
+        url=source_url,
+        title=title,
+        cleaned_text=cleaned_text,
+        raw_html=None,
+        fetched_at=datetime.now(UTC),
+        source_kind="congress",
+        metadata=metadata,
+    )
+
+
+# ---------------------------------------------------------------------------
 # fetch()
 # ---------------------------------------------------------------------------
 
 
 async def fetch(url: str, timeout: float = 30.0) -> Source | None:
-    """Open a bill or member page on www.congress.gov and return a Source.
+    """Open a bill / member / hearing page and return a rolled-up Source.
 
-    Returns ``None`` for unrecognised URLs (anything outside
-    ``www.congress.gov``) and for any transport / HTTP / parse failure.
-    Hearing detail pages and congressional-record issues are not exposed
-    by the public site under stable paths suitable for a strict classifier;
-    use the ``api_url`` returned by ``search()`` to drive a direct API
-    fetch downstream if you need those.
+    Accepts ``www.congress.gov`` URLs for bills and members, plus the
+    synthetic hearing permalink that ``search()`` produces (the public
+    site does not host a stable HTML page for hearings — the URL is
+    routed straight to the v3 API). Returns ``None`` for unrecognised
+    URLs (anything outside ``www.congress.gov``) and for any transport /
+    HTTP / parse failure. Congressional-record issues are not yet
+    supported by ``fetch()`` — use ``api_url`` from search results to
+    drive a direct API fetch downstream if needed.
     """
     if not url:
         return None
@@ -1093,6 +1232,10 @@ async def fetch(url: str, timeout: float = 30.0) -> Source | None:
         )
     if resource == "member":
         return await _fetch_member(ids["bioguide_id"], url, timeout)
+    if resource == "hearing":
+        return await _fetch_hearing(
+            ids["congress"], ids["chamber"], ids["jacket_number"], url, timeout
+        )
     return None
 
 
