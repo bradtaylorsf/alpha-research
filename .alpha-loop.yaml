@@ -41,13 +41,21 @@ skip_preflight: false
 dev_command: uv run research doctor
 
 # setup_command runs once per fresh worktree before the agent starts.
-# Bootstraps the venv, editable install, and Playwright browsers so the agent
-# never sees `uv: not found`, missing deps, or "browser not installed" errors
-# mid-session. Failures are non-blocking (alpha-loop warns and continues), so
-# this is safe even before pyproject.toml or playwright are declared.
+# Bootstraps the venv, editable install, Playwright browsers, and the global
+# `research` tool entry point so the agent never sees `uv: not found`, missing
+# deps, or `/bin/sh: research: command not found` mid-session. Failures are
+# non-blocking (alpha-loop warns and continues), so this is safe even before
+# pyproject.toml or playwright are declared.
+#
+# `uv tool install -e .` installs `research` into ~/.local/bin (assumed on
+# PATH on macOS/Linux), which is what the verifier sees when it shells out
+# `/bin/sh -c "research _smoke-tool ..."`. Without this, plans that schedule
+# verification commands as bare `research ...` fail with "command not found"
+# even though `uv run research` would work.
+#
 # Playwright browsers cache to ~/Library/Caches/ms-playwright (shared across
 # worktrees), so the first run downloads ~150MB once and subsequent runs no-op.
-setup_command: uv sync 2>/dev/null || true; uv pip install -e . 2>/dev/null || true; uv run playwright install chromium 2>/dev/null || true
+setup_command: uv sync 2>/dev/null || true; uv pip install -e . 2>/dev/null || true; uv tool install -e . 2>/dev/null || true; uv run playwright install chromium 2>/dev/null || true
 
 # This is a Python repo — skip the default `pnpm install` step.
 skip_install: true

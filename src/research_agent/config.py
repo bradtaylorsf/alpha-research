@@ -57,6 +57,14 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         default="http://localhost:1234/v1",
     ),
     EnvKey(
+        name="RESEARCH_PDF_VLM_ESCALATION",
+        required=False,
+        description=(
+            "Set to '1' to enable Opus 4.7 vision escalation for PDFs that fail"
+            " every cheaper extraction layer. Off by default — costs real money."
+        ),
+    ),
+    EnvKey(
         name="RESEARCH_DAEMON_PROGRESS",
         required=False,
         description=(

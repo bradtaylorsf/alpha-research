@@ -197,8 +197,13 @@ async def _fetch_via_httpx(
     url: str,
     timeout: float,
     user_agent: str,
-) -> tuple[int | None, str | None]:
-    """Return ``(status_code, html)``. ``status_code`` is None on transport error."""
+) -> tuple[int | None, str | None, bytes | None, str | None]:
+    """Return ``(status_code, html, content_bytes, content_type)``.
+
+    ``status_code`` is None on transport error. ``content_bytes`` carries the
+    raw response body for callers (PDF detection) that need bytes rather
+    than the decoded text.
+    """
     headers = {"User-Agent": user_agent}
     try:
         async with httpx.AsyncClient(
@@ -209,11 +214,12 @@ async def _fetch_via_httpx(
             response = await client.get(url)
     except (httpx.HTTPError, OSError) as exc:
         logger.debug("httpx fetch failed for %s: %s", url, exc)
-        return None, None
+        return None, None, None, None
 
+    content_type = response.headers.get("content-type")
     if response.status_code >= 400:
-        return response.status_code, None
-    return response.status_code, response.text
+        return response.status_code, None, None, content_type
+    return response.status_code, response.text, response.content, content_type
 
 
 async def _fetch_via_playwright(url: str, timeout: float) -> str | None:
@@ -269,6 +275,61 @@ _REDDIT_HOSTS = frozenset(
     {"reddit.com", "www.reddit.com", "old.reddit.com", "new.reddit.com"}
 )
 
+_PDF_CONTENT_TYPE = "application/pdf"
+
+
+def _is_pdf_url(url: str) -> bool:
+    """Cheap path-based PDF detection — true when the URL ends in ``.pdf``.
+
+    Strips query/fragment so EDGAR-style ``...10k.pdf?token=...`` still
+    matches. Case-insensitive because some sites publish ``.PDF``.
+    """
+    parsed = urlparse(url)
+    return parsed.path.lower().endswith(".pdf")
+
+
+def _is_pdf_content_type(content_type: str | None) -> bool:
+    if not content_type:
+        return False
+    return content_type.split(";", 1)[0].strip().lower() == _PDF_CONTENT_TYPE
+
+
+async def _build_pdf_source(
+    url: str,
+    *,
+    status_code: int | None,
+    content: bytes | None,
+) -> Source | None:
+    """Run :func:`pdf.extract` (or ``extract_from_bytes``) and wrap the result.
+
+    Returns None when extraction yielded no usable text — same contract the
+    HTML path has when both fetch layers come back empty.
+    """
+    from research_agent.tools import pdf
+
+    if content:
+        text = pdf.extract_from_bytes(content, source_label=url)
+    else:
+        text = await pdf.extract(url)
+
+    if not text.strip():
+        return None
+
+    title = url.rsplit("/", 1)[-1] or url
+    metadata: dict[str, Any] = {
+        "fetched_via": "pdf",
+        "status_code": status_code,
+    }
+    return Source(
+        url=url,
+        title=title,
+        cleaned_text=text,
+        raw_html=None,
+        fetched_at=datetime.now(UTC),
+        source_kind="pdf",
+        metadata=metadata,
+    )
+
 
 async def fetch(
     url: str,
@@ -304,12 +365,36 @@ async def fetch(
             logger.info("web_fetch skipped %s — disallowed by robots.txt", url)
             return None
 
+    # Cheap path: a ``.pdf`` URL means we can skip httpx + trafilatura entirely
+    # and let pdf.extract handle the download. Saves a wasted HTML decode and
+    # a 500-page render through readability.
+    if _is_pdf_url(url):
+        source = await _build_pdf_source(url, status_code=None, content=None)
+        if source is not None:
+            _spawn_archive_task(source)
+        return source
+
     html: str | None = None
     status_code: int | None = None
+    content_bytes: bytes | None = None
+    content_type: str | None = None
     fetched_via: str = "httpx"
 
     if not requires_js:
-        status_code, html = await _fetch_via_httpx(url, timeout, user_agent)
+        status_code, html, content_bytes, content_type = await _fetch_via_httpx(
+            url, timeout, user_agent
+        )
+
+    # Server-declared PDF (e.g. ``Content-Disposition: attachment; ...10k.pdf``
+    # behind a redirect that hides the suffix). We already have the bytes —
+    # feed them straight into pdf.extract_from_bytes.
+    if _is_pdf_content_type(content_type) and content_bytes:
+        source = await _build_pdf_source(
+            url, status_code=status_code, content=content_bytes
+        )
+        if source is not None:
+            _spawn_archive_task(source)
+        return source
 
     title, text = _extract(html or "")
 

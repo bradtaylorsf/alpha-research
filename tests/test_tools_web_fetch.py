@@ -190,7 +190,7 @@ async def test_fetch_ignores_robots_when_env_set(monkeypatch):
 
     async def _fake_httpx(url, timeout, user_agent):
         captured_calls.append(url)
-        return 200, ARTICLE_HTML
+        return 200, ARTICLE_HTML, ARTICLE_HTML.encode("utf-8"), "text/html"
 
     monkeypatch.setattr(web_fetch, "_fetch_via_httpx", _fake_httpx)
 
@@ -226,7 +226,7 @@ async def test_fetch_returns_source_via_httpx(monkeypatch):
         # config.get returns the declared EXPECTED_ENV_KEYS default when the
         # env var is unset.
         assert user_agent.startswith("research-agent/0.1")
-        return 200, ARTICLE_HTML
+        return 200, ARTICLE_HTML, ARTICLE_HTML.encode("utf-8"), "text/html"
 
     monkeypatch.setattr(web_fetch, "_fetch_via_httpx", _fake_httpx)
 
@@ -252,7 +252,7 @@ async def test_fetch_falls_back_to_browser_on_blocking_status(monkeypatch, statu
     _stub_archive(monkeypatch)
 
     async def _fake_httpx(url, timeout, user_agent):
-        return status, None
+        return status, None, None, "text/html"
 
     pw_calls: list[str] = []
 
@@ -277,7 +277,7 @@ async def test_fetch_falls_back_to_browser_when_text_too_short(monkeypatch):
     short_html = "<html><head><title>Stub</title></head><body><p>too short</p></body></html>"
 
     async def _fake_httpx(url, timeout, user_agent):
-        return 200, short_html
+        return 200, short_html, short_html.encode("utf-8"), "text/html"
 
     pw_calls: list[str] = []
 
@@ -323,7 +323,7 @@ async def test_fetch_returns_none_when_both_paths_fail(monkeypatch):
     _stub_archive(monkeypatch)
 
     async def _fake_httpx(url, timeout, user_agent):
-        return None, None  # transport error
+        return None, None, None, None  # transport error
 
     async def _fake_pw(url, timeout):
         return None  # browser also failed
@@ -361,7 +361,7 @@ async def test_fetch_spawns_archive_task_without_blocking(monkeypatch):
     monkeypatch.setattr(web_fetch.archive, "save", _slow_save)
 
     async def _fake_httpx(url, timeout, user_agent):
-        return 200, ARTICLE_HTML
+        return 200, ARTICLE_HTML, ARTICLE_HTML.encode("utf-8"), "text/html"
 
     monkeypatch.setattr(web_fetch, "_fetch_via_httpx", _fake_httpx)
 
@@ -386,7 +386,7 @@ async def test_fetch_does_not_crash_when_archive_save_raises(monkeypatch):
     monkeypatch.setattr(web_fetch.archive, "save", _boom)
 
     async def _fake_httpx(url, timeout, user_agent):
-        return 200, ARTICLE_HTML
+        return 200, ARTICLE_HTML, ARTICLE_HTML.encode("utf-8"), "text/html"
 
     monkeypatch.setattr(web_fetch, "_fetch_via_httpx", _fake_httpx)
 

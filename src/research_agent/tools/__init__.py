@@ -141,6 +141,30 @@ def _smoke_reddit(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_pdf(path_or_url: str) -> str:
+    """Smoke wrapper for pdf.extract: print page-count summary + 500-char preview.
+
+    Routes through :func:`pdf.extract_sync` so the verb works both for
+    on-disk fixtures (smoke against ``tests/fixtures/arxiv_paper.pdf``) and
+    HTTP URLs (smoke against an EDGAR 10-K).
+    """
+    from research_agent.tools import pdf
+
+    text = pdf.extract_sync(path_or_url)
+    if not text:
+        return f"pdf extract returned empty markdown for {path_or_url}"
+    page_headings = text.count("## Page ")
+    preview = text[:500].replace("\n", " ")
+    if len(text) > 500:
+        preview += "…"
+    return (
+        f"source: {path_or_url}\n"
+        f"page_sections: {page_headings}\n"
+        f"char_count: {len(text)}\n"
+        f"preview: {preview}"
+    )
+
+
 def _smoke_web_fetch(url: str) -> str:
     """Smoke wrapper for web_fetch: print word count, path, preview, archive URL.
 
@@ -187,6 +211,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "arxiv": _smoke_arxiv,
     "news": _smoke_news,
     "reddit": _smoke_reddit,
+    "pdf": _smoke_pdf,
 }
 
 __all__ = ["TOOL_REGISTRY", "SearchResult", "Source", "SourceKind"]
