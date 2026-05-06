@@ -30,6 +30,7 @@ EXPECTED_SOURCE_KINDS = (
     "courtlistener",
     "fedregister",
     "nonprofits",
+    "congress",
 )
 
 
