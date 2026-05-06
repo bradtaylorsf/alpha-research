@@ -136,6 +136,33 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
             " engines; per-query ≈ $0.015. Sign up at https://serpapi.com/."
         ),
     ),
+    EnvKey(
+        name="LINKEDIN_DATA_API_KEY",
+        required=False,
+        description=(
+            "LinkedIn data-broker key for tools/linkedin.py (default broker:"
+            " Proxycurl). Per-lookup billing ≈ $0.01–$0.05; gate fetches"
+            " behind explicit planner tasks. Sign up at https://nubela.co/proxycurl/."
+        ),
+    ),
+    EnvKey(
+        name="LINKEDIN_BROKER",
+        required=False,
+        description=(
+            "Broker recipe used by tools/linkedin.py. 'proxycurl' (default)"
+            " or 'lix'. Switching to lix consults LIX_API_KEY instead of"
+            " LINKEDIN_DATA_API_KEY."
+        ),
+        default="proxycurl",
+    ),
+    EnvKey(
+        name="LIX_API_KEY",
+        required=False,
+        description=(
+            "Lix data-broker key (https://lix-it.com/) consulted only when"
+            " LINKEDIN_BROKER=lix. Similar per-lookup pricing to Proxycurl."
+        ),
+    ),
 )
 
 

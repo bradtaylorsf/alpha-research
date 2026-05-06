@@ -41,6 +41,7 @@ EXPECTED_SOURCE_KINDS = (
     "bbb",
     "calaccess",
     "scholar",
+    "linkedin",
 )
 
 

@@ -77,12 +77,14 @@ explicitly per #113).
 | Connector | Issue | Env var | Where to get it | Approx cost |
 |---|---|---|---|---|
 | Google Scholar via SERPAPI | #114 | `SERPAPI_KEY` | <https://serpapi.com/users/sign_up> | $75/mo for 5K queries (Scholar is one engine of many they offer) |
-| LinkedIn via Proxycurl | #115 | `PROXYCURL_API_KEY` (or `LINKEDIN_DATA_API_KEY` if using a different broker) | <https://nubela.co/proxycurl/> → Sign up → API Key | $0.01–$0.05 per profile lookup |
+| LinkedIn via Proxycurl (default broker) | #115 | `LINKEDIN_DATA_API_KEY` | <https://nubela.co/proxycurl/> → Sign up → API Key | $0.01–$0.05 per profile lookup |
+| LinkedIn via Lix (alternate broker) | #115 | `LIX_API_KEY` (set `LINKEDIN_BROKER=lix` to switch) | <https://lix-it.com/> → Sign up | Similar per-lookup pricing to Proxycurl |
 
-For LinkedIn specifically, brokers other than Proxycurl (Lix, RapidAPI
-LinkedIn proxies, etc.) work too — the connector should be
-broker-pluggable. Use whichever broker your wallet and TOS comfort
-allow.
+For LinkedIn the connector is **broker-pluggable**: `LINKEDIN_BROKER`
+selects the recipe (`proxycurl` by default, or `lix`). Each broker
+reads its own key — see the rows above. Adding another broker is a
+recipe-layer change in `tools/linkedin.py`. Use whichever broker your
+wallet and TOS comfort allow.
 
 ---
 
