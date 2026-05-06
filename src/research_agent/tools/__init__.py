@@ -217,13 +217,12 @@ def _smoke_nonprofits(query: str) -> str:
 
 
 def _smoke_fec(query: str) -> str:
-    """Smoke wrapper: FEC OpenFEC candidate search returning the top-5 hits.
+    """Smoke wrapper: FEC OpenFEC candidate search + top-hit cycle totals.
 
     Per AC: ``research _smoke-tool fec "George Santos"`` should surface the
-    candidate record + cycle totals. Each line shows the candidate name,
-    candidate ID, party, state, office, election years, permalink, and
-    snippet so an operator can eyeball whether the OpenFEC API is reachable
-    and the api.data.gov key is healthy.
+    candidate record + cycle totals. Lists the top-5 search hits, then
+    follows up on the top hit with ``fetch()`` so an operator can eyeball
+    receipts / disbursements / cash-on-hand alongside the candidate record.
     """
     from research_agent.tools import fec
 
@@ -248,6 +247,21 @@ def _smoke_fec(query: str) -> str:
                 f"  {hit.url}\n"
                 f"  {snippet}"
             )
+
+        top = results[0]
+        source = await fec.fetch(top.url)
+        if source is None:
+            lines.append(f"\nfetch({top.url}) returned None — cycle totals unavailable")
+        else:
+            totals = source.metadata.get("cycle_totals") or {}
+            cycle = totals.get("cycle")
+            header = f"\nCycle totals for {top.title} ({cycle})" if cycle else (
+                f"\nCycle totals for {top.title}"
+            )
+            lines.append(header)
+            lines.append(f"  receipts: {totals.get('receipts')}")
+            lines.append(f"  disbursements: {totals.get('disbursements')}")
+            lines.append(f"  cash_on_hand_end_period: {totals.get('cash_on_hand_end_period')}")
         return "\n".join(lines)
 
     return asyncio.run(_run())
