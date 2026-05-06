@@ -487,3 +487,242 @@ def test_final_synthesis_after_cap_falls_back_to_template_when_speed_capped(
     report = (job.root / "report.md").read_text(encoding="utf-8")
     assert "template stub" in report.lower()
     assert "claim 0" in report
+
+
+# ---------------------------------------------------------------------------
+# Subgoal-status extraction (issue #119)
+# ---------------------------------------------------------------------------
+
+
+def _read_latest_plan_subgoals(db_path: Path, job_id: str) -> list[dict[str, Any]]:
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM plans WHERE job_id = ? ORDER BY version DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return list(json.loads(row["payload_json"])["subgoals"])
+
+
+def _read_latest_plan_version(db_path: Path, job_id: str) -> int:
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT MAX(version) AS v FROM plans WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return int(row["v"])
+
+
+@pytest.fixture
+def multi_subgoal_plan(job: Job) -> Plan:
+    p = Plan(
+        version=1,
+        objective="Investigate Widget Co",
+        subgoals=[
+            Subgoal(id=1, description="background", done=False),
+            Subgoal(id=2, description="finances", done=False),
+            Subgoal(id=3, description="connections", done=False),
+        ],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=3,
+    )
+    write_plan(job, p.model_dump())
+    return p
+
+
+def test_synthesize_extracts_subgoal_status_and_strips_fence(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """Trailing JSON fence closes subgoals 1 & 2 and is stripped from report.md."""
+    _seed_findings(job, [0.9, 0.5])
+    body = (
+        "# Investigation Report\n\n"
+        "## Executive Summary\n- finding [1]\n\n"
+        "## Sources\n1. https://example.com/0 — \"Title\"\n"
+    )
+    fence = (
+        '\n```json\n'
+        '{"subgoal_status": {"1": "confirmed", "2": "refuted", "3": "confirmed"}}'
+        '\n```\n'
+    )
+    router = _StubRouter(content=body + fence)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "subgoal_status" not in report
+    assert "```json" not in report
+    assert "Investigation Report" in report
+
+    synth_md = (job.root / "synthesis/0001.md").read_text(encoding="utf-8")
+    assert "subgoal_status" not in synth_md
+
+    subgoals = _read_latest_plan_subgoals(db_path, job.id)
+    by_id = {sg["id"]: sg for sg in subgoals}
+    assert by_id[1]["done"] is True
+    assert by_id[2]["done"] is True
+    assert by_id[3]["done"] is True
+
+    events = _read_event_rows(db_path, job.id)
+    updated = [e for e in events if e["kind"] == "plan_subgoals_updated"]
+    assert len(updated) == 1
+    payload = json.loads(updated[0]["payload_json"])
+    assert sorted(payload["closed"]) == [1, 2, 3]
+
+
+def test_synthesize_inconclusive_status_keeps_subgoal_open(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """An ``inconclusive`` status leaves the subgoal ``done=False``."""
+    _seed_findings(job, [0.7])
+    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
+    fence = (
+        '\n```json\n'
+        '{"subgoal_status": {"1": "confirmed", "2": "inconclusive", "3": "refuted"}}'
+        '\n```\n'
+    )
+    router = _StubRouter(content=body + fence)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    subgoals = _read_latest_plan_subgoals(db_path, job.id)
+    by_id = {sg["id"]: sg for sg in subgoals}
+    assert by_id[1]["done"] is True
+    assert by_id[2]["done"] is False
+    assert by_id[3]["done"] is True
+
+    events = _read_event_rows(db_path, job.id)
+    updated = [e for e in events if e["kind"] == "plan_subgoals_updated"]
+    assert len(updated) == 1
+    payload = json.loads(updated[0]["payload_json"])
+    assert payload["inconclusive"] == [2]
+
+
+def test_synthesize_missing_fence_emits_warning_and_skips_plan_bump(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """No trailing JSON fence: warning emitted, report still written, plan unchanged."""
+    _seed_findings(job, [0.6])
+    router = _StubRouter(content="# Report\n\nNo fence at all.\n")
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    assert (job.root / "report.md").exists()
+    assert _read_latest_plan_version(db_path, job.id) == multi_subgoal_plan.version
+
+    events = _read_event_rows(db_path, job.id)
+    warns = [e for e in events if e["kind"] == "warning"]
+    payloads = [json.loads(e["payload_json"]) for e in warns]
+    assert any(p.get("stage") == "subgoal_status" for p in payloads)
+
+    updated = [e for e in events if e["kind"] == "plan_subgoals_updated"]
+    assert updated == []
+
+
+def test_synthesize_malformed_fence_emits_warning_and_skips_plan_bump(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """A trailing JSON fence with invalid JSON is tolerated: warn + no plan bump."""
+    _seed_findings(job, [0.6])
+    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
+    fence = '\n```json\n{not valid json\n```\n'
+    router = _StubRouter(content=body + fence)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    # Fence still gets stripped so it doesn't pollute report.md.
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "not valid json" not in report
+    assert "```json" not in report
+
+    assert _read_latest_plan_version(db_path, job.id) == multi_subgoal_plan.version
+
+    events = _read_event_rows(db_path, job.id)
+    warns = [e for e in events if e["kind"] == "warning"]
+    payloads = [json.loads(e["payload_json"]) for e in warns]
+    assert any(p.get("stage") == "subgoal_status" for p in payloads)
+
+
+def test_synthesize_passes_subgoals_in_context(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """The context payload sent to the model includes ``subgoals``."""
+    _seed_findings(job, [0.6])
+    router = _StubRouter()
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    assert router.calls
+    _tier, args, _kwargs = router.calls[0]
+    payload = json.loads(args[0])
+    assert "subgoals" in payload
+    assert sorted(s["id"] for s in payload["subgoals"]) == [1, 2, 3]
+    assert all(s["done"] is False for s in payload["subgoals"])
+
+
+def test_synthesize_repeat_status_skips_plan_version_bump(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """Repeated identical status maps must NOT bump the plan version.
+
+    The synth heuristic fires every 25 tasks; on a 10K-task run it would
+    fire 400 times. If every fire bumped the plan version we'd burn
+    through MAX_PLAN_VERSIONS (200) long before the plan actually changed.
+    """
+    _seed_findings(job, [0.7])
+    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
+    fence = (
+        '\n```json\n'
+        '{"subgoal_status": {"1": "confirmed", "2": "inconclusive", "3": "confirmed"}}'
+        '\n```\n'
+    )
+    router = _StubRouter(content=body + fence)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+    version_after_first = _read_latest_plan_version(db_path, job.id)
+    assert version_after_first == multi_subgoal_plan.version + 1
+
+    # Second pass with the SAME status_map: no actual subgoal flip happens,
+    # so no new plan version should be persisted.
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+    version_after_second = _read_latest_plan_version(db_path, job.id)
+    assert version_after_second == version_after_first
+
+    events = _read_event_rows(db_path, job.id)
+    updated = [e for e in events if e["kind"] == "plan_subgoals_updated"]
+    assert len(updated) == 1
+
+
+def test_synthesize_accepts_fence_with_space_before_json_lang(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """The fence regex tolerates ``` ``` json``` (with whitespace).
+
+    The synthesizer.md prompt's worked example renders the trailing fence
+    with a space (``` ``` json``) so the outer documentation fence stays
+    closeable. Models occasionally mimic the example over the instruction;
+    parsing must accept either form.
+    """
+    _seed_findings(job, [0.7])
+    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
+    fence = (
+        '\n``` json\n'
+        '{"subgoal_status": {"1": "confirmed", "2": "confirmed", "3": "confirmed"}}'
+        '\n```\n'
+    )
+    router = _StubRouter(content=body + fence)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "subgoal_status" not in report
+
+    subgoals = _read_latest_plan_subgoals(db_path, job.id)
+    assert all(sg["done"] is True for sg in subgoals)
