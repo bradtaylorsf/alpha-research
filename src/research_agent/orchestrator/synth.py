@@ -31,6 +31,7 @@ import json
 import logging
 import re
 import sqlite3
+from importlib.resources import files
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict
@@ -55,6 +56,32 @@ logger = logging.getLogger(__name__)
 
 TOP_N_FINDINGS = 50
 FINAL_TOP_N = 200
+
+_FOLLOWUP_RECIPES: str | None = None
+_FOLLOWUP_RECIPES_WARN_LOGGED = False
+
+
+def _load_followup_recipes() -> str:
+    """Read ``prompts/followup_recipes.md`` raw and cache the body.
+
+    The file is reference data (no YAML frontmatter), so the prompt loader
+    is bypassed. A missing file is tolerated — synth must keep running
+    even if an operator deletes the catalog. The WARN log fires once.
+    """
+    global _FOLLOWUP_RECIPES, _FOLLOWUP_RECIPES_WARN_LOGGED
+    if _FOLLOWUP_RECIPES is not None:
+        return _FOLLOWUP_RECIPES
+    try:
+        body = (files("research_agent.prompts") / "followup_recipes.md").read_text(
+            encoding="utf-8"
+        )
+    except (FileNotFoundError, OSError) as exc:
+        if not _FOLLOWUP_RECIPES_WARN_LOGGED:
+            logger.warning("synth: followup_recipes.md unavailable: %s", exc)
+            _FOLLOWUP_RECIPES_WARN_LOGGED = True
+        body = ""
+    _FOLLOWUP_RECIPES = body
+    return body
 
 _BUDGET_STUB_REPORT = (
     "# Report (truncated)\n\n"
@@ -195,6 +222,7 @@ def _build_context(
     sources: dict[int, dict[str, Any]],
     prior: str | None,
     critique: str | None,
+    followup_recipes: str,
     final: bool = False,
 ) -> str:
     payload: dict[str, Any] = {
@@ -207,6 +235,7 @@ def _build_context(
         "sources": {str(k): v for k, v in sources.items()},
         "prior_synthesis": prior,
         "critique": critique,
+        "followup_recipes": followup_recipes,
     }
     if final:
         payload["final"] = True
@@ -324,6 +353,7 @@ async def _do_synthesis(
     sources = _load_sources_for(job, findings)
     prior = _load_prior_synthesis(job)
     critique = _load_latest_critique(job)
+    followup_recipes = _load_followup_recipes()
 
     context = _build_context(
         goal=job.goal,
@@ -332,6 +362,7 @@ async def _do_synthesis(
         sources=sources,
         prior=prior,
         critique=critique,
+        followup_recipes=followup_recipes,
         final=final,
     )
 
@@ -651,6 +682,7 @@ async def final_synthesis_after_cap(
     sources = _load_sources_for(job, findings)
     prior = _load_prior_synthesis(job)
     critique = _load_latest_critique(job)
+    followup_recipes = _load_followup_recipes()
 
     context = _build_context(
         goal=job.goal,
@@ -659,6 +691,7 @@ async def final_synthesis_after_cap(
         sources=sources,
         prior=prior,
         critique=critique,
+        followup_recipes=followup_recipes,
         final=True,
     )
 
