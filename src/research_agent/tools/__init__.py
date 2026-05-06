@@ -267,6 +267,45 @@ def _smoke_fec(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_congress(query: str) -> str:
+    """Smoke wrapper: Congress.gov v3 bill search returning the top-5 hits.
+
+    Per AC: ``research _smoke-tool congress "Inflation Reduction Act"`` should
+    surface bill rows with title, congress + session, sponsor, latest action,
+    and permalink so an operator can eyeball whether the v3 API is reachable
+    and the api.data.gov key is healthy.
+    """
+    from research_agent.tools import congress
+
+    async def _run() -> str:
+        results = await congress.search(query, kind="bill", max_results=5)
+        if not results:
+            return f"congress search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            congress_no = hit.extras.get("congress") or "?"
+            session = hit.extras.get("session") or "?"
+            bill_type = (hit.extras.get("bill_type") or "?").upper()
+            number = hit.extras.get("bill_number") or "?"
+            sponsor = hit.extras.get("sponsor") or "?"
+            latest = hit.extras.get("latest_action") or "?"
+            latest_date = hit.extras.get("latest_action_date") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title}\n"
+                f"  {bill_type} {number} — {congress_no}th Congress (Sess. {session}) —"
+                f" Sponsor: {sponsor}\n"
+                f"  Latest: {latest_date} — {latest}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_news(query: str) -> str:
     """Smoke wrapper: aggregate news hits and report per-source contributions.
 
@@ -476,6 +515,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "fedregister": _smoke_fedregister,
     "nonprofits": _smoke_nonprofits,
     "fec": _smoke_fec,
+    "congress": _smoke_congress,
     "news": _smoke_news,
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,
