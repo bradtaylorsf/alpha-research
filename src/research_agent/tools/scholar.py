@@ -26,7 +26,6 @@ import logging
 import re
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -45,7 +44,6 @@ _KIND_TO_SDT: dict[str, str] = {"case_law": "2006"}
 _VALID_KINDS = frozenset({"case_law", "articles"})
 
 _RATE_LIMIT_INTERVAL = 1.0
-_CACHE_DIR = Path("corpus/.cache/scholar")
 
 # Per-query cost on SERPAPI's $75/mo / 5k-search plan. Surface via doctor.py
 # so an operator sees the spend trajectory before launching a goal.
