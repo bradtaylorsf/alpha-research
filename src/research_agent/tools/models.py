@@ -40,6 +40,7 @@ SourceKind = Literal[
     "lda",
     "usaspending",
     "littlesis",
+    "opencorporates",
 ]
 
 
