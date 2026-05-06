@@ -335,20 +335,34 @@ def update_subgoal_done(job: Job, status_map: dict[int, str]) -> Plan:
     when the status is ``confirmed`` or ``refuted`` and ``done=False`` when
     it is ``inconclusive``. Subgoals whose id is not in the map are left
     untouched. A new plan version is persisted under :data:`MAX_PLAN_VERSIONS`.
+
+    When ``status_map`` would not actually flip any subgoal's ``done`` flag
+    (the synthesizer reported the same statuses again on a later heuristic
+    fire), this is a no-op: no version bump, no write, no emit. The synth
+    heuristic fires every 25 tasks — bumping unconditionally would burn
+    through the 200-version cap on any moderately long run and break the
+    very goal_complete termination this module exists to enable.
     """
-    _assert_under_cap(job)
     plan = _load_latest_plan(job)
 
     closing = {"confirmed", "refuted"}
     prior_done: dict[int, bool] = {sg.id: sg.done for sg in plan.subgoals}
-    next_version = plan.version + 1
-    new_subgoals: list[Subgoal] = []
+    new_done_by_id: dict[int, bool] = {}
     for sg in plan.subgoals:
         if sg.id in status_map:
-            new_done = status_map[sg.id] in closing
-            new_subgoals.append(sg.model_copy(update={"done": new_done}))
-        else:
-            new_subgoals.append(sg)
+            new_done_by_id[sg.id] = status_map[sg.id] in closing
+
+    if not any(new_done_by_id[sid] != prior_done[sid] for sid in new_done_by_id):
+        return plan
+
+    _assert_under_cap(job)
+    next_version = plan.version + 1
+    new_subgoals: list[Subgoal] = [
+        sg.model_copy(update={"done": new_done_by_id[sg.id]})
+        if sg.id in new_done_by_id
+        else sg
+        for sg in plan.subgoals
+    ]
 
     new_plan = plan.model_copy(update={"version": next_version, "subgoals": new_subgoals})
     write_plan(job, new_plan.model_dump())
@@ -387,11 +401,16 @@ def reopen_subgoals(job: Job, ids: list[int]) -> Plan:
 
     Used by the critique pass when synthesis closed subgoals prematurely —
     the critic flags them and we reopen them so the loop keeps working.
+    No-op (no version bump) when every targeted subgoal is already
+    ``done=False``, mirroring :func:`update_subgoal_done`.
     """
-    _assert_under_cap(job)
     plan = _load_latest_plan(job)
 
     target_ids = set(ids)
+    if not any(sg.done for sg in plan.subgoals if sg.id in target_ids):
+        return plan
+
+    _assert_under_cap(job)
     next_version = plan.version + 1
     new_subgoals = [
         sg.model_copy(update={"done": False}) if sg.id in target_ids else sg

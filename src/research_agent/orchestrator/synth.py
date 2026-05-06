@@ -213,7 +213,9 @@ def _build_context(
     return json.dumps(payload, sort_keys=True, default=str)
 
 
-_SUBGOAL_STATUS_FENCE_RE = re.compile(r"```json\s*\n(.*?)\n```\s*$", re.DOTALL)
+_SUBGOAL_STATUS_FENCE_RE = re.compile(
+    r"```[ \t]*json[ \t]*\n(.*?)\n```\s*$", re.DOTALL
+)
 
 
 def _extract_subgoal_status(

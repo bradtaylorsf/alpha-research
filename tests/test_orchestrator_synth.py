@@ -665,3 +665,64 @@ def test_synthesize_passes_subgoals_in_context(
     assert "subgoals" in payload
     assert sorted(s["id"] for s in payload["subgoals"]) == [1, 2, 3]
     assert all(s["done"] is False for s in payload["subgoals"])
+
+
+def test_synthesize_repeat_status_skips_plan_version_bump(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """Repeated identical status maps must NOT bump the plan version.
+
+    The synth heuristic fires every 25 tasks; on a 10K-task run it would
+    fire 400 times. If every fire bumped the plan version we'd burn
+    through MAX_PLAN_VERSIONS (200) long before the plan actually changed.
+    """
+    _seed_findings(job, [0.7])
+    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
+    fence = (
+        '\n```json\n'
+        '{"subgoal_status": {"1": "confirmed", "2": "inconclusive", "3": "confirmed"}}'
+        '\n```\n'
+    )
+    router = _StubRouter(content=body + fence)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+    version_after_first = _read_latest_plan_version(db_path, job.id)
+    assert version_after_first == multi_subgoal_plan.version + 1
+
+    # Second pass with the SAME status_map: no actual subgoal flip happens,
+    # so no new plan version should be persisted.
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+    version_after_second = _read_latest_plan_version(db_path, job.id)
+    assert version_after_second == version_after_first
+
+    events = _read_event_rows(db_path, job.id)
+    updated = [e for e in events if e["kind"] == "plan_subgoals_updated"]
+    assert len(updated) == 1
+
+
+def test_synthesize_accepts_fence_with_space_before_json_lang(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """The fence regex tolerates ``` ``` json``` (with whitespace).
+
+    The synthesizer.md prompt's worked example renders the trailing fence
+    with a space (``` ``` json``) so the outer documentation fence stays
+    closeable. Models occasionally mimic the example over the instruction;
+    parsing must accept either form.
+    """
+    _seed_findings(job, [0.7])
+    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
+    fence = (
+        '\n``` json\n'
+        '{"subgoal_status": {"1": "confirmed", "2": "confirmed", "3": "confirmed"}}'
+        '\n```\n'
+    )
+    router = _StubRouter(content=body + fence)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "subgoal_status" not in report
+
+    subgoals = _read_latest_plan_subgoals(db_path, job.id)
+    assert all(sg["done"] is True for sg in subgoals)
