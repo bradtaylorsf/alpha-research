@@ -60,6 +60,25 @@ class Gap(BaseModel):
     area: str | None = None
 
 
+class PaidOpportunity(BaseModel):
+    """A paid resource that would close a specific evidenced gap.
+
+    ``service`` and ``cost_range`` come verbatim from the
+    ``paid_unblock_recipes`` catalog (e.g., "LinkedIn Premium",
+    "$60–$150/mo"); ``gap`` ties the recommendation back to a concrete
+    finding/subject; ``tier`` distinguishes "the paid resource is the
+    only realistic path" (``high``) from "a public alternative may
+    suffice" (``low``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    service: str = Field(min_length=1)
+    cost_range: str = Field(min_length=1)
+    gap: str = Field(min_length=1)
+    tier: Literal["high", "low"]
+
+
 class CritiqueOutput(BaseModel):
     """Structured critique consumed by the loop + the planner.
 
@@ -75,6 +94,7 @@ class CritiqueOutput(BaseModel):
     suggested_subgoals: list[str] = Field(default_factory=list)
     confidence_concerns: list[str] = Field(default_factory=list)
     premature_subgoals: list[int] = Field(default_factory=list)
+    paid_opportunities: list[PaidOpportunity] = Field(default_factory=list)
     should_replan: bool = False
 
     version: int = 0
@@ -175,6 +195,7 @@ def _build_context(
     sources: dict[int, dict[str, Any]],
     synthesis: str | None,
     prior_critique: str | None,
+    paid_unblock_recipes: str,
 ) -> str:
     payload: dict[str, Any] = {
         "goal": goal,
@@ -182,6 +203,7 @@ def _build_context(
         "sources": {str(k): v for k, v in sources.items()},
         "synthesis": synthesis,
         "prior_critique": prior_critique,
+        "paid_unblock_recipes": paid_unblock_recipes,
     }
     return json.dumps(payload, sort_keys=True, default=str)
 
@@ -235,6 +257,15 @@ def _render_critique_md(payload: CritiqueOutput) -> str:
     else:
         lines.append("- (none)\n")
 
+    lines.append("\n## Paid resource opportunities\n")
+    if payload.paid_opportunities:
+        for opp in payload.paid_opportunities:
+            lines.append(
+                f"- **{opp.tier}**: {opp.service} ({opp.cost_range}) — {opp.gap}\n"
+            )
+    else:
+        lines.append("- (none)\n")
+
     return "".join(lines)
 
 
@@ -245,6 +276,7 @@ def _stub_output() -> CritiqueOutput:
         unsupported_claims=[],
         suggested_subgoals=[],
         confidence_concerns=[],
+        paid_opportunities=[],
         should_replan=False,
         version=0,
         model="budget_capped",
@@ -277,6 +309,11 @@ async def critique(
     findings = _load_top_findings(job, TOP_N_FINDINGS)
     sources = _load_sources_for(job, findings)
     prior = _load_prior_critique(job)
+    # Reuse synth's loader so the catalog cache + missing-file behavior
+    # stays in one place.
+    from research_agent.orchestrator.synth import _load_paid_unblock_recipes
+
+    paid_unblock_recipes = _load_paid_unblock_recipes()
 
     context = _build_context(
         goal=job.goal,
@@ -284,6 +321,7 @@ async def critique(
         sources=sources,
         synthesis=latest_synthesis,
         prior_critique=prior,
+        paid_unblock_recipes=paid_unblock_recipes,
     )
 
     rendered = load_prompt("critic", job=job, goal=job.goal)
@@ -373,5 +411,6 @@ __all__ = [
     "TOP_N_FINDINGS",
     "CritiqueOutput",
     "Gap",
+    "PaidOpportunity",
     "critique",
 ]
