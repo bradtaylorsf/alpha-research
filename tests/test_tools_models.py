@@ -29,6 +29,7 @@ EXPECTED_SOURCE_KINDS = (
     "fec",
     "courtlistener",
     "fedregister",
+    "nonprofits",
 )
 
 
