@@ -108,6 +108,15 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
             " when unset. Free signup at https://api.data.gov/signup/."
         ),
     ),
+    EnvKey(
+        name="LDA_API_KEY",
+        required=False,
+        description=(
+            "Senate Lobbying Disclosure Act API key (free, lda.senate.gov)."
+            " Anonymous access works for tools/lda.py; setting a registered"
+            " key raises rate limits. Sent as `Authorization: Token <key>`."
+        ),
+    ),
 )
 
 

@@ -37,6 +37,7 @@ SourceKind = Literal[
     "fedregister",
     "nonprofits",
     "congress",
+    "lda",
 ]
 
 
