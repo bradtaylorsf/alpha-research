@@ -216,6 +216,57 @@ def _smoke_nonprofits(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_fec(query: str) -> str:
+    """Smoke wrapper: FEC OpenFEC candidate search + top-hit cycle totals.
+
+    Per AC: ``research _smoke-tool fec "George Santos"`` should surface the
+    candidate record + cycle totals. Lists the top-5 search hits, then
+    follows up on the top hit with ``fetch()`` so an operator can eyeball
+    receipts / disbursements / cash-on-hand alongside the candidate record.
+    """
+    from research_agent.tools import fec
+
+    async def _run() -> str:
+        results = await fec.search(query, kind="candidates", max_results=5)
+        if not results:
+            return f"fec search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            cand_id = hit.extras.get("candidate_id") or "?"
+            party = hit.extras.get("party") or "?"
+            state = hit.extras.get("state") or "?"
+            office = hit.extras.get("office") or "?"
+            cycles = hit.extras.get("election_years") or []
+            cycles_str = ", ".join(str(c) for c in cycles) if cycles else "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {cand_id} — {party} — {state} — {office} —"
+                f" cycles {cycles_str}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+
+        top = results[0]
+        source = await fec.fetch(top.url)
+        if source is None:
+            lines.append(f"\nfetch({top.url}) returned None — cycle totals unavailable")
+        else:
+            totals = source.metadata.get("cycle_totals") or {}
+            cycle = totals.get("cycle")
+            header = f"\nCycle totals for {top.title} ({cycle})" if cycle else (
+                f"\nCycle totals for {top.title}"
+            )
+            lines.append(header)
+            lines.append(f"  receipts: {totals.get('receipts')}")
+            lines.append(f"  disbursements: {totals.get('disbursements')}")
+            lines.append(f"  cash_on_hand_end_period: {totals.get('cash_on_hand_end_period')}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_news(query: str) -> str:
     """Smoke wrapper: aggregate news hits and report per-source contributions.
 
@@ -424,6 +475,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "courtlistener": _smoke_courtlistener,
     "fedregister": _smoke_fedregister,
     "nonprofits": _smoke_nonprofits,
+    "fec": _smoke_fec,
     "news": _smoke_news,
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,
