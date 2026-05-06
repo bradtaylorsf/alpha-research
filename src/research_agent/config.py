@@ -90,6 +90,15 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
             " unaffected (its stdout is a log file, so the bar stays dormant)."
         ),
     ),
+    EnvKey(
+        name="COURTLISTENER_API_TOKEN",
+        required=False,
+        description=(
+            "CourtListener API token (free w/ signup). Required by"
+            " tools/courtlistener.py — anonymous tier is rate-limited to the"
+            " point of unusability."
+        ),
+    ),
 )
 
 
