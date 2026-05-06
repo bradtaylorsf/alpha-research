@@ -216,6 +216,43 @@ def _smoke_nonprofits(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_fec(query: str) -> str:
+    """Smoke wrapper: FEC OpenFEC candidate search returning the top-5 hits.
+
+    Per AC: ``research _smoke-tool fec "George Santos"`` should surface the
+    candidate record + cycle totals. Each line shows the candidate name,
+    candidate ID, party, state, office, election years, permalink, and
+    snippet so an operator can eyeball whether the OpenFEC API is reachable
+    and the api.data.gov key is healthy.
+    """
+    from research_agent.tools import fec
+
+    async def _run() -> str:
+        results = await fec.search(query, kind="candidates", max_results=5)
+        if not results:
+            return f"fec search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            cand_id = hit.extras.get("candidate_id") or "?"
+            party = hit.extras.get("party") or "?"
+            state = hit.extras.get("state") or "?"
+            office = hit.extras.get("office") or "?"
+            cycles = hit.extras.get("election_years") or []
+            cycles_str = ", ".join(str(c) for c in cycles) if cycles else "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {cand_id} — {party} — {state} — {office} —"
+                f" cycles {cycles_str}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_news(query: str) -> str:
     """Smoke wrapper: aggregate news hits and report per-source contributions.
 
@@ -424,6 +461,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "courtlistener": _smoke_courtlistener,
     "fedregister": _smoke_fedregister,
     "nonprofits": _smoke_nonprofits,
+    "fec": _smoke_fec,
     "news": _smoke_news,
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,
