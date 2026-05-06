@@ -118,7 +118,7 @@ def _entity_attrs(item: Any) -> dict[str, Any]:
     return item
 
 
-def _entity_permalink(entity_id: int | str) -> str:
+def _entity_permalink(entity_id: Any) -> str:
     return f"{_SITE_BASE}/entity/{entity_id}"
 
 
