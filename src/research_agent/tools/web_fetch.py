@@ -243,11 +243,13 @@ async def _fetch_via_playwright(url: str, timeout: float) -> str | None:
 
 
 def _spawn_archive_task(source: Source) -> asyncio.Task[None] | None:
-    """Kick off ``archive.save`` and write the result back onto ``source``.
+    """Kick off Wayback save (with archive.today fallback) and write the
+    result back onto ``source``.
 
-    Returns the spawned task so callers (and tests) can opt into awaiting it,
-    but the standard contract is fire-and-forget — Wayback failure never
-    blocks ``fetch`` from returning.
+    Wayback Save Page Now is the primary; on None (404, robots-block, repeated
+    timeout) we try archive.today before giving up. Both stay inside the same
+    fire-and-forget background task so ``fetch`` still returns immediately.
+    Returns the spawned task so tests can opt into awaiting it.
     """
     try:
         loop = asyncio.get_running_loop()
@@ -259,9 +261,25 @@ def _spawn_archive_task(source: Source) -> asyncio.Task[None] | None:
             archive_url = await archive.save(source.url)
         except Exception as exc:  # noqa: BLE001
             logger.debug("wayback save raised for %s: %s", source.url, exc)
-            return
+            archive_url = None
+
+        if archive_url is None:
+            try:
+                archive_url = await archive.archive_today_save(source.url)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "archive.today save raised for %s: %s", source.url, exc
+                )
+                archive_url = None
+
         if archive_url:
             source.archive_url = archive_url
+            return
+
+        logger.warning(
+            "archive_failed url=%s wayback=failed archive_today=failed",
+            source.url,
+        )
 
     return loop.create_task(_runner())
 
