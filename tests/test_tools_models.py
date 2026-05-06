@@ -28,6 +28,7 @@ EXPECTED_SOURCE_KINDS = (
     "sec",
     "fec",
     "courtlistener",
+    "fedregister",
 )
 
 

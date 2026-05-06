@@ -146,6 +146,43 @@ def _smoke_courtlistener(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_fedregister(query: str) -> str:
+    """Smoke wrapper: Federal Register search returning the top-5 hits.
+
+    Per AC #5: ``research _smoke-tool fedregister "AI executive order"`` should
+    surface federal rules / proposed rules / notices. Each line shows the
+    title, agencies, document type, publication date, significant flag,
+    permalink, and a short abstract snippet so an operator can eyeball
+    whether the Federal Register API is reachable.
+    """
+    from research_agent.tools import fedregister
+
+    async def _run() -> str:
+        results = await fedregister.search(query, max_results=5)
+        if not results:
+            return f"fedregister search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            agencies = ", ".join(hit.extras.get("agencies") or []) or "?"
+            doc_type = hit.extras.get("document_type") or "?"
+            pub_date = (
+                hit.published_at.date().isoformat() if hit.published_at else "?"
+            )
+            significant = hit.extras.get("significant")
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {agencies} — {doc_type} — {pub_date} —"
+                f" significant={significant}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_news(query: str) -> str:
     """Smoke wrapper: aggregate news hits and report per-source contributions.
 
@@ -352,6 +389,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "arxiv": _smoke_arxiv,
     "edgar": _smoke_edgar,
     "courtlistener": _smoke_courtlistener,
+    "fedregister": _smoke_fedregister,
     "news": _smoke_news,
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,

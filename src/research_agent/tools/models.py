@@ -34,6 +34,7 @@ SourceKind = Literal[
     "sec",
     "fec",
     "courtlistener",
+    "fedregister",
 ]
 
 
