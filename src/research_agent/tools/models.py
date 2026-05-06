@@ -23,6 +23,7 @@ SourceKind = Literal[
     "web",
     "pdf",
     "audio",
+    "image",
     "github",
     "arxiv",
     "news",

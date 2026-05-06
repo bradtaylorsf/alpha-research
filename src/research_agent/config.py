@@ -65,6 +65,15 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         ),
     ),
     EnvKey(
+        name="RESEARCH_OCR_VLM_ESCALATION",
+        required=False,
+        description=(
+            "Set to '1' to enable Opus 4.7 vision escalation for image OCR when"
+            " Tesseract and the local VLM both fail. Off by default — costs real"
+            " money; emits an ocr_vlm_escalation WARN event when fired."
+        ),
+    ),
+    EnvKey(
         name="YOUTUBE_API_KEY",
         required=False,
         description=(
