@@ -146,6 +146,41 @@ def _smoke_courtlistener(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_scholar(query: str) -> str:
+    """Smoke wrapper: SERPAPI Google Scholar (case law) returning the top-5 hits.
+
+    Per AC: ``research _smoke-tool scholar "first amendment retaliation Ninth
+    Circuit"`` should surface case-law hits. Each line shows the case name,
+    court / journal summary, year, cited-by count, permalink, and snippet so
+    an operator can eyeball whether the SERPAPI key is healthy and the
+    Scholar engine is reachable.
+    """
+    from research_agent.tools import scholar
+
+    async def _run() -> str:
+        results = await scholar.search(query, kind="case_law", max_results=5)
+        if not results:
+            return f"scholar search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            court_or_journal = hit.extras.get("court_or_journal") or "?"
+            year = (
+                hit.published_at.year if hit.published_at is not None else "?"
+            )
+            cited_by = hit.extras.get("citation") or 0
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {court_or_journal} — {year} — cited-by {cited_by}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_fedregister(query: str) -> str:
     """Smoke wrapper: Federal Register search returning the top-5 hits.
 
@@ -1011,6 +1046,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "calaccess": _smoke_calaccess,
     "edgar": _smoke_edgar,
     "courtlistener": _smoke_courtlistener,
+    "scholar": _smoke_scholar,
     "fedregister": _smoke_fedregister,
     "nonprofits": _smoke_nonprofits,
     "fec": _smoke_fec,

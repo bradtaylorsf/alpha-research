@@ -127,6 +127,15 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
             " pricing £2,250–£12,000/yr."
         ),
     ),
+    EnvKey(
+        name="SERPAPI_KEY",
+        required=False,
+        description=(
+            "SERPAPI key for tools/scholar.py (Google Scholar engine, case law"
+            " + academic). Plans start at $75/mo for 5k searches across all"
+            " engines; per-query ≈ $0.015. Sign up at https://serpapi.com/."
+        ),
+    ),
 )
 
 
