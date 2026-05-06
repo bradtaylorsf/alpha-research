@@ -78,6 +78,38 @@ def _smoke_arxiv(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_edgar(query: str) -> str:
+    """Smoke wrapper: EDGAR full-text search filtered to recent 8-K filings.
+
+    Per AC #5: ``research _smoke-tool edgar "Cisco 8-K cybersecurity"`` should
+    surface recent material-event filings. Each line shows the form, company,
+    permalink, file date, and a short snippet so an operator can eyeball
+    whether the SEC FTS index is reachable and the UA gate is healthy.
+    """
+    from research_agent.tools import edgar
+
+    async def _run() -> str:
+        results = await edgar.search(query, form_type="8-K", max_results=5)
+        if not results:
+            return f"edgar search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            company = hit.extras.get("company") or "?"
+            form = hit.extras.get("form") or "?"
+            file_date = (
+                hit.published_at.date().isoformat() if hit.published_at else "?"
+            )
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {form} {company}\n  {hit.url}\n  {file_date} {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_news(query: str) -> str:
     """Smoke wrapper: aggregate news hits and report per-source contributions.
 
@@ -282,6 +314,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "web_fetch": _smoke_web_fetch,
     "local_corpus": _smoke_local_corpus,
     "arxiv": _smoke_arxiv,
+    "edgar": _smoke_edgar,
     "news": _smoke_news,
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,
