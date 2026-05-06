@@ -43,6 +43,7 @@ SourceKind = Literal[
     "opencorporates",
     "sanctions",
     "sos",
+    "licensing",
 ]
 
 
