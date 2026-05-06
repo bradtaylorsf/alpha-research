@@ -183,6 +183,39 @@ def _smoke_fedregister(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_nonprofits(query: str) -> str:
+    """Smoke wrapper: ProPublica Nonprofit Explorer search returning the top-5 hits.
+
+    Per AC: ``research _smoke-tool nonprofits "Heritage Foundation"`` should
+    surface 501(c) organizations. Each line shows the org name, EIN,
+    city/state, NTEE code, permalink, and snippet so an operator can
+    eyeball whether the public API is reachable.
+    """
+    from research_agent.tools import nonprofits
+
+    async def _run() -> str:
+        results = await nonprofits.search(query, max_results=5)
+        if not results:
+            return f"nonprofits search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            ein = hit.extras.get("ein") or "?"
+            city = hit.extras.get("city") or "?"
+            state = hit.extras.get("state") or "?"
+            ntee = hit.extras.get("ntee_code") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — EIN {ein} — {city}, {state} — NTEE {ntee}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_news(query: str) -> str:
     """Smoke wrapper: aggregate news hits and report per-source contributions.
 
@@ -390,6 +423,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "edgar": _smoke_edgar,
     "courtlistener": _smoke_courtlistener,
     "fedregister": _smoke_fedregister,
+    "nonprofits": _smoke_nonprofits,
     "news": _smoke_news,
     "reddit": _smoke_reddit,
     "pdf": _smoke_pdf,
