@@ -294,6 +294,24 @@ def _is_pdf_content_type(content_type: str | None) -> bool:
     return content_type.split(";", 1)[0].strip().lower() == _PDF_CONTENT_TYPE
 
 
+def _is_audio_url(url: str) -> bool:
+    """Path-based audio detection. Mirrors :func:`_is_pdf_url`."""
+    from research_agent.tools import audio
+
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    return any(path.endswith(ext) for ext in audio.SUPPORTED_AUDIO_EXTENSIONS)
+
+
+def _is_audio_content_type(content_type: str | None) -> bool:
+    from research_agent.tools import audio
+
+    if not content_type:
+        return False
+    head = content_type.split(";", 1)[0].strip().lower()
+    return head in audio.AUDIO_CONTENT_TYPES
+
+
 async def _build_pdf_source(
     url: str,
     *,
@@ -327,6 +345,45 @@ async def _build_pdf_source(
         raw_html=None,
         fetched_at=datetime.now(UTC),
         source_kind="pdf",
+        metadata=metadata,
+    )
+
+
+async def _build_audio_source(
+    url: str,
+    *,
+    status_code: int | None,
+    content: bytes | None,
+) -> Source | None:
+    """Run :func:`audio.transcribe` (or ``transcribe_from_bytes``) and wrap result.
+
+    Mirrors :func:`_build_pdf_source` — returns None when transcription
+    yielded no usable text (typically: no whisper backend installed) so the
+    web_fetch contract stays uniform.
+    """
+    from research_agent.tools import audio
+
+    if content:
+        suffix = audio._suffix_for(url)
+        text = audio.transcribe_from_bytes(content, suffix=suffix)
+    else:
+        text = await audio.transcribe(url)
+
+    if not text.strip():
+        return None
+
+    title = url.rsplit("/", 1)[-1] or url
+    metadata: dict[str, Any] = {
+        "fetched_via": "audio",
+        "status_code": status_code,
+    }
+    return Source(
+        url=url,
+        title=title,
+        cleaned_text=text,
+        raw_html=None,
+        fetched_at=datetime.now(UTC),
+        source_kind="audio",
         metadata=metadata,
     )
 
@@ -374,6 +431,15 @@ async def fetch(
             _spawn_archive_task(source)
         return source
 
+    # Same shortcut for ``.mp3`` / ``.m4a`` / ``.wav`` / ``.ogg`` / ``.flac``
+    # URLs — trafilatura would just see binary data, and httpx download +
+    # transcribe gets handled inside the audio module.
+    if _is_audio_url(url):
+        source = await _build_audio_source(url, status_code=None, content=None)
+        if source is not None:
+            _spawn_archive_task(source)
+        return source
+
     html: str | None = None
     status_code: int | None = None
     content_bytes: bytes | None = None
@@ -390,6 +456,16 @@ async def fetch(
     # feed them straight into pdf.extract_from_bytes.
     if _is_pdf_content_type(content_type) and content_bytes:
         source = await _build_pdf_source(
+            url, status_code=status_code, content=content_bytes
+        )
+        if source is not None:
+            _spawn_archive_task(source)
+        return source
+
+    # Same idea for server-declared audio (some podcast CDNs don't publish a
+    # ``.mp3`` suffix). Reuse the bytes we already pulled.
+    if _is_audio_content_type(content_type) and content_bytes:
+        source = await _build_audio_source(
             url, status_code=status_code, content=content_bytes
         )
         if source is not None:
