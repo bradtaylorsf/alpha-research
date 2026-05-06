@@ -1,0 +1,66 @@
+name: Bug Report
+description: Report something that's broken — connector failure, daemon crash, unexpected output
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug report. The more concrete you can be, the
+        faster it gets fixed. Logs from `jobs/<id>/events.jsonl` are
+        especially useful — please paste a few relevant lines below.
+
+  - type: textarea
+    id: command
+    attributes:
+      label: What you ran
+      description: The exact `research start` command (or the steps to reproduce)
+      placeholder: |
+        uv run research start --skip-intake --local --goal "..." --max-tasks 30
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What you thought the agent would do
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead. Include any error messages.
+      placeholder: |
+        - Daemon exited after 3 tasks
+        - Last event: [ERROR] loop/task_failed ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: events
+    attributes:
+      label: Relevant events.jsonl lines
+      description: Copy/paste the last ~20 lines from `jobs/<id>/events.jsonl`. Redact anything sensitive.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Output of `uv run research doctor --json`, with secrets redacted.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "macOS 15.3, Python 3.13, LM Studio 0.3.x"
+    validations:
+      required: false
