@@ -54,6 +54,7 @@ EventKind = Literal[
     "prompt_loaded",
     "source_pruned",
     "pdf_vlm_escalation",
+    "ocr_vlm_escalation",
     "error",
     "warning",
 ]

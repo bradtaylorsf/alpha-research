@@ -17,6 +17,7 @@ EXPECTED_SOURCE_KINDS = (
     "web",
     "pdf",
     "audio",
+    "image",
     "github",
     "arxiv",
     "news",
