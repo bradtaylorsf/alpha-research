@@ -1,5 +1,11 @@
 # research-agent
 
+> 🚧 **Status: actively developed.** v1 baseline is shipped and validated
+> end-to-end ($0 local-mode runs produce real, sourced reports). The
+> [open issues](../../issues) are the roadmap — see
+> [#107](../../issues/107) for the connector buildout epic. Expect rough
+> edges; PRs and issue reports welcome.
+
 Autonomous CLI research agent. Run `research start` against a goal and walk
 away — the daemon plans, fetches, synthesizes, and cites until the goal is
 met (or the budget / time cap fires).
@@ -518,4 +524,6 @@ The Phase 5 (4-hour daemon-lifecycle soak) and Phase 6 (24-hour
 real-goal soak) gates have their own playbooks alongside it:
 `tests/integration/test_phase5_lifecycle.md` and
 `tests/integration/test_phase6_soak_24h.md`. Phase 6 also captures its
-results in `tests/integration/soak_24h_postmortem.md`.
+results in `tests/integration/soak_24h_postmortem.template.md` (copy
+the `.template.md` to a dated file for your specific run rather than
+overwriting the template).

@@ -278,7 +278,9 @@ sqlite3 data/index.sqlite \
 
 Each AC from #45 maps to a concrete shell check below. Run them in
 order; record PASS/FAIL with the actual values. The same values feed
-the results template (`santos_backtest_results.md`).
+the results template (`santos_backtest_results.template.md` — copy
+to a dated file like `santos_backtest_results-2026-05-06.md` for each
+run; the template stays unmodified in git).
 
 ```bash
 JOB_ROOT="jobs/$JOB_ID"

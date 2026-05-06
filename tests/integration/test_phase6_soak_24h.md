@@ -279,7 +279,8 @@ sqlite3 data/index.sqlite \
 Each acceptance criterion from #40 maps to a concrete shell check
 below. Run them in order; record PASS/FAIL with the actual values
 captured. The same values feed the postmortem template
-(`soak_24h_postmortem.md`).
+(`soak_24h_postmortem.template.md` — copy to a dated file for each
+soak; the template stays unmodified in git).
 
 ```bash
 JOB_ROOT="jobs/$JOB_ID"
