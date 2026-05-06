@@ -23,10 +23,15 @@ that's a viable spin-out.
 
 Data sources:
 
-* SDN Advanced XML — https://www.treasury.gov/ofac/downloads/sdn_advanced.xml
+* SDN XML (basic / flat ``sdnEntry`` schema) — https://www.treasury.gov/ofac/downloads/sdn.xml
 * OFAC Recent Actions — https://home.treasury.gov/policy-issues/financial-sanctions/recent-actions
 * EU Consolidated — https://webgate.ec.europa.eu/europeaid/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content
 * UK OFSI — https://ofsistorage.blob.core.windows.net/publishlive/2022format/ConList.csv
+
+The basic ``sdn.xml`` and the relational ``sdn_advanced.xml`` use entirely
+different schemas (the advanced one is built around ``<DistinctParty>`` /
+``<Profile>`` / ``<Identity>`` cross-references). Our parser targets the
+basic schema, so we point at ``sdn.xml`` rather than the advanced bundle.
 
 Indexed in a dedicated SQLite DB (``data/sanctions.sqlite`` by default,
 overridable via ``SANCTIONS_DB_PATH``) so refreshes can be done atomically
@@ -58,7 +63,11 @@ from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
 
-SDN_ADVANCED_URL = "https://www.treasury.gov/ofac/downloads/sdn_advanced.xml"
+SDN_XML_URL = "https://www.treasury.gov/ofac/downloads/sdn.xml"
+# Backwards-compat alias for callers / tests that imported the previous name.
+# The previous name was misleading: the parser only understands the basic
+# ``sdn.xml`` schema, not the relational ``sdn_advanced.xml`` schema.
+SDN_ADVANCED_URL = SDN_XML_URL
 EU_CONSOLIDATED_URL = (
     "https://webgate.ec.europa.eu/europeaid/fsd/fsf/public/files/"
     "xmlFullSanctionsList_1_1/content"
@@ -181,11 +190,17 @@ def _child_text(parent: ET.Element, name: str) -> str:
 
 
 def _parse_sdn_advanced(payload: bytes) -> list[dict[str, Any]]:
-    """Parse SDN advanced XML bytes and return a list of normalized entry dicts.
+    """Parse the basic OFAC ``sdn.xml`` payload into normalized entry dicts.
 
-    Tolerates both the real OFAC schema and the simplified shape we use in
-    fixtures: any element with a local-name of ``sdnEntry`` that contains
-    ``uid``, ``firstName``/``lastName``/``sdnType`` siblings is accepted.
+    Targets the flat ``<sdnEntry>`` schema served at
+    ``https://www.treasury.gov/ofac/downloads/sdn.xml`` — namespace stripped,
+    so it tolerates the live feed's ``ns="...exports/XML"`` namespace and the
+    bare-tag shape we use in fixtures. Any descendant whose local-name is
+    ``sdnEntry`` and that carries a ``<uid>`` plus a name is accepted.
+
+    The relational ``sdn_advanced.xml`` schema (``<DistinctParty>`` /
+    ``<Profile>`` / ``<Identity>``) is NOT parsed here — the function name is
+    legacy from before we re-pointed at the basic feed.
     """
     try:
         root = ET.fromstring(payload)
@@ -581,7 +596,7 @@ async def _ensure_index(
         if not force and _is_fresh(db_path):
             return db_path
 
-        sdn_status, sdn_bytes = await http_get(SDN_ADVANCED_URL)
+        sdn_status, sdn_bytes = await http_get(SDN_XML_URL)
         if sdn_status is None or sdn_status >= 400 or not sdn_bytes:
             logger.warning("sanctions SDN refresh failed (status=%s)", sdn_status)
             if db_path.exists():
@@ -996,6 +1011,7 @@ __all__ = [
     "fetch",
     "reset_for_tests",
     "search",
+    "SDN_XML_URL",
     "SDN_ADVANCED_URL",
     "EU_CONSOLIDATED_URL",
     "UK_OFSI_URL",
