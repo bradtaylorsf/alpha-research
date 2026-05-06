@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sanctionsList>
+  <entity>
+    <uid>EU-100501</uid>
+    <subjectType>Person</subjectType>
+    <firstName>Alexei</firstName>
+    <lastName>Mordashov</lastName>
+    <publishDate>2022-02-28</publishDate>
+    <programme>EU-RUSSIA</programme>
+    <nameAlias type="a.k.a.">Aleksei Aleksandrovich Mordashov</nameAlias>
+  </entity>
+  <entity>
+    <uid>EU-100502</uid>
+    <subjectType>Entity</subjectType>
+    <wholeName>Severstal PAO</wholeName>
+    <publishDate>2022-02-28</publishDate>
+    <programme>EU-RUSSIA</programme>
+  </entity>
+</sanctionsList>
