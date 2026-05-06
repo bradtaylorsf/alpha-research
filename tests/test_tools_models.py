@@ -32,6 +32,7 @@ EXPECTED_SOURCE_KINDS = (
     "nonprofits",
     "congress",
     "lda",
+    "usaspending",
 )
 
 
