@@ -65,6 +65,14 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         ),
     ),
     EnvKey(
+        name="YOUTUBE_API_KEY",
+        required=False,
+        description=(
+            "YouTube Data API v3 key — enables youtube.search; planner falls back"
+            " to SERP scraping (and ultimately web_search) when absent."
+        ),
+    ),
+    EnvKey(
         name="RESEARCH_DAEMON_PROGRESS",
         required=False,
         description=(
