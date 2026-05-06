@@ -700,6 +700,100 @@ def test_synthesize_repeat_status_skips_plan_version_bump(
     assert len(updated) == 1
 
 
+# ---------------------------------------------------------------------------
+# Recommended Human Follow-Ups (issue #112)
+# ---------------------------------------------------------------------------
+
+
+def test_followup_recipes_in_context(job: Job, db_path: Path, plan: Plan) -> None:
+    """The context payload sent to the synthesizer carries the recipe catalog."""
+    _seed_findings(job, [0.7])
+    router = _StubRouter()
+
+    asyncio.run(synthesize(job, plan, router=router))
+
+    assert router.calls
+    _tier, args, _kwargs = router.calls[0]
+    payload = json.loads(args[0])
+    recipes = payload.get("followup_recipes")
+    assert isinstance(recipes, str) and recipes, "recipes must be a non-empty string"
+    # Spot-check a few specific channels the catalog must surface.
+    assert "SEC TCR" in recipes or "Tip, Complaint, and Referral" in recipes
+    assert "HHS-OIG Hotline" in recipes
+    assert "licensing board" in recipes
+
+
+def test_synthesizer_prompt_requires_followups_section() -> None:
+    """The synthesizer prompt must instruct the model to emit the new section."""
+    body = prompts_loader.load_prompt("synthesizer", goal="x")
+    assert "Recommended Human Follow-Ups" in body
+    assert "Adversarial fact-check targets" in body
+    assert "FOIA candidates" in body
+    assert "Whistleblower" in body
+
+
+def test_critic_prompt_flags_missing_followups() -> None:
+    """The critic prompt must audit the follow-ups section for completeness."""
+    body = prompts_loader.load_prompt("critic")
+    assert "follow-ups" in body
+    assert "fact-check" in body
+
+
+def test_build_context_exposes_goal_and_licensing_board_guidance(
+    job: Job, db_path: Path
+) -> None:
+    """SBI Builders fixture-style structural check.
+
+    Feeds a goal naming a subject + agency through ``_build_context`` and
+    asserts the rendered JSON exposes both the goal and the recipe text
+    that should drive an Adversarial fact-check target (the spokesperson)
+    and a FOIA candidate (the licensing board's disciplinary file).
+    """
+    sbi_plan = Plan(
+        version=1,
+        objective="Investigate SBI Builders",
+        subgoals=[Subgoal(id=1, description="background", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=1,
+    )
+    findings = [
+        {
+            "id": 1,
+            "claim": "SBI Builders is licensed by the State Contractors Board",
+            "confidence": 0.9,
+            "source_ids": [1],
+            "tags": [],
+        }
+    ]
+    sources = {
+        1: {
+            "id": 1,
+            "url": "https://example.com/sbi",
+            "title": "SBI Builders licensing record",
+            "fetched_at": 0,
+            "archive_url": None,
+        }
+    }
+
+    context_json = synth_module._build_context(
+        goal="investigate SBI Builders",
+        plan=sbi_plan,
+        findings=findings,
+        sources=sources,
+        prior=None,
+        critique=None,
+        followup_recipes=synth_module._load_followup_recipes(),
+        final=False,
+    )
+    payload = json.loads(context_json)
+
+    assert payload["goal"] == "investigate SBI Builders"
+    recipes = payload["followup_recipes"]
+    assert "licensing board" in recipes
+    assert "spokesperson" in recipes or "press contact" in recipes
+    assert "FOIA" in recipes
+
+
 def test_synthesize_accepts_fence_with_space_before_json_lang(
     job: Job, db_path: Path, multi_subgoal_plan: Plan
 ) -> None:
