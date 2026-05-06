@@ -48,22 +48,36 @@ _LICENSE_NUMBER_RE = re.compile(r"^\d{6,8}$")
 # ---------------------------------------------------------------------------
 
 _STATE_RECIPES: dict[str, dict[str, Any]] = {
-    # California (CSLB) — fully wired. The "Check License II" form has a
-    # radio group that switches between "License Number" and "Business Name"
-    # search modes; the recipe formats ``{kind}`` into the radio selector so
-    # the connector can flip modes based on the query shape.
+    # California (CSLB) — fully wired against the live "Check License II"
+    # form. The form is **tabbed**: license-number search, business-name
+    # search, and personnel-name search each have their own input + submit
+    # button, with only the active tab's inputs visible. A tab button must
+    # be clicked first (the `tab_buttons_by_kind` mapping) to make the
+    # corresponding input visible before fill().
     "CA": {
         "host": "www.cslb.ca.gov",
         "search_url": (
             "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/CheckLicense.aspx"
         ),
-        "query_input": "input[name='txtLicNum']",
-        "submit_button": "input[name='btnSubmit']",
-        # Radio group: name="optSearch" with values "LIC" (license number)
-        # and "BUS" (business name). ``{kind}`` is replaced by "LIC" or "BUS"
-        # at call time.
-        "query_kind_selector": "input[name='optSearch'][value='{kind}']",
-        "query_kind_values": {"number": "LIC", "name": "BUS"},
+        # Tab buttons that switch which search input is visible.
+        # `LicNoButton` selects the license-number tab; `BusNameButton`
+        # selects the business-name tab. (HISNoButton / HISNameButton exist
+        # for salesperson registration searches and are not wired here.)
+        "tab_buttons_by_kind": {
+            "number": "#LicNoButton",
+            "name": "#BusNameButton",
+        },
+        # Per-mode input fields. ASP.NET WebForms naming — the visible IDs
+        # are stable; the `name` attributes are also the form-post keys.
+        "query_inputs_by_kind": {
+            "number": "#MainContent_LicNo",
+            "name": "#MainContent_NextName",
+        },
+        # Per-mode submit buttons — each tab has its own.
+        "submit_buttons_by_kind": {
+            "number": "#MainContent_Contractor_License_Number_Search",
+            "name": "#MainContent_Contractor_Business_Name_Button",
+        },
         # Result rows. CSLB's results page renders a single-license summary
         # for an exact match, or a table of links for multi-hit name searches.
         "row_selector": "table.searchresults tbody tr",
@@ -287,21 +301,35 @@ async def search(
             try:
                 await browser.navigate(page, search_url)
 
-                if recipe.get("query_kind_selector"):
-                    is_number = _looks_like_license_number(query)
-                    kind_key = "number" if is_number else "name"
-                    kind_value = recipe.get("query_kind_values", {}).get(
-                        kind_key, kind_key
-                    )
-                    selector = recipe["query_kind_selector"].format(kind=kind_value)
+                kind_key = (
+                    "number" if _looks_like_license_number(query) else "name"
+                )
+
+                tab_buttons = recipe.get("tab_buttons_by_kind") or {}
+                tab_selector = tab_buttons.get(kind_key)
+                if tab_selector:
                     try:
-                        await page.locator(selector).first.click()
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug("licensing query-kind toggle failed: %s", exc)
+                        await page.locator(tab_selector).first.click()
+                    except Exception as exc:  # noqa: BLE001 — tab miss is non-fatal
+                        logger.debug(
+                            "licensing tab toggle failed (%s): %s", tab_selector, exc
+                        )
+
+                inputs = recipe.get("query_inputs_by_kind") or {}
+                submits = recipe.get("submit_buttons_by_kind") or {}
+                input_selector = inputs.get(kind_key) or recipe.get("query_input")
+                submit_selector = submits.get(kind_key) or recipe.get("submit_button")
+                if not input_selector or not submit_selector:
+                    logger.warning(
+                        "licensing recipe missing input/submit for state=%s kind=%s",
+                        code,
+                        kind_key,
+                    )
+                    return []
 
                 try:
-                    await page.locator(recipe["query_input"]).first.fill(query)
-                    await page.locator(recipe["submit_button"]).first.click()
+                    await page.locator(input_selector).first.fill(query)
+                    await page.locator(submit_selector).first.click()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "licensing search submit failed for state=%s: %s", code, exc

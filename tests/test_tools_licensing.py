@@ -157,20 +157,28 @@ def _build_row(
 def _ca_search_page(
     rows: list[_FakeLocator],
     *,
-    radio_locators: dict[str, _FakeLocator] | None = None,
+    kind: str = "name",
+    tab_locators: dict[str, _FakeLocator] | None = None,
     submit_locator: _FakeLocator | None = None,
 ) -> _FakePage:
+    """Build a fake CSLB search page wired for the ``kind`` tab.
+
+    ``kind`` is "name" (business name) or "number" (license number) and
+    determines which input/submit selector the fake exposes. ``tab_locators``
+    optionally maps ``"number"``/``"name"`` to per-tab fake locators so a
+    test can assert that the right tab button was clicked.
+    """
     recipe = licensing._STATE_RECIPES["CA"]
+    input_selector = recipe["query_inputs_by_kind"][kind]
+    submit_selector = recipe["submit_buttons_by_kind"][kind]
     selectors: dict[str, _FakeLocator] = {
-        recipe["query_input"]: _FakeLocator(),
-        recipe["submit_button"]: submit_locator or _FakeLocator(),
+        input_selector: _FakeLocator(),
+        submit_selector: submit_locator or _FakeLocator(),
         recipe["row_selector"]: _FakeLocator(items=rows),
     }
-    if radio_locators:
-        for value, locator in radio_locators.items():
-            selectors[
-                recipe["query_kind_selector"].format(kind=value)
-            ] = locator
+    if tab_locators:
+        for kind_key, locator in tab_locators.items():
+            selectors[recipe["tab_buttons_by_kind"][kind_key]] = locator
     return _FakePage(selectors)
 
 
@@ -276,9 +284,9 @@ async def test_search_returns_results_for_name_query(monkeypatch):
 
 
 async def test_search_toggles_query_kind_for_license_number(monkeypatch):
-    """A 7-digit license-number query should click the LIC radio, not BUS."""
-    lic_radio = _FakeLocator()
-    bus_radio = _FakeLocator()
+    """A numeric query should click the license-number tab, not the name tab."""
+    lic_tab = _FakeLocator()
+    bus_tab = _FakeLocator()
     page = _ca_search_page(
         [
             _build_row(
@@ -289,20 +297,21 @@ async def test_search_toggles_query_kind_for_license_number(monkeypatch):
                 expiration="2026-12-31",
             )
         ],
-        radio_locators={"LIC": lic_radio, "BUS": bus_radio},
+        kind="number",
+        tab_locators={"number": lic_tab, "name": bus_tab},
     )
     _stub_browser(monkeypatch, page)
 
     await licensing.search("1234567", state="CA", max_results=5)
 
-    assert lic_radio.click_calls == 1
-    assert bus_radio.click_calls == 0
+    assert lic_tab.click_calls == 1
+    assert bus_tab.click_calls == 0
 
 
 async def test_search_toggles_query_kind_for_business_name(monkeypatch):
-    """A non-numeric query should click the BUS radio, not LIC."""
-    lic_radio = _FakeLocator()
-    bus_radio = _FakeLocator()
+    """A non-numeric query should click the business-name tab, not the license-number tab."""
+    lic_tab = _FakeLocator()
+    bus_tab = _FakeLocator()
     page = _ca_search_page(
         [
             _build_row(
@@ -313,14 +322,15 @@ async def test_search_toggles_query_kind_for_business_name(monkeypatch):
                 expiration="2026-12-31",
             )
         ],
-        radio_locators={"LIC": lic_radio, "BUS": bus_radio},
+        kind="name",
+        tab_locators={"number": lic_tab, "name": bus_tab},
     )
     _stub_browser(monkeypatch, page)
 
     await licensing.search("Acme Construction", state="CA")
 
-    assert bus_radio.click_calls == 1
-    assert lic_radio.click_calls == 0
+    assert bus_tab.click_calls == 1
+    assert lic_tab.click_calls == 0
 
 
 async def test_license_number_regex_recognises_cslb_format():
@@ -363,10 +373,11 @@ async def test_search_empty_query_returns_empty(monkeypatch):
 
 async def test_search_selector_miss_saves_diagnostic(monkeypatch, caplog, tmp_path):
     recipe = licensing._STATE_RECIPES["CA"]
+    # "anything" is a non-numeric query, so the connector takes the name-tab path.
     page = _FakePage(
         {
-            recipe["query_input"]: _FakeLocator(),
-            recipe["submit_button"]: _FakeLocator(),
+            recipe["query_inputs_by_kind"]["name"]: _FakeLocator(),
+            recipe["submit_buttons_by_kind"]["name"]: _FakeLocator(),
             recipe["row_selector"]: _FakeLocator(raise_on_all=True),
         }
     )
