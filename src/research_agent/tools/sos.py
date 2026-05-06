@@ -42,10 +42,17 @@ _DIAGNOSTICS_DIR = Path("data/diagnostics/sos")
 _PER_HOST_RPS = 0.5
 
 # CA bizfileonline entity numbers: usually a 7-digit corp number prefixed by a
-# letter (e.g. ``C1234567``) for corporations, or a 12-digit numeric LLC id
-# (e.g. ``201234567890``). Matching either flavour is sufficient to switch the
-# search input from "name" to "entity number" mode where the recipe supports it.
-_CA_ENTITY_NUMBER_RE = re.compile(r"^(?:[A-Z]\d{6,8}|\d{10,14})$")
+# letter (e.g. ``C1234567``) for corporations, or a 7–12-digit numeric LLC id
+# (e.g. ``201234567890`` or shorter legacy stock-corp numbers like ``2741233``).
+# Matching either flavour is sufficient to switch the search input from "name"
+# to "entity number" mode where the recipe supports it.
+_CA_ENTITY_NUMBER_RE = re.compile(r"^(?:[A-Z]\d{6,8}|\d{6,14})$")
+
+# Cell-1 of every search row reads ``"<NAME> (<entity_number>)"`` followed by
+# a "Click to expand" hint string. The trailing parenthetical is the only
+# place the entity number is rendered in the search results, so we have to
+# parse it out of the visible text rather than read a separate column.
+_CA_NAME_NUMBER_RE = re.compile(r"^(.*?)\s*\((\d{6,14})\)\s*$")
 
 
 # ---------------------------------------------------------------------------
@@ -59,19 +66,38 @@ _STATE_RECIPES: dict[str, dict[str, Any]] = {
     "CA": {
         "host": "bizfileonline.sos.ca.gov",
         "search_url": "https://bizfileonline.sos.ca.gov/search/business",
+        # Live DOM (verified 2026-05): the search input has placeholder
+        # "Search by name or file number"; the submit control is a button
+        # with aria-label="Execute search" and no type attribute.
         "query_input": "input[placeholder*='Search' i]",
-        "submit_button": "button[type='submit']",
+        "submit_button": "button[aria-label='Execute search']",
         # Optional: if/when the UI exposes name-vs-number tabs, route here.
         "query_kind_selector": None,
-        # Result rows.
+        # Result rows. The table has 6 columns: cell-1 is the entity name
+        # with the entity number embedded in parentheses ("ACME LLC (1234567)")
+        # plus a "Click to expand" hint; cells 2–6 are date/status/type/
+        # formation-jurisdiction/agent. There is NO anchor tag — cell-1 is a
+        # div[role=button] that opens an Okta-gated detail panel, so search
+        # results have to be parsed in place and a synthetic profile URL is
+        # composed from the entity number.
         "row_selector": "table tbody tr",
         "name_selector": "td:nth-child(1)",
-        "link_selector": "td:nth-child(1) a",
-        "entity_number_selector": "td:nth-child(2)",
-        "type_selector": "td:nth-child(3)",
-        "status_selector": "td:nth-child(4)",
+        "link_selector": "td:nth-child(1) a",  # absent in current DOM; fallback only
+        "filing_date_selector": "td:nth-child(2)",
+        "status_selector": "td:nth-child(3)",
+        "type_selector": "td:nth-child(4)",
         "formed_date_selector": "td:nth-child(5)",
-        # Entity profile.
+        "row_agent_selector": "td:nth-child(6)",
+        # Entity profile. NOTE: bizfileonline now redirects entity-detail
+        # clicks to Okta SSO (idm.sos.ca.gov) — the per-entity panel is
+        # auth-gated. fetch() degrades to a near-empty Source for
+        # unauthenticated traffic; the search row already exposes the
+        # registered agent so the smoke AC ("returns the LLC entry with
+        # its registered agent") is satisfied via search() alone.
+        "profile_entity_number_selector": "[data-field='entity-number']",
+        "profile_type_selector": "[data-field='entity-type']",
+        "profile_status_selector": "[data-field='entity-status']",
+        "profile_formed_date_selector": "[data-field='formed-date']",
         "agent_selector": "[data-field='registered-agent'], .registered-agent",
         "principal_address_selector": "[data-field='principal-address'], .principal-address",
         "officers_selector": "[data-field='officers'] li, .officers li",
@@ -122,9 +148,22 @@ def _looks_like_entity_number(query: str) -> bool:
     return bool(_CA_ENTITY_NUMBER_RE.match(cleaned))
 
 
+# Short per-call timeout for selector reads. Playwright's default 30s auto-wait
+# is catastrophic on a SPA where most profile selectors are absent — six
+# missing selectors in ``fetch()`` would hang the connector for >3 minutes.
+# Two seconds is more than enough for an element that has actually rendered.
+_SELECTOR_READ_TIMEOUT_MS = 2_000
+
+
 async def _safe_inner_text(locator: Any) -> str:
     try:
-        text = await locator.inner_text()
+        text = await locator.inner_text(timeout=_SELECTOR_READ_TIMEOUT_MS)
+    except TypeError:
+        # Fakes in unit tests don't accept the timeout kwarg — fall back.
+        try:
+            text = await locator.inner_text()
+        except Exception:  # noqa: BLE001
+            return ""
     except Exception:  # noqa: BLE001 — selector miss should not raise
         return ""
     return (text or "").strip()
@@ -132,7 +171,12 @@ async def _safe_inner_text(locator: Any) -> str:
 
 async def _safe_attr(locator: Any, name: str) -> str:
     try:
-        value = await locator.get_attribute(name)
+        value = await locator.get_attribute(name, timeout=_SELECTOR_READ_TIMEOUT_MS)
+    except TypeError:
+        try:
+            value = await locator.get_attribute(name)
+        except Exception:  # noqa: BLE001
+            return ""
     except Exception:  # noqa: BLE001
         return ""
     return (value or "").strip()
@@ -164,24 +208,48 @@ def _absolute_url(base: str, href: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _split_name_and_number(cell_text: str) -> tuple[str, str]:
+    """Strip the "Click to expand" hint and split "<NAME> (<number>)".
+
+    bizfileonline renders cell-1 as ``"SBI BUILDERS, INC. (2741233)\\nClick to
+    expand"`` — the only way to recover the entity number from the visible
+    DOM is to parse the trailing parenthetical out of the cell text.
+    """
+    # First line only — drops the "Click to expand" affordance text and any
+    # screen-reader hints rendered in the same cell.
+    first = (cell_text or "").splitlines()[0].strip() if cell_text else ""
+    if not first:
+        return "", ""
+    match = _CA_NAME_NUMBER_RE.match(first)
+    if match:
+        return match.group(1).strip(), match.group(2)
+    return first, ""
+
+
 async def _extract_row(
     row: Any, recipe: dict[str, Any], *, search_url: str
 ) -> SearchResult | None:
-    name = await _safe_inner_text(row.locator(recipe["name_selector"]).first)
-    href = await _safe_attr(row.locator(recipe["link_selector"]).first, "href")
+    raw_name = await _safe_inner_text(row.locator(recipe["name_selector"]).first)
+    if not raw_name:
+        return None
+
+    name, parsed_number = _split_name_and_number(raw_name)
     if not name:
         return None
 
-    entity_number = await _safe_inner_text(
-        row.locator(recipe["entity_number_selector"]).first
-    )
-    entity_type = await _safe_inner_text(row.locator(recipe["type_selector"]).first)
+    href = await _safe_attr(row.locator(recipe["link_selector"]).first, "href")
+    filing_date = await _safe_inner_text(
+        row.locator(recipe.get("filing_date_selector") or "").first
+    ) if recipe.get("filing_date_selector") else ""
     status = await _safe_inner_text(row.locator(recipe["status_selector"]).first)
+    entity_type = await _safe_inner_text(row.locator(recipe["type_selector"]).first)
     formed_date = await _safe_inner_text(
         row.locator(recipe["formed_date_selector"]).first
     )
+    registered_agent = await _safe_inner_text(
+        row.locator(recipe.get("row_agent_selector") or "").first
+    ) if recipe.get("row_agent_selector") else ""
 
-    profile_url = _absolute_url(search_url, href) if href else search_url
     state = next(
         (
             code
@@ -191,14 +259,27 @@ async def _extract_row(
         "",
     )
 
+    # No anchor tag in the live DOM — synth a search-anchored URL keyed on
+    # the parsed entity number so the result still round-trips through the
+    # planner's URL-keyed dedup. Falls back to the raw search URL if the
+    # number didn't parse out.
+    if href:
+        profile_url = _absolute_url(search_url, href)
+    elif parsed_number:
+        profile_url = f"{search_url}?q={parsed_number}"
+    else:
+        profile_url = search_url
+
     snippet_bits = [b for b in (entity_type, status, formed_date) if b]
     snippet = " — ".join(snippet_bits)
 
     extras: dict[str, Any] = {
-        "entity_number": entity_number,
+        "entity_number": parsed_number,
         "entity_type": entity_type,
         "status": status,
+        "filing_date": filing_date,
         "formed_date": formed_date,
+        "registered_agent": registered_agent,
         "state": state,
         "profile_url": profile_url,
     }
@@ -266,6 +347,22 @@ async def search(
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "sos search submit failed for state=%s: %s", code, exc
+                    )
+                    await _save_diagnostic_screenshot(page, host)
+                    return []
+
+                # bizfileonline is a React SPA — the result rows render after
+                # an XHR completes. Wait for at least one row to appear before
+                # reading; bail to a diagnostic screenshot rather than racing.
+                try:
+                    await page.locator(recipe["row_selector"]).first.wait_for(
+                        timeout=15_000
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "sos search rows did not render on %s: %s",
+                        search_url,
+                        exc,
                     )
                     await _save_diagnostic_screenshot(page, host)
                     return []
@@ -376,14 +473,16 @@ async def fetch(url: str) -> Source | None:
                     title = host
 
                 entity_number = await _collect_simple_text(
-                    page, recipe.get("entity_number_selector")
+                    page, recipe.get("profile_entity_number_selector")
                 )
                 entity_type = await _collect_simple_text(
-                    page, recipe.get("type_selector")
+                    page, recipe.get("profile_type_selector")
                 )
-                status = await _collect_simple_text(page, recipe.get("status_selector"))
+                status = await _collect_simple_text(
+                    page, recipe.get("profile_status_selector")
+                )
                 formed_date = await _collect_simple_text(
-                    page, recipe.get("formed_date_selector")
+                    page, recipe.get("profile_formed_date_selector")
                 )
 
                 agent = await _collect_simple_text(page, recipe.get("agent_selector"))

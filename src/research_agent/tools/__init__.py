@@ -409,42 +409,60 @@ def _smoke_sos(query: str) -> str:
 
     Per AC: ``research _smoke-tool sos "SBI Builders"`` should return the
     LLC entry with its registered agent. Lists the top-5 entity hits with
-    their entity number / type / status / formed date, then follows up on
-    the top hit with ``fetch()`` so the registered agent surfaces too.
+    their entity number / type / status / formed date / agent — bizfileonline
+    renders the registered agent directly in the search row, so the AC is
+    satisfied from search() alone. Also attempts ``fetch()`` on the top hit
+    for richer detail; the per-entity panel is now Okta-gated so
+    unauthenticated fetch() typically returns a near-empty Source.
     """
-    from research_agent.tools import sos
+    from research_agent.tools import browser, sos
 
     async def _run() -> str:
-        results = await sos.search(query, state="CA", max_results=5)
-        if not results:
-            return f"sos search returned no results for {query!r}"
-        lines: list[str] = []
-        for hit in results:
-            number = hit.extras.get("entity_number") or "?"
-            entity_type = hit.extras.get("entity_type") or "?"
-            status = hit.extras.get("status") or "?"
-            formed = hit.extras.get("formed_date") or "?"
-            snippet = hit.snippet.replace("\n", " ")
-            if len(snippet) > 200:
-                snippet = snippet[:200] + "…"
-            lines.append(
-                f"- {hit.title} — {number} — {entity_type} — {status} —"
-                f" formed {formed}\n"
-                f"  {hit.url}\n"
-                f"  {snippet}"
-            )
+        try:
+            results = await sos.search(query, state="CA", max_results=5)
+            if not results:
+                return f"sos search returned no results for {query!r}"
+            lines: list[str] = []
+            for hit in results:
+                number = hit.extras.get("entity_number") or "?"
+                entity_type = hit.extras.get("entity_type") or "?"
+                status = hit.extras.get("status") or "?"
+                formed = hit.extras.get("formed_date") or "?"
+                agent = hit.extras.get("registered_agent") or "?"
+                snippet = hit.snippet.replace("\n", " ")
+                if len(snippet) > 200:
+                    snippet = snippet[:200] + "…"
+                lines.append(
+                    f"- {hit.title} — {number} — {entity_type} — {status} —"
+                    f" formed {formed} — agent {agent}\n"
+                    f"  {hit.url}\n"
+                    f"  {snippet}"
+                )
 
-        top = results[0]
-        source = await sos.fetch(top.url)
-        if source is None:
-            lines.append(f"\nfetch({top.url}) returned None — agent unavailable")
-        else:
-            agent = source.metadata.get("registered_agent") or "?"
-            principal = source.metadata.get("principal_address") or "?"
-            lines.append(f"\nProfile for {top.title}")
-            lines.append(f"  registered_agent: {agent}")
-            lines.append(f"  principal_address: {principal}")
-        return "\n".join(lines)
+            top = results[0]
+            source = await sos.fetch(top.url)
+            if source is None:
+                lines.append(
+                    f"\nfetch({top.url}) returned None — profile is auth-gated"
+                    " (Okta); registered agent shown above is from the search"
+                    " row."
+                )
+            else:
+                agent = source.metadata.get("registered_agent") or "?"
+                principal = source.metadata.get("principal_address") or "?"
+                lines.append(f"\nProfile for {top.title}")
+                lines.append(f"  registered_agent: {agent}")
+                lines.append(f"  principal_address: {principal}")
+            return "\n".join(lines)
+        finally:
+            # Close the shared Playwright context inside the same event loop
+            # we used to open it. The atexit hook tries to shut down on a
+            # *new* loop, which deadlocks against the still-pending Chromium
+            # IPC and hangs the smoke run after stdout has already flushed.
+            try:
+                await browser.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
 
     return asyncio.run(_run())
 

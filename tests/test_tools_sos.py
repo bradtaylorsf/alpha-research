@@ -29,6 +29,7 @@ class _FakeLocator:
         on_click: Any = None,
         raise_on_locator: bool = False,
         raise_on_all: bool = False,
+        raise_on_wait_for: bool = False,
     ) -> None:
         self._text = text
         self._attrs = attrs or {}
@@ -38,8 +39,10 @@ class _FakeLocator:
         self._on_click = on_click
         self._raise_on_locator = raise_on_locator
         self._raise_on_all = raise_on_all
+        self._raise_on_wait_for = raise_on_wait_for
         self.fill_calls: list[str] = []
         self.click_calls: int = 0
+        self.wait_for_calls: int = 0
 
     @property
     def first(self) -> _FakeLocator:
@@ -65,6 +68,11 @@ class _FakeLocator:
         self.click_calls += 1
         if self._on_click is not None:
             self._on_click()
+
+    async def wait_for(self, *, timeout: int = 0) -> None:  # noqa: ARG002
+        self.wait_for_calls += 1
+        if self._raise_on_wait_for:
+            raise RuntimeError("rows did not render")
 
     def locator(self, selector: str) -> _FakeLocator:
         if self._raise_on_locator:
@@ -116,22 +124,33 @@ def _stub_browser(monkeypatch, page: _FakePage) -> dict[str, list[str]]:
 def _build_row(
     *,
     name: str,
-    href: str,
+    href: str = "",
     entity_number: str = "",
     entity_type: str = "",
     status: str = "",
     formed: str = "",
+    filing_date: str = "",
+    registered_agent: str = "",
 ) -> _FakeLocator:
-    """Build a row whose child selectors mirror the CA recipe."""
+    """Build a row whose child selectors mirror the live bizfileonline DOM.
+
+    Cell-1 is rendered as ``"<NAME> (<entity_number>)\\nClick to expand"`` —
+    the test mirrors that, since the connector parses the entity number
+    out of the displayed text rather than reading a separate column.
+    """
     recipe = sos._STATE_RECIPES["CA"]
+    cell_1_text = (
+        f"{name} ({entity_number})\nClick to expand" if entity_number else name
+    )
     return _FakeLocator(
         children={
-            recipe["name_selector"]: _FakeLocator(text=name),
+            recipe["name_selector"]: _FakeLocator(text=cell_1_text),
             recipe["link_selector"]: _FakeLocator(text=name, attrs={"href": href}),
-            recipe["entity_number_selector"]: _FakeLocator(text=entity_number),
-            recipe["type_selector"]: _FakeLocator(text=entity_type),
+            recipe["filing_date_selector"]: _FakeLocator(text=filing_date),
             recipe["status_selector"]: _FakeLocator(text=status),
+            recipe["type_selector"]: _FakeLocator(text=entity_type),
             recipe["formed_date_selector"]: _FakeLocator(text=formed),
+            recipe["row_agent_selector"]: _FakeLocator(text=registered_agent),
         }
     )
 
@@ -163,10 +182,10 @@ def _ca_profile_page(
     recipe = sos._STATE_RECIPES["CA"]
     selectors: dict[str, _FakeLocator] = {
         "h1": _FakeLocator(text=title),
-        recipe["entity_number_selector"]: _FakeLocator(text=entity_number),
-        recipe["type_selector"]: _FakeLocator(text=entity_type),
-        recipe["status_selector"]: _FakeLocator(text=status),
-        recipe["formed_date_selector"]: _FakeLocator(text=formed),
+        recipe["profile_entity_number_selector"]: _FakeLocator(text=entity_number),
+        recipe["profile_type_selector"]: _FakeLocator(text=entity_type),
+        recipe["profile_status_selector"]: _FakeLocator(text=status),
+        recipe["profile_formed_date_selector"]: _FakeLocator(text=formed),
         recipe["agent_selector"]: _FakeLocator(text=agent),
         recipe["principal_address_selector"]: _FakeLocator(text=principal),
         recipe["officers_selector"]: _FakeLocator(
@@ -204,19 +223,21 @@ async def test_search_returns_results_for_name_query(monkeypatch):
     rows = [
         _build_row(
             name="SBI BUILDERS, LLC",
-            href="/business/201234567890",
             entity_number="201234567890",
             entity_type="Limited Liability Company",
             status="Active",
             formed="2012-03-15",
+            filing_date="04/14/2012",
+            registered_agent="Jane Q Agent",
         ),
         _build_row(
             name="SBI BUILDERS INC",
-            href="/business/C9876543",
-            entity_number="C9876543",
-            entity_type="Domestic Stock",
+            entity_number="9876543",
+            entity_type="Stock Corporation - CA - General",
             status="Dissolved",
             formed="1998-07-22",
+            filing_date="07/22/1998",
+            registered_agent="Bob Builder",
         ),
     ]
     page = _ca_search_page(rows)
@@ -229,12 +250,19 @@ async def test_search_returns_results_for_name_query(monkeypatch):
 
     top = results[0]
     assert top.source_kind == "sos"
+    # "Click to expand" hint and trailing parenthetical are stripped from the title.
     assert top.title == "SBI BUILDERS, LLC"
-    assert top.url == "https://bizfileonline.sos.ca.gov/business/201234567890"
+    # No anchor href in the live DOM; URL is a synthetic search-anchored link
+    # keyed on the parsed entity number.
+    assert top.url == (
+        "https://bizfileonline.sos.ca.gov/search/business?q=201234567890"
+    )
     assert top.extras["entity_number"] == "201234567890"
     assert top.extras["entity_type"] == "Limited Liability Company"
     assert top.extras["status"] == "Active"
     assert top.extras["formed_date"] == "2012-03-15"
+    assert top.extras["filing_date"] == "04/14/2012"
+    assert top.extras["registered_agent"] == "Jane Q Agent"
     assert top.extras["state"] == "CA"
     assert "Active" in top.snippet
 
@@ -243,9 +271,8 @@ async def test_search_handles_entity_number_query(monkeypatch):
     rows = [
         _build_row(
             name="SBI BUILDERS INC",
-            href="/business/C9876543",
-            entity_number="C9876543",
-            entity_type="Domestic Stock",
+            entity_number="9876543",
+            entity_type="Stock Corporation - CA - General",
             status="Active",
             formed="1998-07-22",
         ),
@@ -255,7 +282,8 @@ async def test_search_handles_entity_number_query(monkeypatch):
 
     results = await sos.search("C9876543", state="CA", max_results=5)
     assert len(results) == 1
-    assert results[0].extras["entity_number"] == "C9876543"
+    # Entity number parsed from the cell-1 parenthetical, not the query.
+    assert results[0].extras["entity_number"] == "9876543"
     # Query input still got the entity number string filled in.
     query_locator = page._selector_map[sos._STATE_RECIPES["CA"]["query_input"]]
     assert query_locator.fill_calls == ["C9876543"]
@@ -264,8 +292,28 @@ async def test_search_handles_entity_number_query(monkeypatch):
 async def test_entity_number_regex_recognises_ca_formats():
     assert sos._looks_like_entity_number("C1234567")
     assert sos._looks_like_entity_number("201234567890")
+    assert sos._looks_like_entity_number("2741233")  # 7-digit stock-corp number
     assert not sos._looks_like_entity_number("SBI Builders")
     assert not sos._looks_like_entity_number("")
+
+
+async def test_split_name_and_number_strips_hint_and_parses_number():
+    """Cell-1 reads "<NAME> (<entity_number>)\\nClick to expand" — title is
+    cleaned and the trailing parenthetical is parsed into a separate field.
+    """
+    name, number = sos._split_name_and_number(
+        "SBI BUILDERS, INC. (2741233)\nClick to expand"
+    )
+    assert name == "SBI BUILDERS, INC."
+    assert number == "2741233"
+
+    # No parens: name kept verbatim, number empty.
+    name2, number2 = sos._split_name_and_number("PLAIN COMPANY NAME")
+    assert name2 == "PLAIN COMPANY NAME"
+    assert number2 == ""
+
+    # Empty input: both empty.
+    assert sos._split_name_and_number("") == ("", "")
 
 
 async def test_search_returns_empty_for_unknown_state(monkeypatch, caplog):
@@ -323,7 +371,6 @@ async def test_search_respects_max_results(monkeypatch):
     rows = [
         _build_row(
             name=f"Company {i}",
-            href=f"/business/{i}",
             entity_number=f"{i:012d}",
             entity_type="LLC",
             status="Active",
@@ -336,6 +383,31 @@ async def test_search_respects_max_results(monkeypatch):
 
     results = await sos.search("anything", state="CA", max_results=3)
     assert len(results) == 3
+
+
+async def test_search_returns_empty_when_rows_never_render(
+    monkeypatch, caplog, tmp_path
+):
+    """If the React table never paints, ``wait_for`` raises and we bail with a
+    diagnostic screenshot rather than parsing whatever stale DOM was there.
+    """
+    recipe = sos._STATE_RECIPES["CA"]
+    page = _FakePage(
+        {
+            recipe["query_input"]: _FakeLocator(),
+            recipe["submit_button"]: _FakeLocator(),
+            recipe["row_selector"]: _FakeLocator(raise_on_wait_for=True),
+        }
+    )
+    _stub_browser(monkeypatch, page)
+    monkeypatch.setattr(sos, "_DIAGNOSTICS_DIR", tmp_path / "diagnostics")
+
+    with caplog.at_level(logging.WARNING, logger=sos.logger.name):
+        results = await sos.search("anything", state="CA")
+
+    assert results == []
+    assert any("did not render" in rec.message for rec in caplog.records)
+    assert page.screenshots, "expected a diagnostic screenshot path"
 
 
 # ---------------------------------------------------------------------------
@@ -425,10 +497,10 @@ async def test_fetch_handles_minimal_profile(monkeypatch):
     page = _FakePage(
         {
             "h1": _FakeLocator(text="ACME LLC"),
-            recipe["entity_number_selector"]: _FakeLocator(),
-            recipe["type_selector"]: _FakeLocator(),
-            recipe["status_selector"]: _FakeLocator(),
-            recipe["formed_date_selector"]: _FakeLocator(),
+            recipe["profile_entity_number_selector"]: _FakeLocator(),
+            recipe["profile_type_selector"]: _FakeLocator(),
+            recipe["profile_status_selector"]: _FakeLocator(),
+            recipe["profile_formed_date_selector"]: _FakeLocator(),
             recipe["agent_selector"]: _FakeLocator(),
             recipe["principal_address_selector"]: _FakeLocator(),
             recipe["officers_selector"]: _FakeLocator(items=[]),
