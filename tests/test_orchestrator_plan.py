@@ -19,6 +19,7 @@ from research_agent.orchestrator.plan import (
     MAX_PLAN_VERSIONS,
     Plan,
     PlanVersionCapExceeded,
+    ScopeClass,
     Subgoal,
     TaskKind,
     TaskSpec,
@@ -31,6 +32,7 @@ from research_agent.storage import db
 from research_agent.storage.jobs import Job
 
 ALL_TASK_KINDS: tuple[str, ...] = get_args(TaskKind)
+ALL_SCOPE_CLASSES: tuple[str, ...] = get_args(ScopeClass)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +186,43 @@ def test_plan_forbids_extra_keys() -> None:
     payload["surprise"] = "boom"
     with pytest.raises(ValidationError):
         Plan.model_validate(payload)
+
+
+# ---------------------------------------------------------------------------
+# Plan.scope_class — issue #118 (scope-aware planning)
+# ---------------------------------------------------------------------------
+
+
+def test_scope_class_enumeration_matches_spec() -> None:
+    assert set(ALL_SCOPE_CLASSES) == {
+        "narrow",
+        "medium",
+        "broad",
+        "comprehensive",
+    }
+
+
+def test_plan_scope_class_defaults_to_none() -> None:
+    plan = _sample_plan()
+    assert plan.scope_class is None
+
+
+@pytest.mark.parametrize("scope", ALL_SCOPE_CLASSES)
+def test_plan_accepts_each_scope_class(scope: str) -> None:
+    plan = _sample_plan(scope_class=scope)
+    assert plan.scope_class == scope
+
+
+def test_plan_rejects_unknown_scope_class() -> None:
+    with pytest.raises(ValidationError):
+        _sample_plan(scope_class="huge")
+
+
+def test_plan_scope_class_round_trips() -> None:
+    plan = _sample_plan(scope_class="broad")
+    rebuilt = Plan.model_validate(plan.model_dump())
+    assert rebuilt.scope_class == "broad"
+    assert rebuilt == plan
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +514,62 @@ def test_max_plan_versions_cap_raises_when_full(
         asyncio.run(tactical_replan(job, prior, [], router=router))
     with pytest.raises(PlanVersionCapExceeded):
         asyncio.run(cloud_replan(job, prior, "x", router=router))
+
+
+def test_plan_created_event_payload_includes_scope_class(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    """Issue #118: ``plan_created`` payloads must surface ``scope_class``."""
+    router, _calls = router_with_spy
+    _StubAgent.next_plan = _sample_plan(scope_class="broad")
+
+    asyncio.run(initial_plan(job, router=router))
+
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'plan_created'"
+            " ORDER BY id ASC LIMIT 1",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    payload = json.loads(row["payload_json"])
+    assert payload["scope_class"] == "broad"
+    assert payload["version"] == 1
+    assert payload["tier"] == "frontier"
+    assert payload["kind"] == "initial"
+
+
+def test_plan_created_event_payload_includes_scope_class_when_unset(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    """When the planner omits ``scope_class``, the event still carries the key (None)."""
+    router, _calls = router_with_spy
+    _StubAgent.next_plan = _sample_plan()  # default: scope_class=None
+
+    asyncio.run(initial_plan(job, router=router))
+
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'plan_created'"
+            " ORDER BY id ASC LIMIT 1",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    payload = json.loads(row["payload_json"])
+    assert "scope_class" in payload
+    assert payload["scope_class"] is None
 
 
 def test_persisted_plan_round_trips_via_db(

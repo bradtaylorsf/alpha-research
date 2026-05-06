@@ -23,6 +23,10 @@ the schema below.
 
 - `version`: integer, always `1` for the initial plan.
 - `objective`: one-sentence restatement of the goal.
+- `scope_class`: one of `narrow`, `medium`, `broad`, `comprehensive`. See
+  the **Scope-aware planning** section below — pick the class that
+  matches the goal's breadth before you write `task_template`. This
+  field is required.
 - `subgoals`: list of 3–6 subgoals. Each subgoal:
   - `id`: integer (1, 2, 3, …).
   - `description`: one sentence describing what answering this would prove.
@@ -120,6 +124,7 @@ For the goal "What does the public record show about Acme Corp's 2024 layoffs?":
 ```yaml
 version: 1
 objective: "Establish what is publicly documented about Acme Corp's 2024 layoffs."
+scope_class: narrow
 subgoals:
   - id: 1
     description: "Identify scope and dates of the layoffs from primary news sources."
@@ -162,6 +167,60 @@ Each search above will be automatically expanded into 3 fetches and 3
 extracts by the loop (configurable via `expand_top_k`). You do not need
 to write those fetch/extract tasks yourself.
 
+## Scope-aware planning
+
+**Before you write `task_template`, classify the goal's breadth.** A
+goal asking "what did Cursor change about pricing in June 2025?" needs
+a handful of focused searches; a goal asking "track Project 2025
+implementation across every federal department" needs dozens. A
+3-task plan for a department-spanning investigation will exhaust its
+queue in 30 minutes and stop. Pick the right tier up front.
+
+| `scope_class` | When to pick it | Initial `task_template` size |
+|---|---|---|
+| `narrow` | Single entity, single event, single time window | 3–8 search tasks |
+| `medium` | One entity with many facets, OR several closely related entities | 8–20 search tasks |
+| `broad` | Many entities (orgs, departments, people) under one umbrella | 20–50 search tasks |
+| `comprehensive` | Full corpus / multi-year / every-entity coverage | 50+ search tasks |
+
+Signals from your own subgoals: a 3-subgoal plan covering one company
+is `narrow`; a 6-subgoal plan that breaks down by department, by year,
+or by sub-policy is `broad` or `comprehensive`.
+
+### Worked one-line examples per tier
+
+- **narrow** — Goal: *"Cursor's June 2025 pricing changes — main
+  complaints"*. Queries: `Cursor pricing June 2025`, `Cursor pricing
+  complaints`, `Cursor pricing reddit`, `Cursor pricing changes
+  backlash` (~4 searches).
+- **medium** — Goal: *"George Santos pre-2022 election
+  misrepresentations"*. Queries: `George Santos resume`, `George
+  Santos Baruch College`, `George Santos Citigroup`, `George Santos
+  Goldman Sachs`, `George Santos Devolder`, `George Santos charity`,
+  `George Santos volleyball`, `George Santos Jewish heritage`,
+  `George Santos Brazil check fraud`, `George Santos campaign
+  finance`, `George Santos animal rescue`, `George Santos LinkedIn`
+  (~12 searches).
+- **broad** — Goal: *"Project 2025 implementation tracker across every
+  federal department"*. Queries: one or two per major
+  agency/department — `Project 2025 DOJ`, `Project 2025 State
+  Department`, `Project 2025 EPA`, `Project 2025 HHS`, `Project 2025
+  DHS`, `Project 2025 Education`, `Project 2025 Treasury`, `Project
+  2025 DOD`, `Project 2025 DOE`, `Project 2025 Interior`, `Project
+  2025 Commerce`, `Project 2025 Agriculture`, `Project 2025 Labor`,
+  `Project 2025 HUD`, `Project 2025 VA`, `Project 2025 Transportation`,
+  plus cross-cutting queries `Project 2025 executive orders`, `Project
+  2025 schedule F`, `Project 2025 Heritage Foundation`, `Project 2025
+  staffing tracker` (~20–30 searches).
+- **comprehensive** — Goal: *"Complete public record of Anthropic's
+  safety governance 2023–present"*. Queries span: each public policy
+  document, each leadership statement, each external commitment,
+  each board/committee, each year's RSP version, each model release's
+  safety brief, each external evaluation partnership, each
+  government-facing testimony or filing, each major journalistic
+  treatment — easily 50+ initial searches before iterative deepening
+  takes over.
+
 ## Hard rules
 
 - Output ONLY the fenced YAML block. No prose, no preamble, no postscript.
@@ -169,5 +228,9 @@ to write those fetch/extract tasks yourself.
   `arxiv_search`, `local_corpus_query`. NO others.
 - Every payload MUST include a `sub_question` describing what the
   downstream extract should look for.
-- Keep `task_template` to 3–8 search tasks (each one expands into ~6
-  follow-up tasks at runtime; more than 8 searches blows the queue cap).
+- Always include a top-level `scope_class` field. Size `task_template`
+  to match it (narrow 3–8, medium 8–20, broad 20–50, comprehensive
+  50+). The orchestrator's `MAX_TASKS_PER_JOB` cap is 10000, and each
+  search expands to roughly 6 follow-up tasks — even 50 searches
+  (~300 tasks) fits comfortably; do not undersize a broad goal out of
+  caution.
