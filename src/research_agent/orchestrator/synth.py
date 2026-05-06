@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from typing import TYPE_CHECKING, Any
 
@@ -189,6 +190,7 @@ def _load_latest_critique(job: Job) -> str | None:
 def _build_context(
     *,
     goal: str,
+    plan: Plan,
     findings: list[dict[str, Any]],
     sources: dict[int, dict[str, Any]],
     prior: str | None,
@@ -197,6 +199,10 @@ def _build_context(
 ) -> str:
     payload: dict[str, Any] = {
         "goal": goal,
+        "subgoals": [
+            {"id": sg.id, "description": sg.description, "done": sg.done}
+            for sg in plan.subgoals
+        ],
         "findings": findings,
         "sources": {str(k): v for k, v in sources.items()},
         "prior_synthesis": prior,
@@ -205,6 +211,79 @@ def _build_context(
     if final:
         payload["final"] = True
     return json.dumps(payload, sort_keys=True, default=str)
+
+
+_SUBGOAL_STATUS_FENCE_RE = re.compile(r"```json\s*\n(.*?)\n```\s*$", re.DOTALL)
+
+
+def _extract_subgoal_status(
+    job: Job,
+    raw: str,
+) -> tuple[str, dict[int, str] | None]:
+    """Split a trailing fenced ``json`` block off the markdown report.
+
+    Returns ``(stripped_md, status_map)``. ``status_map`` is ``None`` when
+    the block is missing, has malformed JSON, or its payload doesn't carry
+    a ``subgoal_status`` mapping. A WARN ``warning`` event is emitted in
+    each of those tolerated-but-degraded cases.
+    """
+    match = _SUBGOAL_STATUS_FENCE_RE.search(raw)
+    if match is None:
+        emit(
+            job,
+            "WARN",
+            "synth",
+            "warning",
+            {"stage": "subgoal_status", "error": "trailing JSON fence missing"},
+        )
+        return raw, None
+
+    body = match.group(1).strip()
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        emit(
+            job,
+            "WARN",
+            "synth",
+            "warning",
+            {"stage": "subgoal_status", "error": f"json parse failed: {exc}"},
+        )
+        # Still strip the fence so it never lands in report.md.
+        return raw[: match.start()].rstrip() + "\n", None
+
+    if not isinstance(data, dict) or not isinstance(data.get("subgoal_status"), dict):
+        emit(
+            job,
+            "WARN",
+            "synth",
+            "warning",
+            {"stage": "subgoal_status", "error": "missing or non-dict subgoal_status"},
+        )
+        return raw[: match.start()].rstrip() + "\n", None
+
+    status_map: dict[int, str] = {}
+    for key, value in data["subgoal_status"].items():
+        try:
+            sid = int(key)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, str):
+            status_map[sid] = value
+
+    stripped = raw[: match.start()].rstrip() + "\n"
+    return stripped, status_map
+
+
+def _apply_subgoal_status(
+    job: Job,
+    plan: Plan,  # noqa: ARG001 — kept for clarity at call sites; helper reloads from DB
+    status_map: dict[int, str],
+) -> None:
+    """Persist a synthesizer-emitted ``subgoal_status`` map onto the latest plan."""
+    from research_agent.orchestrator import plan as _plan_mod
+
+    _plan_mod.update_subgoal_done(job, status_map)
 
 
 async def _run_synth(
@@ -246,6 +325,7 @@ async def _do_synthesis(
 
     context = _build_context(
         goal=job.goal,
+        plan=plan,
         findings=findings,
         sources=sources,
         prior=prior,
@@ -292,9 +372,14 @@ async def _do_synthesis(
     cost_val: float | None = float(cost) if isinstance(cost, (int, float)) else None
     model_name = _model_name_for(router, used_tier)
 
-    version = write_synthesis(job, content, model=model_name, cost_usd=cost_val)
+    stripped_md, status_map = _extract_subgoal_status(job, content)
+
+    version = write_synthesis(job, stripped_md, model=model_name, cost_usd=cost_val)
     synth_md = (job.root / f"synthesis/{version:04d}.md").read_text(encoding="utf-8")
     report_path = write_report(job, synth_md)
+
+    if status_map:
+        _apply_subgoal_status(job, plan, status_map)
 
     emit(
         job,
@@ -311,7 +396,7 @@ async def _do_synthesis(
 
     return SynthesisOutput(
         version=version,
-        content=content,
+        content=stripped_md,
         model=model_name,
         cost_usd=cost_val,
         report_path=str(report_path),
@@ -548,7 +633,7 @@ async def final_synthesis(job: Job, plan: Plan, *, router: Router) -> SynthesisO
 
 async def final_synthesis_after_cap(
     job: Job,
-    plan: Plan,  # noqa: ARG001 — plan reserved for future prompt context
+    plan: Plan,
     *,
     router: Router,
 ) -> SynthesisOutput:
@@ -567,6 +652,7 @@ async def final_synthesis_after_cap(
 
     context = _build_context(
         goal=job.goal,
+        plan=plan,
         findings=findings,
         sources=sources,
         prior=prior,
@@ -595,9 +681,14 @@ async def final_synthesis_after_cap(
     cost_val: float | None = float(cost) if isinstance(cost, (int, float)) else None
     model_name = _model_name_for(router, fallback_tier)
 
-    version = write_synthesis(job, content, model=model_name, cost_usd=cost_val)
+    stripped_md, status_map = _extract_subgoal_status(job, content)
+
+    version = write_synthesis(job, stripped_md, model=model_name, cost_usd=cost_val)
     synth_md = (job.root / f"synthesis/{version:04d}.md").read_text(encoding="utf-8")
     report_path = write_report(job, synth_md)
+
+    if status_map:
+        _apply_subgoal_status(job, plan, status_map)
 
     emit(
         job,
@@ -615,7 +706,7 @@ async def final_synthesis_after_cap(
 
     return SynthesisOutput(
         version=version,
-        content=content,
+        content=stripped_md,
         model=model_name,
         cost_usd=cost_val,
         report_path=str(report_path),

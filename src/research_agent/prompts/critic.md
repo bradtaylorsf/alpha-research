@@ -1,5 +1,5 @@
 ---
-version: "1"
+version: "2"
 model_tier: frontier_alt
 description: System prompt for the critic agent that audits a synthesis report against its findings.
 ---
@@ -28,6 +28,11 @@ critique the synthesizer (or a follow-up plan) can act on.
    wandered into adjacent topics?
 5. **Inference vs. evidence** — are inferred connections labelled as such,
    or are they presented as if a source asserted them?
+6. **Premature subgoal closures** — the synthesizer marks each subgoal
+   `confirmed`, `refuted`, or `inconclusive`. For every subgoal it marked
+   `confirmed` or `refuted`, check whether the findings actually support
+   that closure. If not, list the subgoal id in `premature_subgoals` so
+   the loop reopens it.
 
 ## What to produce
 
@@ -40,7 +45,13 @@ For each issue, return:
 - **Suggested fix:** what the synthesizer should do (e.g., remove claim,
   add citation, surface contradiction, narrow scope).
 
+Plus the following structured fields:
+
+- `premature_subgoals`: list of integer subgoal ids whose synthesis status
+  (`confirmed` / `refuted`) is not actually supported by the findings.
+  Empty list when all closures look defensible.
+
 If the report is shippable as-is, return an empty critique with a one-line
-rationale. Do not invent issues.
+rationale and `premature_subgoals: []`. Do not invent issues.
 
 Return the critique as the structured output the caller requested.

@@ -458,3 +458,89 @@ async def test_loop_critique_handler_triggers_cloud_replan(
     payload = json.loads(triggered[0]["payload_json"])
     assert payload["from_version"] == plan.version
     assert payload["critique_version"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Premature subgoal closures (issue #119)
+# ---------------------------------------------------------------------------
+
+
+def _read_latest_plan_subgoals(db_path: Path, job_id: str) -> list[dict[str, Any]]:
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM plans WHERE job_id = ? ORDER BY version DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return list(json.loads(row["payload_json"])["subgoals"])
+
+
+def test_critique_premature_subgoals_reopens_them(
+    job: Job, db_path: Path
+) -> None:
+    """A non-empty ``premature_subgoals`` list flips matching subgoals back to done=False."""
+    seeded = Plan(
+        version=1,
+        objective="Investigate the target",
+        subgoals=[
+            Subgoal(id=1, description="background", done=True),
+            Subgoal(id=2, description="finances", done=False),
+        ],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=3,
+    )
+    write_plan(job, seeded.model_dump())
+    _seed_findings(job, [0.7])
+
+    output = CritiqueOutput(
+        gaps=[],
+        unsupported_claims=[],
+        suggested_subgoals=[],
+        confidence_concerns=[],
+        premature_subgoals=[1],
+        should_replan=False,
+    )
+    router = _StubRouter(output=output)
+
+    asyncio.run(critique(job, seeded, "# Synth\n", router=router))
+
+    subgoals = _read_latest_plan_subgoals(db_path, job.id)
+    by_id = {sg["id"]: sg for sg in subgoals}
+    assert by_id[1]["done"] is False
+    assert by_id[2]["done"] is False
+
+    events = _read_event_rows(db_path, job.id)
+    reopened = [e for e in events if e["kind"] == "subgoals_reopened"]
+    assert len(reopened) == 1
+    payload = json.loads(reopened[0]["payload_json"])
+    assert payload["subgoal_ids"] == [1]
+    assert payload["critique_version"] == 1
+
+    plan_reopened = [e for e in events if e["kind"] == "plan_subgoals_reopened"]
+    assert len(plan_reopened) == 1
+
+
+def test_critique_empty_premature_subgoals_is_noop(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    """An empty ``premature_subgoals`` list does not bump the plan version."""
+    _seed_findings(job, [0.6])
+    router = _StubRouter()  # default output has empty premature_subgoals
+
+    asyncio.run(critique(job, plan, "# Synth\n", router=router))
+
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT MAX(version) AS v FROM plans WHERE job_id = ?",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert int(row["v"]) == plan.version
+
+    events = _read_event_rows(db_path, job.id)
+    assert not [e for e in events if e["kind"] == "subgoals_reopened"]

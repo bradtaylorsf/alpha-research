@@ -313,6 +313,104 @@ async def tactical_replan(
     return new_plan
 
 
+def _load_latest_plan(job: Job) -> Plan:
+    """Read the highest-version ``plans`` row for ``job`` and return it as :class:`Plan`."""
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM plans WHERE job_id = ? ORDER BY version DESC LIMIT 1",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise RuntimeError(f"no plan persisted for job {job.id!r}")
+    return Plan.model_validate_json(row["payload_json"])
+
+
+def update_subgoal_done(job: Job, status_map: dict[int, str]) -> Plan:
+    """Apply a synthesizer-emitted ``subgoal_status`` map to the latest plan.
+
+    For each subgoal whose id appears in ``status_map``, set ``done=True``
+    when the status is ``confirmed`` or ``refuted`` and ``done=False`` when
+    it is ``inconclusive``. Subgoals whose id is not in the map are left
+    untouched. A new plan version is persisted under :data:`MAX_PLAN_VERSIONS`.
+    """
+    _assert_under_cap(job)
+    plan = _load_latest_plan(job)
+
+    closing = {"confirmed", "refuted"}
+    prior_done: dict[int, bool] = {sg.id: sg.done for sg in plan.subgoals}
+    next_version = plan.version + 1
+    new_subgoals: list[Subgoal] = []
+    for sg in plan.subgoals:
+        if sg.id in status_map:
+            new_done = status_map[sg.id] in closing
+            new_subgoals.append(sg.model_copy(update={"done": new_done}))
+        else:
+            new_subgoals.append(sg)
+
+    new_plan = plan.model_copy(update={"version": next_version, "subgoals": new_subgoals})
+    write_plan(job, new_plan.model_dump())
+
+    closed = [
+        sg.id
+        for sg in new_plan.subgoals
+        if sg.id in status_map and sg.done and not prior_done.get(sg.id, False)
+    ]
+    reopened = [
+        sg.id
+        for sg in new_plan.subgoals
+        if sg.id in status_map and not sg.done and prior_done.get(sg.id, False)
+    ]
+    inconclusive = [
+        sg.id for sg in new_plan.subgoals if status_map.get(sg.id) == "inconclusive"
+    ]
+
+    emit(
+        job,
+        "INFO",
+        "planner",
+        "plan_subgoals_updated",
+        {
+            "version": new_plan.version,
+            "closed": closed,
+            "reopened": reopened,
+            "inconclusive": inconclusive,
+        },
+    )
+    return new_plan
+
+
+def reopen_subgoals(job: Job, ids: list[int]) -> Plan:
+    """Flip ``done=False`` for matching subgoal ids and persist a new plan version.
+
+    Used by the critique pass when synthesis closed subgoals prematurely —
+    the critic flags them and we reopen them so the loop keeps working.
+    """
+    _assert_under_cap(job)
+    plan = _load_latest_plan(job)
+
+    target_ids = set(ids)
+    next_version = plan.version + 1
+    new_subgoals = [
+        sg.model_copy(update={"done": False}) if sg.id in target_ids else sg
+        for sg in plan.subgoals
+    ]
+    new_plan = plan.model_copy(update={"version": next_version, "subgoals": new_subgoals})
+    write_plan(job, new_plan.model_dump())
+
+    reopened = [sg.id for sg in new_plan.subgoals if sg.id in target_ids]
+    emit(
+        job,
+        "INFO",
+        "planner",
+        "plan_subgoals_reopened",
+        {"version": new_plan.version, "reopened": reopened},
+    )
+    return new_plan
+
+
 async def cloud_replan(
     job: Job,
     plan: Plan,
@@ -357,5 +455,7 @@ __all__ = [
     "TaskSpec",
     "cloud_replan",
     "initial_plan",
+    "reopen_subgoals",
     "tactical_replan",
+    "update_subgoal_done",
 ]
