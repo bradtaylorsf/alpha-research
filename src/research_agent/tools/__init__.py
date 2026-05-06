@@ -404,6 +404,44 @@ def _smoke_opencorporates(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_sanctions(query: str) -> str:
+    """Smoke wrapper: OFAC SDN / EU / UK sanctions lookup.
+
+    Per AC: ``research _smoke-tool sanctions "Yevgeny Prigozhin"`` should
+    surface the SDN designation. Each line shows the list, programs,
+    designation date, agency, sample aliases, and the sanctionssearch
+    permalink so an operator can eyeball whether the bulk index is healthy.
+    """
+    from research_agent.tools import sanctions
+
+    async def _run() -> str:
+        results = await sanctions.search(query, max_results=5)
+        if not results:
+            return f"sanctions search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            list_kind = hit.extras.get("list_kind") or "?"
+            programs = ", ".join(hit.extras.get("programs") or []) or "?"
+            designation = hit.extras.get("designation_date") or "?"
+            agency = hit.extras.get("sanctioning_agency") or "?"
+            aliases = hit.extras.get("aliases") or []
+            alias_sample = ", ".join(a.get("name", "") for a in aliases[:3]) or "—"
+            fuzzy = " [fuzzy]" if hit.extras.get("fuzzy") else ""
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {list_kind} — {programs} — {designation} —"
+                f" {agency}{fuzzy}\n"
+                f"  aliases: {alias_sample}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_usaspending(query: str) -> str:
     """Smoke wrapper: USAspending awards search returning the top-5 hits.
 
@@ -736,6 +774,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "lda": _smoke_lda,
     "littlesis": _smoke_littlesis,
     "opencorporates": _smoke_opencorporates,
+    "sanctions": _smoke_sanctions,
     "usaspending": _smoke_usaspending,
     "gdelt": _smoke_gdelt,
     "news": _smoke_news,
