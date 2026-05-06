@@ -63,6 +63,7 @@ MAX_TASKS_PER_JOB = 10000
 HEURISTIC_CHECK_EVERY_N = 25
 RETRY_WAITS: tuple[int, ...] = (1, 2, 4, 8, 16, 30, 60)
 RETRY_MAX_ATTEMPTS = 5
+MAX_DRAIN_REPLANS = 10
 
 Handler = Callable[[Job, dict[str, Any]], Awaitable[dict[str, Any] | None]]
 
@@ -316,6 +317,141 @@ def _load_critique_md(job: Job, md_rel: str) -> str:
     """Read the rendered markdown for a critique that was just written."""
     md_path = job.root / md_rel
     return md_path.read_text(encoding="utf-8")
+
+
+def _load_all_findings(job: Job) -> list[dict[str, Any]]:
+    """Return every persisted finding for ``job`` as a list of dicts.
+
+    Drives the drain-replan context: the planner sees what's been learned
+    so far and can pivot rather than re-emit the same template. ``tags`` and
+    ``source_ids`` are stored as JSON in the column; we leave them as the
+    raw string the planner can read alongside the structured ``claim`` and
+    ``confidence`` fields.
+    """
+    import json as _json
+
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, claim, confidence, source_ids, tags FROM findings"
+            " WHERE job_id = ? ORDER BY id ASC",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            source_ids = _json.loads(row["source_ids"]) if row["source_ids"] else []
+        except (TypeError, ValueError):
+            source_ids = []
+        try:
+            tags = _json.loads(row["tags"]) if row["tags"] else None
+        except (TypeError, ValueError):
+            tags = None
+        out.append(
+            {
+                "id": int(row["id"]),
+                "claim": row["claim"],
+                "confidence": float(row["confidence"]),
+                "source_ids": source_ids,
+                "tags": tags,
+            }
+        )
+    return out
+
+
+def _load_recent_task_results(job: Job, limit: int = 20) -> list[dict[str, Any]]:
+    """Return the most recently completed tasks for ``job`` (newest first).
+
+    Feeds the drain-replan with concrete evidence of what the prior plan
+    actually produced, so the planner can decide whether to broaden,
+    deepen, or pivot.
+    """
+    import json as _json
+
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, kind, payload_json, result_json FROM tasks"
+            " WHERE job_id = ? AND status = 'done'"
+            " ORDER BY id DESC LIMIT ?",
+            (job.id, int(limit)),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = _json.loads(row["payload_json"]) if row["payload_json"] else {}
+        except (TypeError, ValueError):
+            payload = {}
+        try:
+            result = _json.loads(row["result_json"]) if row["result_json"] else None
+        except (TypeError, ValueError):
+            result = None
+        out.append(
+            {
+                "task_id": int(row["id"]),
+                "kind": row["kind"],
+                "payload": payload,
+                "result": result,
+            }
+        )
+    return out
+
+
+async def _drain_replan(
+    job: Job,
+    plan: Plan,
+    *,
+    router: Any,
+    drain_count: int,
+) -> Plan | None:
+    """Fire a tactical replan when the queue drains mid-run.
+
+    Emits ``loop/drain_replan`` before calling the planner so operators can
+    see when this fires. Loads all findings + the latest synthesis as
+    context so the local-tier planner can pivot intelligently. Returns the
+    new plan, or ``None`` if the planner emitted no fresh tasks (treat as
+    "goal exhausted") or raised — the caller breaks the loop in either case.
+    """
+    from research_agent.orchestrator.plan import tactical_replan
+
+    emit(
+        job,
+        "INFO",
+        "loop",
+        "drain_replan",
+        {"drain_count": drain_count, "from_plan_version": plan.version},
+    )
+    try:
+        recent_results = _load_recent_task_results(job)
+        findings = _load_all_findings(job)
+        synth_md = _load_latest_synthesis_md(job)
+        new_plan = await tactical_replan(
+            job,
+            plan,
+            recent_results,
+            router=router,
+            findings=findings,
+            synthesis_md=synth_md,
+        )
+    except Exception as exc:  # noqa: BLE001 — drain replan failure must not kill the loop
+        emit(
+            job,
+            "WARN",
+            "loop",
+            "warning",
+            {"drain_replan_failed": True, "error": str(exc)},
+        )
+        return None
+
+    if not new_plan.task_template:
+        return None
+    return new_plan
 
 
 def _make_wait_fn(wait_seq: tuple[int, ...]) -> Callable[[Any], int]:
@@ -724,6 +860,7 @@ async def run_loop(
     tasks_done = 0
     stopped = False
     cap_hit = False
+    drain_replans = 0
 
     checkpoint(
         job,
@@ -734,7 +871,23 @@ async def run_loop(
     while not _should_stop(job) and not plan.is_complete() and tasks_done < max_tasks:
         task = next_pending(job)
         if task is None:
-            break
+            if drain_replans >= MAX_DRAIN_REPLANS:
+                emit(
+                    job,
+                    "WARN",
+                    "loop",
+                    "warning",
+                    {"drain_replan_cap_hit": True, "cap": MAX_DRAIN_REPLANS},
+                )
+                break
+            new_plan = await _drain_replan(
+                job, plan, router=router, drain_count=drain_replans + 1
+            )
+            drain_replans += 1
+            if new_plan is None:
+                break
+            plan = new_plan
+            continue
 
         mark_running(task["id"], db_path=job.db_path)
         emit(
@@ -889,6 +1042,7 @@ async def run_loop(
         "stopped": stopped,
         "completed": plan.is_complete(),
         "cap_hit": cap_hit,
+        "drain_replans": drain_replans,
     }
 
 
@@ -966,6 +1120,7 @@ async def _final_synthesis_best_effort(
 __all__ = [
     "HEURISTIC_CHECK_EVERY_N",
     "Handler",
+    "MAX_DRAIN_REPLANS",
     "MAX_TASKS_PER_JOB",
     "RETRY_MAX_ATTEMPTS",
     "RETRY_WAITS",

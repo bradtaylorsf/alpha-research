@@ -285,23 +285,29 @@ async def tactical_replan(
     recent_results: list[dict[str, Any]],
     *,
     router: Router,
+    findings: list[dict[str, Any]] | None = None,
+    synthesis_md: str | None = None,
 ) -> Plan:
     """Run a small in-loop replan on the local ``general`` tier.
 
     The prior plan + recent task results are serialized into the run-prompt
-    payload so the planner can adjust without a full cloud rewrite. The
-    returned plan's version is set to ``plan.version + 1`` and persisted.
+    payload so the planner can adjust without a full cloud rewrite. Optional
+    ``findings`` and ``synthesis_md`` carry the wider research state so a
+    drain-driven replan (issue #117) can pivot on what's been learned, not
+    just on what just ran. The returned plan's version is set to
+    ``plan.version + 1`` and persisted.
     """
     _assert_under_cap(job)
     next_version = plan.version + 1
-    context = json.dumps(
-        {
-            "prior_plan": plan.model_dump(),
-            "recent_results": recent_results,
-        },
-        sort_keys=True,
-        default=str,
-    )
+    payload: dict[str, Any] = {
+        "prior_plan": plan.model_dump(),
+        "recent_results": recent_results,
+    }
+    if findings is not None:
+        payload["findings"] = findings
+    if synthesis_md is not None:
+        payload["synthesis_md"] = synthesis_md
+    context = json.dumps(payload, sort_keys=True, default=str)
     raw = await _run_planner_for_yaml(
         job, tier="general", router=router, user_message=context
     )
