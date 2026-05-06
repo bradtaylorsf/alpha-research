@@ -65,6 +65,7 @@ that list, so there is no drift.
 | `RESEARCH_DAEMON_PROGRESS` | no | Set to `0` to suppress the foreground Rich progress bar the daemon writes to stdout when run interactively. |
 | `COURTLISTENER_API_TOKEN` | no | CourtListener API token (free w/ signup) — required by `tools/courtlistener.py`. Authenticated tier is 5,000 req/hr; anonymous traffic is throttled to the point of unusability. |
 | `DATA_GOV_API_KEY` | no | api.data.gov key (free w/ signup at <https://api.data.gov/signup/>) — used by `tools/fec.py` (OpenFEC). Authenticated tier is 1,000 req/hr; falls back to `DEMO_KEY` (~40 req/hr per IP) when unset. |
+| `LDA_API_KEY` | no | Senate Lobbying Disclosure Act API key (free, optional, register at <https://lda.senate.gov/api/register/>) — used by `tools/lda.py`. Anonymous works for low-volume; authenticated raises rate limits. Sent via `Authorization: Token <key>`. |
 
 ## LM Studio
 

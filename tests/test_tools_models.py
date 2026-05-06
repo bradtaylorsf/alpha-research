@@ -31,6 +31,7 @@ EXPECTED_SOURCE_KINDS = (
     "fedregister",
     "nonprofits",
     "congress",
+    "lda",
 )
 
 
