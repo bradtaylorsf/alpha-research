@@ -368,6 +368,15 @@ async def test_fetch_returns_none_for_unknown_host(
     assert await fedregister.fetch("https://example.com/some-page") is None
 
 
+async def test_fetch_rejects_lookalike_host(monkeypatch, cache_dir: Path):
+    """A subdomain spoof like ``federalregister.gov.evil.example`` must not pass."""
+    spoof = (
+        "https://federalregister.gov.evil.example/"
+        "documents/2023/11/01/2023-28147/safe-secure"
+    )
+    assert await fedregister.fetch(spoof) is None
+
+
 async def test_fetch_returns_none_for_non_doc_path(
     monkeypatch, cache_dir: Path
 ):

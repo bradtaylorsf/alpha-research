@@ -281,7 +281,11 @@ async def search(
 def _classify_url(url: str) -> str | None:
     """Return the document number when ``url`` is a Federal Register doc page."""
     parsed = urlparse(url)
-    if "federalregister.gov" not in (parsed.netloc or "").lower():
+    host = (parsed.netloc or "").lower().split(":", 1)[0]
+    # Strict host match so look-alikes like ``federalregister.gov.attacker.example``
+    # don't pass — the Source.url would otherwise leak the attacker domain
+    # downstream even though the body came from the official API.
+    if host != "federalregister.gov" and not host.endswith(".federalregister.gov"):
         return None
     m = _DOC_URL_RE.search(parsed.path or "")
     if not m:
