@@ -251,6 +251,64 @@ def _smoke_nonprofits(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_linkedin(query: str) -> str:
+    """Smoke wrapper: LinkedIn person search + top-hit profile rollup.
+
+    Per AC: ``research _smoke-tool linkedin "George Santos"`` should
+    return the canonical profile via the configured broker (Proxycurl by
+    default). Lists the top-5 person hits with current title / company /
+    location / permalink, then attempts ``fetch()`` on the top hit and
+    prints current title, current company, employment count, and
+    education count so an operator can eyeball broker health.
+    """
+    from research_agent.tools import linkedin
+
+    async def _run() -> str:
+        results = await linkedin.search(query, kind="person", max_results=5)
+        if not results:
+            return f"linkedin search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            current_title = hit.extras.get("current_title") or "?"
+            current_company = hit.extras.get("current_company") or "?"
+            location = hit.extras.get("location") or "?"
+            broker = hit.extras.get("broker") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {current_title} @ {current_company} —"
+                f" {location} — broker {broker}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+
+        top = results[0]
+        source = await linkedin.fetch(top.url)
+        if source is None:
+            lines.append(
+                f"\nfetch({top.url}) returned None — broker call failed"
+            )
+        else:
+            employment = source.metadata.get("employment_history") or []
+            education = source.metadata.get("education") or []
+            current_title = ""
+            current_company = ""
+            if employment:
+                first = employment[0]
+                if isinstance(first, dict):
+                    current_title = str(first.get("title") or "")
+                    current_company = str(first.get("company") or "")
+            lines.append(f"\nProfile for {top.title}")
+            lines.append(f"  current_title: {current_title or '?'}")
+            lines.append(f"  current_company: {current_company or '?'}")
+            lines.append(f"  employment_count: {len(employment)}")
+            lines.append(f"  education_count: {len(education)}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_fec(query: str) -> str:
     """Smoke wrapper: FEC OpenFEC candidate search + top-hit cycle totals.
 
@@ -1047,6 +1105,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "edgar": _smoke_edgar,
     "courtlistener": _smoke_courtlistener,
     "scholar": _smoke_scholar,
+    "linkedin": _smoke_linkedin,
     "fedregister": _smoke_fedregister,
     "nonprofits": _smoke_nonprofits,
     "fec": _smoke_fec,

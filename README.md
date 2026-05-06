@@ -68,6 +68,9 @@ that list, so there is no drift.
 | `LDA_API_KEY` | no | Senate Lobbying Disclosure Act API key (free, optional, register at <https://lda.senate.gov/api/register/>) — used by `tools/lda.py`. Anonymous works for low-volume; authenticated raises rate limits. Sent via `Authorization: Token <key>`. |
 | `OPENCORPORATES_API_KEY` | no | OpenCorporates API token — used by `tools/opencorporates.py`. Anonymous tier is ~50 calls/day with limited fields; richer fields require a token (sent as `?api_token=<key>`). Public-benefit access by emailing service desk; commercial pricing £2,250–£12,000/yr. |
 | `SERPAPI_KEY` | no | SERPAPI key — required by `tools/scholar.py` (Google Scholar engine, case law + academic). Plans start at $75/mo for 5k searches across all engines; per-query ≈ $0.015. Sign up at <https://serpapi.com/>. |
+| `LINKEDIN_DATA_API_KEY` | no | LinkedIn data-broker key (default broker: Proxycurl) — required by `tools/linkedin.py`. Per-lookup ≈ $0.01–$0.05; gate fetches behind explicit planner tasks. Sign up at <https://nubela.co/proxycurl/>. |
+| `LINKEDIN_BROKER` | no | Broker recipe used by `tools/linkedin.py`. `proxycurl` (default) or `lix`; switching to `lix` consults `LIX_API_KEY` instead of `LINKEDIN_DATA_API_KEY`. |
+| `LIX_API_KEY` | no | Lix data-broker key (<https://lix-it.com/>) — only consulted when `LINKEDIN_BROKER=lix`. Similar per-lookup pricing to Proxycurl. |
 
 ## LM Studio
 
