@@ -839,6 +839,150 @@ def test_synthesizer_prompt_requires_paid_resources_section() -> None:
     assert "paid_opportunities" in body
 
 
+# ---------------------------------------------------------------------------
+# Scope-aware closure (issue #159)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def broad_scope_plan(job: Job) -> Plan:
+    p = Plan(
+        version=1,
+        objective="Project 2025 implementation tracker",
+        subgoals=[
+            Subgoal(id=1, description="Identify core policy pillars", done=False),
+            Subgoal(id=2, description="Map policies to federal departments", done=False),
+            Subgoal(id=3, description="Collect legal challenges and pushback", done=False),
+            Subgoal(id=4, description="Track public statements", done=False),
+        ],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=10,
+        scope_class="broad",
+    )
+    write_plan(job, p.model_dump())
+    return p
+
+
+def test_synthesize_broad_scope_context_includes_scope_class(
+    job: Job, db_path: Path, broad_scope_plan: Plan
+) -> None:
+    """The synthesizer's context payload exposes the plan's scope_class.
+
+    Without this, the prompt's scope-aware closure rules can't fire — the
+    synthesizer would default to its old decisive behavior on broad goals
+    and prematurely terminate overnight runs.
+    """
+    _seed_findings(job, [0.7])
+    router = _StubRouter()
+
+    asyncio.run(synthesize(job, broad_scope_plan, router=router))
+
+    assert router.calls
+    _tier, args, _kwargs = router.calls[0]
+    payload = json.loads(args[0])
+    assert payload.get("scope_class") == "broad"
+
+
+def test_build_context_narrow_scope_renders_string(job: Job) -> None:
+    narrow_plan = Plan(
+        version=1,
+        objective="x",
+        subgoals=[Subgoal(id=1, description="x", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=1,
+        scope_class="narrow",
+    )
+    context_json = synth_module._build_context(
+        goal="x",
+        plan=narrow_plan,
+        findings=[],
+        sources={},
+        prior=None,
+        critique=None,
+        followup_recipes="",
+        paid_unblock_recipes="",
+        final=False,
+    )
+    payload = json.loads(context_json)
+    assert payload["scope_class"] == "narrow"
+
+
+def test_build_context_missing_scope_class_renders_null(job: Job) -> None:
+    plan = Plan(
+        version=1,
+        objective="x",
+        subgoals=[Subgoal(id=1, description="x", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=1,
+    )
+    context_json = synth_module._build_context(
+        goal="x",
+        plan=plan,
+        findings=[],
+        sources={},
+        prior=None,
+        critique=None,
+        followup_recipes="",
+        paid_unblock_recipes="",
+        final=False,
+    )
+    payload = json.loads(context_json)
+    assert payload["scope_class"] is None
+
+
+def test_synthesize_broad_scope_corpus_remains_inconclusive(
+    job: Job, db_path: Path, broad_scope_plan: Plan
+) -> None:
+    """Broad-scope subgoals reported as inconclusive remain done=False end-to-end.
+
+    Wiring check: a synthesizer response declaring 3 of 4 broad-scope
+    subgoals inconclusive must persist into the plan with those subgoals
+    still open, so drain-replan can keep firing instead of terminating.
+    """
+    # Seed a 45-task-style corpus so the test mirrors the failure repro.
+    _seed_findings(job, [0.7] * 45)
+
+    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
+    fence = (
+        '\n```json\n'
+        '{"subgoal_status": {'
+        '"1": "confirmed",'
+        '"2": "inconclusive",'
+        '"3": "inconclusive",'
+        '"4": "inconclusive"'
+        '}}'
+        '\n```\n'
+    )
+    router = _StubRouter(content=body + fence)
+
+    asyncio.run(synthesize(job, broad_scope_plan, router=router))
+
+    subgoals = _read_latest_plan_subgoals(db_path, job.id)
+    by_id = {sg["id"]: sg for sg in subgoals}
+    # Inconclusive majority is preserved: 3 of 4 stay open.
+    open_ids = [sid for sid, sg in by_id.items() if not sg["done"]]
+    assert sorted(open_ids) == [2, 3, 4]
+    assert by_id[1]["done"] is True
+
+    events = _read_event_rows(db_path, job.id)
+    updated = [e for e in events if e["kind"] == "plan_subgoals_updated"]
+    assert len(updated) == 1
+    payload = json.loads(updated[0]["payload_json"])
+    assert sorted(payload["inconclusive"]) == [2, 3, 4]
+    assert payload["closed"] == [1]
+
+
+def test_synthesizer_prompt_has_scope_aware_closure_rules() -> None:
+    """The synthesizer prompt must instruct the model to apply scope-aware gating."""
+    body = prompts_loader.load_prompt("synthesizer", goal="x")
+    assert "scope_class" in body
+    assert "Scope-aware closure rules" in body
+    # All three gates must be named so the model knows what to check.
+    assert "5 distinct" in body
+    assert "2 specific" in body
+    assert "3 distinct" in body
+
+
 def test_synthesize_accepts_fence_with_space_before_json_lang(
     job: Job, db_path: Path, multi_subgoal_plan: Plan
 ) -> None:
