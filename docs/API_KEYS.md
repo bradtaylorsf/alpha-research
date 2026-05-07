@@ -52,7 +52,7 @@ know the env-var landscape is complete:
 
 | Connector | Issue | Notes |
 |---|---|---|
-| SEC EDGAR | #98 | Send a contact email in `RESEARCH_USER_AGENT` (per SEC policy); no key |
+| SEC EDGAR | #98 | Required: `RESEARCH_USER_AGENT` must include a contact email (e.g. `research-agent you@example.com`) — SEC enforces this server-side; smoke gracefully skips when unset |
 | ProPublica Nonprofit Explorer | #100 | Anonymous |
 | Federal Register | #102 | Anonymous |
 | USAspending.gov | #104 | Anonymous |
