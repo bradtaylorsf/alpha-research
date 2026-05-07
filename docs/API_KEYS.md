@@ -41,6 +41,7 @@ Connector-specific free keys (separate signups):
 | CourtListener / RECAP | #93 | `COURTLISTENER_API_TOKEN` | <https://www.courtlistener.com/sign-in/> → Profile → API | Free with email signup; 5,000 req/hr authenticated |
 | Senate LDA | #103 | `LDA_API_KEY` (optional — anonymous works at lower rate) | <https://lda.senate.gov/api/register/> | Anonymous tier sufficient for most use; key just raises the rate |
 | YouTube Data API v3 (search) | #111 | `YOUTUBE_API_KEY` | <https://console.cloud.google.com/apis/credentials> → enable "YouTube Data API v3" | Free tier: 10,000 quota units/day |
+| OpenCorporates | #92 | `OPENCORPORATES_API_KEY` | <https://opencorporates.com/info/about> (request public-benefit access) | Anonymous v0.4 access is gated (HTTP 401 as of 2026-05); a key is required for any live request. Without one, the connector returns no results and smoke skips cleanly. Commercial pricing £2,250–£12,000/yr |
 
 ---
 
@@ -58,7 +59,6 @@ know the env-var landscape is complete:
 | GDELT 2.0 | #105 | Anonymous |
 | OFAC sanctions | #116 | Treasury bulk download; anonymous |
 | LittleSis | #97 | Anonymous |
-| OpenCorporates | #92 | Anonymous tier ~50 calls/day; for richer data, request a public-benefit key at <https://opencorporates.com/info/about> |
 | BBB profile lookup | #95 | Playwright; no API |
 | State Secretary of State | #101 | Playwright; no API |
 | State licensing boards (CSLB) | #91 | Playwright; no API |

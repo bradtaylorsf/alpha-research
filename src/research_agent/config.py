@@ -121,10 +121,12 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         name="OPENCORPORATES_API_KEY",
         required=False,
         description=(
-            "OpenCorporates API token (?api_token=...). Anonymous tier is"
-            " ~50 calls/day with limited fields; richer fields require a key."
-            " Public-benefit access by emailing service desk; commercial"
-            " pricing £2,250–£12,000/yr."
+            "OpenCorporates API token (?api_token=...). Required for any"
+            " live OpenCorporates request — anonymous v0.4 access is now"
+            " gated (returns HTTP 401). Without a key, the connector"
+            " returns no results and smoke skips cleanly. Public-benefit"
+            " access by emailing service desk; commercial pricing"
+            " £2,250–£12,000/yr."
         ),
     ),
     EnvKey(
