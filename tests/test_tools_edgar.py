@@ -523,3 +523,78 @@ def test_smoke_registry_includes_edgar():
     from research_agent.tools import TOOL_REGISTRY
 
     assert "edgar" in TOOL_REGISTRY
+
+
+def test_smoke_edgar_skips_when_user_agent_missing(monkeypatch):
+    """Issue #156: smoke must not raise when RESEARCH_USER_AGENT is unset.
+
+    The default UA declared in EXPECTED_ENV_KEYS contains no ``@``, so the
+    fallback is exercised here too — the wrapper must treat both unset env
+    *and* the default placeholder as "no contact email".
+    """
+    from research_agent.tools import TOOL_REGISTRY
+
+    monkeypatch.delenv("RESEARCH_USER_AGENT", raising=False)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("edgar.search must not run when UA is missing")
+
+    monkeypatch.setattr(edgar, "search", _boom)
+
+    result = TOOL_REGISTRY["edgar"]("Cisco 8-K cybersecurity")
+
+    assert isinstance(result, str)
+    assert result.startswith("_smoke-tool edgar: would need RESEARCH_USER_AGENT")
+
+
+def test_smoke_edgar_skips_when_user_agent_has_no_email(monkeypatch):
+    """A UA without an `@` should also gracefully skip rather than hard-fail."""
+    from research_agent.tools import TOOL_REGISTRY
+
+    monkeypatch.setenv("RESEARCH_USER_AGENT", "research-agent no-email-here")
+
+    def _boom(*_a, **_k):
+        raise AssertionError("edgar.search must not run when UA has no email")
+
+    monkeypatch.setattr(edgar, "search", _boom)
+
+    result = TOOL_REGISTRY["edgar"]("Cisco 8-K cybersecurity")
+
+    assert result.startswith("_smoke-tool edgar: would need RESEARCH_USER_AGENT")
+
+
+def test_smoke_edgar_runs_live_call_when_user_agent_set(monkeypatch):
+    """With a valid UA, the smoke wrapper invokes edgar.search and formats hits."""
+    from datetime import UTC, datetime
+
+    from research_agent.tools import TOOL_REGISTRY
+    from research_agent.tools.models import SearchResult
+
+    monkeypatch.setenv("RESEARCH_USER_AGENT", "research-agent test@example.com")
+
+    called: dict[str, object] = {}
+
+    async def _fake_search(query: str, *, form_type=None, max_results=20):
+        called["query"] = query
+        called["form_type"] = form_type
+        called["max_results"] = max_results
+        return [
+            SearchResult(
+                title="Cisco 8-K",
+                url="https://www.sec.gov/Archives/edgar/data/858877/0000858877-23-000018-index.htm",
+                snippet="Cybersecurity incident disclosure",
+                source_kind="sec",
+                published_at=datetime(2023, 8, 9, tzinfo=UTC),
+                extras={"company": "Cisco Systems, Inc.", "form": "8-K"},
+            )
+        ]
+
+    monkeypatch.setattr(edgar, "search", _fake_search)
+
+    result = TOOL_REGISTRY["edgar"]("Cisco 8-K cybersecurity")
+
+    assert called["query"] == "Cisco 8-K cybersecurity"
+    assert called["form_type"] == "8-K"
+    assert "Cisco Systems, Inc." in result
+    assert "8-K" in result
+    assert "2023-08-09" in result

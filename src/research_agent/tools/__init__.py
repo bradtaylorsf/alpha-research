@@ -85,7 +85,21 @@ def _smoke_edgar(query: str) -> str:
     surface recent material-event filings. Each line shows the form, company,
     permalink, file date, and a short snippet so an operator can eyeball
     whether the SEC FTS index is reachable and the UA gate is healthy.
+
+    SEC requires a contact email in the User-Agent. When ``RESEARCH_USER_AGENT``
+    is unset (or doesn't include ``@``), the production path raises
+    ``RuntimeError`` — for smoke we'd rather skip gracefully so the
+    per-issue smoke gate doesn't block unrelated work.
     """
+    from research_agent import config
+
+    ua = config.get("RESEARCH_USER_AGENT") or ""
+    if "@" not in ua:
+        return (
+            "_smoke-tool edgar: would need RESEARCH_USER_AGENT"
+            " (with contact email); live test skipped"
+        )
+
     from research_agent.tools import edgar
 
     async def _run() -> str:
