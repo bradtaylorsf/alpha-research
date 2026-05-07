@@ -85,8 +85,8 @@ input context:
   findings answer the subgoal, mark it `confirmed`; if they refute it,
   `refuted`; otherwise `inconclusive`.
 
-- **`broad` or `comprehensive`** — default each subgoal to `inconclusive`
-  UNLESS ALL THREE of the following gates are met:
+- **`medium`, `broad`, or `comprehensive`** — default each subgoal to
+  `inconclusive` UNLESS ALL THREE of the following gates are met:
 
   1. **Source breadth:** at least 5 distinct source URLs are cited in the
      corpus for findings that bear on this subgoal.
@@ -99,12 +99,12 @@ input context:
      touch at least 3 different departments. For a subgoal about
      "implementation status across states", at least 3 states.
 
-  When any gate fails on a `broad`/`comprehensive` subgoal, mark it
-  `inconclusive` so the loop continues investigating. A `confirmed` on a
-  partially-covered broad subgoal terminates the entire run; on a recent
-  Project 2025 overnight test the synthesizer closed all 4 broad
-  subgoals after only 45 tasks, ending what should have been a 10-hour
-  investigation in 13 minutes.
+  When any gate fails on a `medium`/`broad`/`comprehensive` subgoal,
+  mark it `inconclusive` so the loop continues investigating. A
+  `confirmed` on a partially-covered multi-entity subgoal terminates
+  the entire run; on a recent Project 2025 overnight test the
+  synthesizer closed all 4 broad subgoals after only 45 tasks, ending
+  what should have been a 10-hour investigation in 13 minutes.
 
 ## Required sections
 
