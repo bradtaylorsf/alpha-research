@@ -195,6 +195,11 @@ that list, so there is no drift.
 | `LINKEDIN_DATA_API_KEY` | no | LinkedIn data-broker key (default broker: Proxycurl) — required by `tools/linkedin.py`. Per-lookup ≈ $0.01–$0.05; gate fetches behind explicit planner tasks. Sign up at <https://nubela.co/proxycurl/>. |
 | `LINKEDIN_BROKER` | no | Broker recipe used by `tools/linkedin.py`. `proxycurl` (default) or `lix`; switching to `lix` consults `LIX_API_KEY` instead of `LINKEDIN_DATA_API_KEY`. |
 | `LIX_API_KEY` | no | Lix data-broker key (<https://lix-it.com/>) — only consulted when `LINKEDIN_BROKER=lix`. Similar per-lookup pricing to Proxycurl. |
+| `RESEARCH_REDDIT_USER_AGENT` | no | Override the User-Agent `tools/reddit.py` sends. Reddit's anonymous JSON endpoint 403s the project's descriptive UA; the connector defaults to a Chrome UA. Set this when you have a registered OAuth app or want a different override than `RESEARCH_USER_AGENT` (consulted next in the fallback chain). |
+| `RESEARCH_MODELS_CONFIG` | no | Path to the models routing YAML the daemon loads. Defaults to `config/models.yaml` relative to cwd. Set when running out-of-tree or pointing at a packaged config. |
+| `RESEARCH_DB_PATH` | no | Override the SQLite index path the daemon uses. Unset uses `data/index.sqlite`. Useful for isolating runs under test or pointing at a writable disk. |
+| `RESEARCH_JOBS_ROOT` | no | Override the directory that holds per-job folders. Unset uses `jobs/`. Useful for redirecting big runs onto a larger disk. |
+| `SANCTIONS_DB_PATH` | no | Override where `tools/sanctions.py` writes its SDN/EU index sqlite. Unset uses the module default under `data/sanctions/`. Useful when refreshing into a staging path before atomic swap. |
 
 </details>
 

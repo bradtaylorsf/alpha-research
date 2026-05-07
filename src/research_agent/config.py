@@ -170,6 +170,54 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
             " LINKEDIN_BROKER=lix. Similar per-lookup pricing to Proxycurl."
         ),
     ),
+    EnvKey(
+        name="RESEARCH_REDDIT_USER_AGENT",
+        required=False,
+        description=(
+            "Override the User-Agent that tools/reddit.py sends. Reddit's"
+            " anonymous JSON endpoint 403s the project's descriptive UA, so"
+            " the connector defaults to a Chrome UA. Set this when you have"
+            " a registered Reddit OAuth app or want a different override"
+            " than RESEARCH_USER_AGENT (which is consulted next)."
+        ),
+    ),
+    EnvKey(
+        name="RESEARCH_MODELS_CONFIG",
+        required=False,
+        description=(
+            "Path to the models routing YAML the daemon loads. Defaults to"
+            " 'config/models.yaml' relative to cwd. Set this when running"
+            " out-of-tree or pointing at a packaged config."
+        ),
+        default="config/models.yaml",
+    ),
+    EnvKey(
+        name="RESEARCH_DB_PATH",
+        required=False,
+        description=(
+            "Override the SQLite index path the daemon uses. Unset uses the"
+            " repo default ('data/index.sqlite'). Useful for isolating runs"
+            " under test or pointing at a writable disk."
+        ),
+    ),
+    EnvKey(
+        name="RESEARCH_JOBS_ROOT",
+        required=False,
+        description=(
+            "Override the directory that holds per-job folders. Unset uses"
+            " the repo default ('jobs/'). Useful for redirecting big runs"
+            " onto a larger disk."
+        ),
+    ),
+    EnvKey(
+        name="SANCTIONS_DB_PATH",
+        required=False,
+        description=(
+            "Override where tools/sanctions.py writes its SDN/EU index"
+            " sqlite. Unset uses the module default under 'data/sanctions/'."
+            " Useful when refreshing into a staging path before atomic swap."
+        ),
+    ),
 )
 
 
