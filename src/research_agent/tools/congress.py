@@ -613,13 +613,16 @@ def _bill_type_from_slug(slug: str) -> str | None:
 def _classify_url(url: str) -> tuple[str | None, dict[str, Any]]:
     """Return ``(resource, ids)`` for supported www.congress.gov URLs.
 
-    Strict host check — anything outside ``www.congress.gov`` (look-alikes
-    like ``www.congress.gov.attacker.example`` must not pass) returns
-    ``(None, {})``.
+    Strict host check — anything outside ``www.congress.gov`` /
+    ``congress.gov`` (look-alikes like ``www.congress.gov.attacker.example``
+    must not pass) returns ``(None, {})``. The bare-host form is accepted
+    so URLs that arrive without the ``www.`` prefix from search results
+    still classify; the API calls themselves are issued internally to the
+    canonical host.
     """
     parsed = urlparse(url)
     host = (parsed.netloc or "").lower().split(":", 1)[0]
-    if host != "www.congress.gov":
+    if host not in {"www.congress.gov", "congress.gov"}:
         return None, {}
     path = parsed.path or ""
 

@@ -101,6 +101,36 @@ classification, and disciplinary history — before generic web hits.
 The `licensing` connector takes over from there once the URL is in
 hand; the planner only needs to seed the discovery query.
 
+### Connector routing — use `site:` operators to reach authoritative APIs
+
+`web_fetch` host-dispatches the domains below to dedicated connector
+modules — a `site:<domain>` query is the path to the API. Plain
+`web_search` queries hit Brave's general index and miss these
+authoritative sources entirely; many of them are not even crawlable
+without the right URL shape. **Mix `site:`-scoped queries into broad /
+comprehensive plans whenever a subgoal asks about federal records,
+lobbying, campaign finance, court filings, nonprofits, sanctions, or
+licensing** — those signals only show up when the planner names the
+domain.
+
+| Domain | What's there | Example query |
+|---|---|---|
+| `site:sec.gov` | SEC EDGAR filings (10-K, 10-Q, 8-K, Form 4 insider trades) | `site:sec.gov "Cisco" 8-K cybersecurity` |
+| `site:courtlistener.com` | Federal & state court opinions, dockets (RECAP), oral arguments | `site:courtlistener.com "Schedule F" appellate` |
+| `site:federalregister.gov` | Federal Register rules, proposed rules, agency notices since 1994 | `site:federalregister.gov "Schedule F"` |
+| `site:projects.propublica.org/nonprofits` | ProPublica Nonprofit Explorer (Form 990 filings) | `site:projects.propublica.org/nonprofits "Heritage Foundation"` |
+| `site:fec.gov` | FEC candidate / committee filings, contributions, expenditures | `site:fec.gov "Trump 2024" committee` |
+| `site:congress.gov` | Bills, members, committees, hearings, congressional record | `site:congress.gov "Project 2025"` |
+| `site:lda.senate.gov` | Senate Lobbying Disclosure Act filings (legacy host; `lda.gov` also routes) | `site:lda.senate.gov "Heritage Foundation"` |
+| `site:usaspending.gov` | Federal contracts, grants, loans (award-level detail) | `site:usaspending.gov "Heritage Foundation" contract` |
+| GDELT | Global news event aggregator — **no `site:` operator**; emit a plain `web_search` query and the GDELT connector indexes from there | `Project 2025 mainstream coverage` |
+| `site:littlesis.org` | Power-mapping database — entities, donations, board seats, family ties (lead, not evidence) | `site:littlesis.org "Peter Thiel"` |
+| `site:treasury.gov sanctions` | OFAC sanctions list (SDN, sectoral, country programs) | `site:treasury.gov sanctions "Wagner Group"` |
+| `site:powersearch.sos.ca.gov` | California Cal-Access campaign finance (donors, committees, IEs) | `site:powersearch.sos.ca.gov "Newsom"` |
+| `site:cslb.ca.gov` | California Contractors State License Board profiles, disciplinary history | `site:cslb.ca.gov "SBI Builders"` |
+| `site:bizfileonline.sos.ca.gov` | California Secretary of State business entity filings | `site:bizfileonline.sos.ca.gov "Acme Corp"` |
+| `site:bbb.org` | Better Business Bureau profiles, ratings, complaint counts | `site:bbb.org "SBI Builders"` |
+
 ### Payload shapes
 
 - `web_search`: `{ query: "…", sub_question: "…", max_results: 10, engine: "auto" }` (optional `expand_top_k` to override the scope-aware default)
@@ -165,8 +195,14 @@ task_template:
     depends_on: []
   - kind: web_search
     payload:
-      query: "Acme Corp WARN notice 2024 SEC filing"
-      sub_question: "Are there formal SEC or WARN notices documenting the layoffs?"
+      query: "site:sec.gov \"Acme Corp\" 8-K layoffs"
+      sub_question: "Are there SEC filings (8-K material event, 10-Q risk-factor amendment) referencing the layoffs?"
+    priority: 0
+    depends_on: []
+  - kind: web_search
+    payload:
+      query: "Acme Corp WARN notice 2024"
+      sub_question: "Are there state WARN-Act notices documenting the layoffs?"
     priority: 0
     depends_on: []
 ```
@@ -233,7 +269,14 @@ or by sub-policy is `broad` or `comprehensive`.
   `Project 2025 HUD`, `Project 2025 VA`, `Project 2025 Transportation`,
   plus cross-cutting queries `Project 2025 executive orders`, `Project
   2025 schedule F`, `Project 2025 Heritage Foundation`, `Project 2025
-  staffing tracker` (~20–30 searches).
+  staffing tracker`, plus authoritative-source queries
+  `site:congress.gov "Project 2025"`,
+  `site:federalregister.gov "Schedule F"`,
+  `site:lda.senate.gov "Heritage Foundation"`,
+  `site:projects.propublica.org/nonprofits "Heritage Foundation"`
+  (~20–30 searches). Always include a handful of `site:`-scoped
+  queries in broad/comprehensive plans so the connector routing in
+  the worked YAML below has somewhere to land.
 - **comprehensive** — Goal: *"Complete public record of Anthropic's
   safety governance 2023–present"*. Queries span: each public policy
   document, each leadership statement, each external commitment,

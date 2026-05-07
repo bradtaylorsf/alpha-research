@@ -453,12 +453,15 @@ async def search(
 def _classify_url(url: str) -> tuple[str | None, str | None]:
     """Return ``(resource, id)`` where resource ∈ {"candidate","committee"}.
 
-    Anything outside ``www.fec.gov`` (strict host match — look-alikes like
-    ``www.fec.gov.attacker.example`` must not pass) returns ``(None, None)``.
+    Anything outside ``www.fec.gov`` / ``fec.gov`` (strict host match —
+    look-alikes like ``www.fec.gov.attacker.example`` must not pass)
+    returns ``(None, None)``. The bare-host form is accepted so URLs
+    that arrive without the ``www.`` prefix from search results still
+    classify; API calls are issued internally to the canonical host.
     """
     parsed = urlparse(url)
     host = (parsed.netloc or "").lower().split(":", 1)[0]
-    if host != "www.fec.gov":
+    if host not in {"www.fec.gov", "fec.gov"}:
         return None, None
     path = parsed.path or ""
     m = _CANDIDATE_URL_RE.match(path)

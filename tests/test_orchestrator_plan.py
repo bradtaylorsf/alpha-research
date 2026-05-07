@@ -742,3 +742,55 @@ def test_persisted_plan_round_trips_via_db(
     assert rebuilt == returned
     expected = stub.model_copy(update={"version": 1})
     assert rebuilt == expected
+
+
+# ---------------------------------------------------------------------------
+# planner.md connector-routing guardrail (issue #174)
+# ---------------------------------------------------------------------------
+
+
+def test_planner_md_documents_connector_site_operators() -> None:
+    """`prompts/planner.md` must teach the full connector roster (issue #174).
+
+    Without this section, the planner emits plain `web_search` queries and
+    bypasses every site:-routed connector — see the 2026-05-07 Project 2025
+    overnight run that fired 8× plain web_search and 0× site:-scoped queries.
+    """
+    body = prompts_loader.load_prompt(
+        "planner",
+        goal="dummy goal — this test only inspects static prompt content",
+    )
+
+    assert "Connector routing" in body, (
+        "planner.md is missing the 'Connector routing' section that teaches "
+        "the model when to use site: operators"
+    )
+
+    # One concrete site:-prefixed example per shipped connector. The
+    # web_fetch host-dispatch is keyed on these domains; if the planner
+    # never names them, the connectors never run.
+    required_site_patterns = [
+        "site:sec.gov",
+        "site:courtlistener.com",
+        "site:federalregister.gov",
+        "site:projects.propublica.org/nonprofits",
+        "site:fec.gov",
+        "site:congress.gov",
+        "site:lda.senate.gov",
+        "site:usaspending.gov",
+        "site:littlesis.org",
+        "site:treasury.gov",
+        "site:powersearch.sos.ca.gov",
+        "site:cslb.ca.gov",
+        "site:bizfileonline.sos.ca.gov",
+        "site:bbb.org",
+    ]
+    missing = [pat for pat in required_site_patterns if pat not in body]
+    assert not missing, (
+        f"planner.md must include one example per connector domain — missing: {missing}"
+    )
+
+    # GDELT is the lone aggregator: no site: operator. The doc should
+    # explicitly say so or the planner will assume site:gdelt-something
+    # is the right move.
+    assert "GDELT" in body, "planner.md should call out GDELT as the no-site: aggregator"
