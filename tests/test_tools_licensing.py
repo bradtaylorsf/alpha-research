@@ -1,10 +1,11 @@
-"""Tests for `research_agent.tools.licensing` (issue #91)."""
+"""Tests for `research_agent.tools.licensing` (issues #91 and #155)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -14,99 +15,117 @@ from research_agent.tools import licensing
 
 # ---------------------------------------------------------------------------
 # Fakes — Playwright surface area sufficient to exercise licensing.py.
+#
+# search() and fetch() now both call BS4 parsers against page.content(), so
+# the fake page only needs to: (a) record click/fill/screenshot calls so we
+# can assert orchestration, and (b) hand back a fixed HTML string.
 # ---------------------------------------------------------------------------
 
 
 class _FakeLocator:
     def __init__(
         self,
+        page: _FakePage | None = None,
+        selector: str = "",
         *,
-        text: str = "",
-        attrs: dict[str, str] | None = None,
-        children: dict[str, _FakeLocator] | None = None,
-        items: list[_FakeLocator] | None = None,
-        on_fill: Any = None,
         on_click: Any = None,
-        raise_on_locator: bool = False,
-        raise_on_all: bool = False,
+        on_fill: Any = None,
         raise_on_click: bool = False,
-        raise_on_inner_text: bool = False,
+        raise_on_fill: bool = False,
     ) -> None:
-        self._text = text
-        self._attrs = attrs or {}
-        self._children = children or {}
-        self._items = items or []
-        self._on_fill = on_fill
+        self._page = page
+        self._selector = selector
         self._on_click = on_click
-        self._raise_on_locator = raise_on_locator
-        self._raise_on_all = raise_on_all
+        self._on_fill = on_fill
         self._raise_on_click = raise_on_click
-        self._raise_on_inner_text = raise_on_inner_text
-        self.fill_calls: list[str] = []
+        self._raise_on_fill = raise_on_fill
         self.click_calls: int = 0
+        self.fill_calls: list[str] = []
 
     @property
     def first(self) -> _FakeLocator:
         return self
 
-    async def all(self) -> list[_FakeLocator]:
-        if self._raise_on_all:
-            raise RuntimeError("selector drift")
-        return list(self._items)
-
-    async def inner_text(self) -> str:
-        if self._raise_on_inner_text:
-            raise RuntimeError("selector miss")
-        return self._text
-
-    async def get_attribute(self, name: str) -> str | None:
-        return self._attrs.get(name)
-
-    async def fill(self, value: str) -> None:
-        self.fill_calls.append(value)
-        if self._on_fill is not None:
-            self._on_fill(value)
-
     async def click(self) -> None:
         self.click_calls += 1
+        if self._page is not None:
+            self._page.click_order.append(self._selector)
         if self._raise_on_click:
             raise RuntimeError("click failed")
         if self._on_click is not None:
             self._on_click()
 
-    def locator(self, selector: str) -> _FakeLocator:
-        if self._raise_on_locator:
-            raise RuntimeError("selector drift")
-        return self._children.get(selector, _FakeLocator())
+    async def fill(self, value: str) -> None:
+        self.fill_calls.append(value)
+        if self._page is not None:
+            self._page.fill_calls.append((self._selector, value))
+        if self._raise_on_fill:
+            raise RuntimeError("fill failed")
+        if self._on_fill is not None:
+            self._on_fill(value)
 
 
 class _FakePage:
-    def __init__(self, selector_map: dict[str, _FakeLocator]) -> None:
-        self._selector_map = selector_map
-        self.closed = False
+    """Minimal stand-in for ``playwright.async_api.Page``.
+
+    ``html`` is what ``page.content()`` returns. Tests preload either the
+    real CSLB results-page HTML (for parser end-to-end coverage) or a
+    minimal hand-rolled snippet (for sentinel-status coverage like
+    page-error / no-hits).
+    """
+
+    def __init__(
+        self,
+        html: str = "",
+        *,
+        locator_overrides: dict[str, _FakeLocator] | None = None,
+        raise_on_content: bool = False,
+    ) -> None:
+        self._html = html
+        self._locator_overrides = locator_overrides or {}
+        self._raise_on_content = raise_on_content
         self.screenshots: list[str] = []
-        self.locator_calls: list[str] = []
+        self.fill_calls: list[tuple[str, str]] = []
         self.click_order: list[str] = []
+        self.wait_for_load_state_calls: list[tuple[str, int | None]] = []
+        self.extra_http_headers: list[dict[str, str]] = []
+        self.content_calls: int = 0
+        self.closed: bool = False
+
+    async def set_extra_http_headers(self, headers: dict[str, str]) -> None:
+        self.extra_http_headers.append(dict(headers))
 
     def locator(self, selector: str) -> _FakeLocator:
-        self.locator_calls.append(selector)
-        loc = self._selector_map.get(selector, _FakeLocator())
-        # Track which selectors are clicked, in order, by hooking each click.
-        original = loc._on_click
-
-        def _on_click() -> None:
-            self.click_order.append(selector)
-            if original is not None:
-                original()
-
-        loc._on_click = _on_click
+        loc = self._locator_overrides.get(selector)
+        if loc is None:
+            loc = _FakeLocator(self, selector)
+            # Cache so the same selector returns the same locator —
+            # useful when a test wants to assert click/fill counts on a
+            # selector it didn't pre-register.
+            self._locator_overrides[selector] = loc
+        else:
+            # Bind the selector + page on registered locators so they
+            # show up in ``click_order`` etc.
+            loc._page = self
+            loc._selector = selector
         return loc
 
-    async def close(self) -> None:
-        self.closed = True
+    async def content(self) -> str:
+        self.content_calls += 1
+        if self._raise_on_content:
+            raise RuntimeError("content failed")
+        return self._html
+
+    async def wait_for_load_state(
+        self, state: str, *, timeout: int | None = None
+    ) -> None:
+        self.wait_for_load_state_calls.append((state, timeout))
 
     async def screenshot(self, *, path: str) -> None:
         self.screenshots.append(path)
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class _FakeContext:
@@ -132,93 +151,103 @@ def _stub_browser(monkeypatch, page: _FakePage) -> dict[str, list[str]]:
     return captured
 
 
-def _build_row(
+# ---------------------------------------------------------------------------
+# Fixture HTML helpers — small inline builders for synthetic CSLB pages.
+# ---------------------------------------------------------------------------
+
+
+def _build_results_html(
+    rows: list[dict[str, str]],
     *,
-    name: str,
-    href: str = "",
-    license_number: str = "",
-    status: str = "",
-    classification: str = "",
-    expiration: str = "",
-) -> _FakeLocator:
-    recipe = licensing._STATE_RECIPES["CA"]
-    return _FakeLocator(
-        children={
-            recipe["name_selector"]: _FakeLocator(text=name),
-            recipe["link_selector"]: _FakeLocator(text=name, attrs={"href": href}),
-            recipe["license_number_selector"]: _FakeLocator(text=license_number),
-            recipe["status_selector"]: _FakeLocator(text=status),
-            recipe["classification_selector"]: _FakeLocator(text=classification),
-            recipe["expiration_selector"]: _FakeLocator(text=expiration),
-        }
-    )
+    table_id: str = "MainContent_dlMain",
+    omit_table: bool = False,
+) -> str:
+    """Build CSLB-shaped results HTML.
 
-
-def _ca_search_page(
-    rows: list[_FakeLocator],
-    *,
-    kind: str = "name",
-    tab_locators: dict[str, _FakeLocator] | None = None,
-    submit_locator: _FakeLocator | None = None,
-) -> _FakePage:
-    """Build a fake CSLB search page wired for the ``kind`` tab.
-
-    ``kind`` is "name" (business name) or "number" (license number) and
-    determines which input/submit selector the fake exposes. ``tab_locators``
-    optionally maps ``"number"``/``"name"`` to per-tab fake locators so a
-    test can assert that the right tab button was clicked.
+    Each row: ``{name, license_number, status, city, name_type, href}``.
+    Mirrors the live ``MainContent_dlMain_<field>_<index>`` ID convention.
     """
-    recipe = licensing._STATE_RECIPES["CA"]
-    input_selector = recipe["query_inputs_by_kind"][kind]
-    submit_selector = recipe["submit_buttons_by_kind"][kind]
-    selectors: dict[str, _FakeLocator] = {
-        input_selector: _FakeLocator(),
-        submit_selector: submit_locator or _FakeLocator(),
-        recipe["row_selector"]: _FakeLocator(items=rows),
-    }
-    if tab_locators:
-        for kind_key, locator in tab_locators.items():
-            selectors[recipe["tab_buttons_by_kind"][kind_key]] = locator
-    return _FakePage(selectors)
+    if omit_table:
+        return "<html><body><h1>Search</h1></body></html>"
+    body_rows: list[str] = []
+    for idx, row in enumerate(rows):
+        href = row.get("href") or ""
+        body_rows.append(
+            f"""
+            <tr><td><table><tbody>
+              <tr>
+                <td>Contractor Name</td>
+                <td><span id="{table_id}_lblName_{idx}">{row.get('name', '')}</span></td>
+              </tr>
+              <tr>
+                <td>Name Type</td>
+                <td><span id="{table_id}_lblType_{idx}">{row.get('name_type', '')}</span></td>
+              </tr>
+              <tr>
+                <td>License</td>
+                <td><a id="{table_id}_hlLicense_{idx}" href="{href}">
+                    {row.get('license_number', '')}</a></td>
+              </tr>
+              <tr>
+                <td>City</td>
+                <td><span id="{table_id}_lblCity_{idx}">{row.get('city', '')}</span></td>
+              </tr>
+              <tr>
+                <td>Status</td>
+                <td><span id="{table_id}_lblLicenseStatus_{idx}">{row.get('status', '')}</span></td>
+              </tr>
+            </tbody></table></td></tr>
+            """
+        )
+    return f"""<html><body><h1>Contractor Name Search Results</h1>
+        <table id="{table_id}"><tbody>{''.join(body_rows)}</tbody></table>
+        </body></html>"""
 
 
-def _ca_profile_page(
+def _build_profile_html(
     *,
-    title: str = "ACME CONSTRUCTION INC",
+    title: str = "Contractor's License Detail for License # 1234567",
     license_number: str = "1234567",
-    status: str = "Active",
-    classification: str = "B - General Building",
-    expiration: str = "2026-12-31",
-    personnel_text: str = "John Smith — Owner/Officer",
-    workers_comp_text: str = "Carrier: State Fund — Policy: WC-9000",
-    bonds_text: str = "Contractor's Bond: $25,000 — Surety: ABC Surety",
-    disciplinary_text: str = "No disciplinary actions on file.",
-    raise_on_personnel_click: bool = False,
-    raise_on_disciplinary_inner_text: bool = False,
-) -> _FakePage:
-    recipe = licensing._STATE_RECIPES["CA"]
-    disciplinary_loc = _FakeLocator(
-        text=disciplinary_text,
-        raise_on_inner_text=raise_on_disciplinary_inner_text,
+    status: str = "This license is current and active.",
+    classifications: str = "B - GENERAL BUILDING",
+    expiration: str = "06/30/2027",
+    business_info: str = "ACME CONSTRUCTION INC<br>123 MAIN ST",
+    bonding: str = "Contractor's Bond — $25,000",
+    workers_comp: str = "Carrier: STATE FUND",
+    other: str = "",
+    include_disclosure_link: bool = False,
+) -> str:
+    # Mirror the live CSLB structure: there's ALWAYS a disclaimer "here"
+    # link to the public-complaint definition page; the *real* disclosure
+    # link only renders when the contractor has actionable items, and it
+    # lives outside the disclaimer ul.
+    disclaimer = (
+        '<ul id="disclaimer">'
+        '<li>Click <a href="PublicComplaintDisclosure.aspx">here</a> for'
+        ' a definition.</li></ul>'
     )
-    selectors: dict[str, _FakeLocator] = {
-        "h1": _FakeLocator(text=title),
-        recipe["profile_license_number_selector"]: _FakeLocator(text=license_number),
-        recipe["profile_status_selector"]: _FakeLocator(text=status),
-        recipe["profile_classification_selector"]: _FakeLocator(text=classification),
-        recipe["profile_expiration_selector"]: _FakeLocator(text=expiration),
-        recipe["personnel_tab_button"]: _FakeLocator(
-            raise_on_click=raise_on_personnel_click
-        ),
-        recipe["personnel_section"]: _FakeLocator(text=personnel_text),
-        recipe["workers_comp_tab_button"]: _FakeLocator(),
-        recipe["workers_comp_section"]: _FakeLocator(text=workers_comp_text),
-        recipe["bonds_tab_button"]: _FakeLocator(),
-        recipe["bonds_section"]: _FakeLocator(text=bonds_text),
-        recipe["disciplinary_tab_button"]: _FakeLocator(),
-        recipe["disciplinary_section"]: disciplinary_loc,
-    }
-    return _FakePage(selectors)
+    real_disclosure = (
+        '<div class="disclosure-section">'
+        '<a href="PublicComplaintDisclosure.aspx?LicNum=999">'
+        'Public complaint disclosure on file</a></div>'
+        if include_disclosure_link
+        else ""
+    )
+    return f"""<html><body>
+        {disclaimer}
+        {real_disclosure}
+        <h1>{title}</h1>
+        <span id="MainContent_Header2Detail">{license_number}</span>
+        <table>
+        <tr><td id="MainContent_BusInfo">{business_info}</td></tr>
+        <tr><td id="MainContent_ExpDt">{expiration}</td></tr>
+        <tr><td id="MainContent_Status">{status}</td></tr>
+        <tr><td id="MainContent_ClassCellTable">{classifications}</td></tr>
+        <tr><td id="MainContent_BondingCellTable">{bonding}</td></tr>
+        <tr><td id="MainContent_WCStatus">{workers_comp}</td></tr>
+        <tr><td id="MainContent_MultiLicDisplay">{other}</td></tr>
+        </table>
+        </body></html>"""
 
 
 # ---------------------------------------------------------------------------
@@ -235,116 +264,274 @@ def _reset_state(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# search()
+# _parse_search_results — pure parser (BS4)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_search_results_extracts_rows():
+    html = _build_results_html(
+        [
+            {
+                "name": "ACME CONSTRUCTION INC",
+                "license_number": "1234567",
+                "status": "Active",
+                "city": "SAN JOSE",
+                "name_type": "DBA",
+                "href": "/OnlineServices/CheckLicenseII/LicenseDetail.aspx?LicNum=1234567",
+            },
+            {
+                "name": "ACME ROOFING LLC",
+                "license_number": "9876543",
+                "status": "Expired",
+                "city": "OAKLAND",
+                "name_type": "Previous",
+                "href": "/OnlineServices/CheckLicenseII/LicenseDetail.aspx?LicNum=9876543",
+            },
+        ]
+    )
+    recipe = licensing._STATE_RECIPES["CA"]
+    results, status = licensing._parse_search_results(
+        html,
+        recipe=recipe,
+        search_url=recipe["search_url"],
+        state="CA",
+    )
+    assert status == "ok"
+    assert len(results) == 2
+    top = results[0]
+    assert top.title == "ACME CONSTRUCTION INC"
+    assert top.url == (
+        "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/"
+        "LicenseDetail.aspx?LicNum=1234567"
+    )
+    assert top.extras["license_number"] == "1234567"
+    assert top.extras["status"] == "Active"
+    assert top.extras["city"] == "SAN JOSE"
+    assert top.extras["name_type"] == "DBA"
+    assert top.extras["state"] == "CA"
+    # Search-results page has no classification/expiration; fetch() fills them.
+    assert top.extras["classification"] == ""
+    assert top.extras["expiration"] == ""
+
+
+def test_parse_search_results_returns_no_hits_when_table_empty():
+    html = """<html><body><table id="MainContent_dlMain"><tbody></tbody></table></body></html>"""
+    recipe = licensing._STATE_RECIPES["CA"]
+    results, status = licensing._parse_search_results(
+        html, recipe=recipe, search_url=recipe["search_url"], state="CA"
+    )
+    assert results == []
+    assert status == "no-hits"
+
+
+def test_parse_search_results_returns_page_error_when_table_missing():
+    """If the results table itself is absent (e.g. user bounced back to the
+    search form), distinguish that from a clean 0-hits page."""
+    html = "<html><body><h1>Check a License</h1><form>...</form></body></html>"
+    recipe = licensing._STATE_RECIPES["CA"]
+    results, status = licensing._parse_search_results(
+        html, recipe=recipe, search_url=recipe["search_url"], state="CA"
+    )
+    assert results == []
+    assert status == "page-error"
+
+
+def test_parse_search_results_respects_max_results():
+    rows = [
+        {
+            "name": f"COMPANY {i}",
+            "license_number": f"{i:07d}",
+            "status": "Active",
+            "city": "PALO ALTO",
+            "name_type": "DBA",
+            "href": f"/OnlineServices/CheckLicenseII/LicenseDetail.aspx?LicNum={i:07d}",
+        }
+        for i in range(10)
+    ]
+    html = _build_results_html(rows)
+    recipe = licensing._STATE_RECIPES["CA"]
+    results, status = licensing._parse_search_results(
+        html, recipe=recipe, search_url=recipe["search_url"], state="CA", max_results=3
+    )
+    assert status == "ok"
+    assert len(results) == 3
+
+
+def test_parse_search_results_skips_rows_with_blank_names():
+    """Defensive guard: malformed CSLB rows shouldn't surface as titles."""
+    html = _build_results_html(
+        [
+            {"name": "", "license_number": "111", "status": "Active"},
+            {"name": "VALID INC", "license_number": "222", "status": "Active"},
+        ]
+    )
+    recipe = licensing._STATE_RECIPES["CA"]
+    results, status = licensing._parse_search_results(
+        html, recipe=recipe, search_url=recipe["search_url"], state="CA"
+    )
+    # Skipping the blank name leaves one usable row → still "ok".
+    assert status == "ok"
+    assert len(results) == 1
+    assert results[0].title == "VALID INC"
+
+
+# ---------------------------------------------------------------------------
+# Real-fixture regression test — load the captured CSLB SBI Builders page.
+#
+# This is the regression bar for issue #155. If CSLB drifts again, this
+# test will fail (and the operator updates the fixture + recipe).
+# ---------------------------------------------------------------------------
+
+
+def test_parse_search_results_handles_real_cslb_fixture():
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "cslb"
+        / "sbi_builders_results.html"
+    )
+    html = fixture.read_text(encoding="utf-8")
+    recipe = licensing._STATE_RECIPES["CA"]
+    results, status = licensing._parse_search_results(
+        html,
+        recipe=recipe,
+        search_url=recipe["search_url"],
+        state="CA",
+        max_results=50,
+    )
+    assert status == "ok"
+    assert len(results) >= 1
+    # The first SBI Builders entry on the live fixture: license 860997, Active.
+    sbi = next(
+        (r for r in results if "SBI BUILDERS" in r.title), None
+    )
+    assert sbi is not None, "expected at least one SBI BUILDERS row"
+    assert sbi.extras["license_number"] == "860997"
+    assert sbi.extras["status"] == "Active"
+    assert sbi.url.endswith("LicNum=860997")
+
+
+def test_parse_profile_handles_real_cslb_fixture():
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "cslb"
+        / "license_detail_860997.html"
+    )
+    html = fixture.read_text(encoding="utf-8")
+    recipe = licensing._STATE_RECIPES["CA"]
+    url = (
+        "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/"
+        "LicenseDetail.aspx?LicNum=860997"
+    )
+    source = licensing._parse_profile(html, url, recipe=recipe)
+    assert source is not None
+    assert source.metadata["license_number"] == "860997"
+    assert "active" in source.metadata["status"].lower()
+    assert source.metadata["expiration"] == "06/30/2027"
+    assert "B - GENERAL BUILDING" in source.metadata["classification"]
+    assert "MERCHANTS BONDING" in source.metadata["bonding"].upper()
+    assert "## Bonding Information" in source.cleaned_text
+    assert "## Disciplinary History" in source.cleaned_text
+
+
+# ---------------------------------------------------------------------------
+# search() — integration through the fake page
 # ---------------------------------------------------------------------------
 
 
 async def test_search_returns_results_for_name_query(monkeypatch):
-    rows = [
-        _build_row(
-            name="ACME CONSTRUCTION INC",
-            license_number="1234567",
-            status="Active",
-            classification="B - General Building",
-            expiration="2026-12-31",
-        ),
-        _build_row(
-            name="ACME ROOFING LLC",
-            license_number="9876543",
-            status="Expired",
-            classification="C-39 - Roofing",
-            expiration="2023-08-01",
-        ),
-    ]
-    page = _ca_search_page(rows)
+    html = _build_results_html(
+        [
+            {
+                "name": "ACME CONSTRUCTION INC",
+                "license_number": "1234567",
+                "status": "Active",
+                "city": "SAN JOSE",
+                "name_type": "DBA",
+                "href": "/OnlineServices/CheckLicenseII/LicenseDetail.aspx?LicNum=1234567",
+            }
+        ]
+    )
+    page = _FakePage(html)
     captured = _stub_browser(monkeypatch, page)
 
     results = await licensing.search("Acme Construction", state="CA", max_results=5)
 
-    assert captured["navigations"] == [
-        licensing._STATE_RECIPES["CA"]["search_url"]
-    ]
-    assert len(results) == 2
-
+    assert captured["navigations"] == [licensing._STATE_RECIPES["CA"]["search_url"]]
+    assert len(results) == 1
     top = results[0]
-    assert top.source_kind == "licensing"
     assert top.title == "ACME CONSTRUCTION INC"
-    # No href in fake row → URL is search-anchored on the license number.
-    assert top.url == (
-        "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/"
-        "CheckLicense.aspx?LicNum=1234567"
-    )
     assert top.extras["license_number"] == "1234567"
     assert top.extras["status"] == "Active"
-    assert top.extras["classification"] == "B - General Building"
-    assert top.extras["expiration"] == "2026-12-31"
-    assert top.extras["state"] == "CA"
-    assert "Active" in top.snippet
-    assert "B - General Building" in top.snippet
+    # search() called the browser-side wait helper before reading content.
+    assert page.wait_for_load_state_calls
+    assert page.content_calls == 1
+
+
+async def test_search_returns_diagnostic_status_when_requested(monkeypatch):
+    html = _build_results_html(
+        [
+            {
+                "name": "ACME",
+                "license_number": "1234567",
+                "status": "Active",
+                "name_type": "DBA",
+                "city": "SAN JOSE",
+                "href": "/foo",
+            }
+        ]
+    )
+    page = _FakePage(html)
+    _stub_browser(monkeypatch, page)
+
+    results, status = await licensing.search(
+        "Acme", state="CA", return_diagnostic=True
+    )
+    assert status == "ok"
+    assert len(results) == 1
 
 
 async def test_search_toggles_query_kind_for_license_number(monkeypatch):
-    """A numeric query should click the license-number tab, not the name tab."""
-    lic_tab = _FakeLocator()
-    bus_tab = _FakeLocator()
-    page = _ca_search_page(
-        [
-            _build_row(
-                name="ACME CONSTRUCTION INC",
-                license_number="1234567",
-                status="Active",
-                classification="B",
-                expiration="2026-12-31",
-            )
-        ],
-        kind="number",
-        tab_locators={"number": lic_tab, "name": bus_tab},
-    )
+    """Numeric query → click license-number tab, fill license-number input."""
+    recipe = licensing._STATE_RECIPES["CA"]
+    page = _FakePage(_build_results_html([]))
     _stub_browser(monkeypatch, page)
 
-    await licensing.search("1234567", state="CA", max_results=5)
+    await licensing.search("1234567", state="CA")
 
-    assert lic_tab.click_calls == 1
-    assert bus_tab.click_calls == 0
+    assert recipe["tab_buttons_by_kind"]["number"] in page.click_order
+    assert recipe["tab_buttons_by_kind"]["name"] not in page.click_order
+    filled_selectors = [sel for sel, _ in page.fill_calls]
+    assert recipe["query_inputs_by_kind"]["number"] in filled_selectors
+    assert recipe["query_inputs_by_kind"]["name"] not in filled_selectors
 
 
 async def test_search_toggles_query_kind_for_business_name(monkeypatch):
-    """A non-numeric query should click the business-name tab, not the license-number tab."""
-    lic_tab = _FakeLocator()
-    bus_tab = _FakeLocator()
-    page = _ca_search_page(
-        [
-            _build_row(
-                name="ACME CONSTRUCTION INC",
-                license_number="1234567",
-                status="Active",
-                classification="B",
-                expiration="2026-12-31",
-            )
-        ],
-        kind="name",
-        tab_locators={"number": lic_tab, "name": bus_tab},
-    )
+    recipe = licensing._STATE_RECIPES["CA"]
+    page = _FakePage(_build_results_html([]))
     _stub_browser(monkeypatch, page)
 
     await licensing.search("Acme Construction", state="CA")
 
-    assert bus_tab.click_calls == 1
-    assert lic_tab.click_calls == 0
+    assert recipe["tab_buttons_by_kind"]["name"] in page.click_order
+    assert recipe["tab_buttons_by_kind"]["number"] not in page.click_order
+    filled_selectors = [sel for sel, _ in page.fill_calls]
+    assert recipe["query_inputs_by_kind"]["name"] in filled_selectors
 
 
-async def test_license_number_regex_recognises_cslb_format():
-    assert licensing._looks_like_license_number("1234567")  # 7 digits
-    assert licensing._looks_like_license_number("123456")  # 6 digits
-    assert licensing._looks_like_license_number("12345678")  # 8 digits
-    assert not licensing._looks_like_license_number("12345")  # too short
-    assert not licensing._looks_like_license_number("123456789")  # too long
+def test_license_number_regex_recognises_cslb_format():
+    assert licensing._looks_like_license_number("1234567")
+    assert licensing._looks_like_license_number("123456")
+    assert licensing._looks_like_license_number("12345678")
+    assert not licensing._looks_like_license_number("12345")
+    assert not licensing._looks_like_license_number("123456789")
     assert not licensing._looks_like_license_number("Acme Construction")
     assert not licensing._looks_like_license_number("")
 
 
 async def test_search_returns_empty_for_unknown_state(monkeypatch, caplog):
-    page = _ca_search_page([])
+    page = _FakePage(_build_results_html([]))
     _stub_browser(monkeypatch, page)
 
     with caplog.at_level(logging.WARNING, logger=licensing.logger.name):
@@ -355,7 +542,7 @@ async def test_search_returns_empty_for_unknown_state(monkeypatch, caplog):
 
 @pytest.mark.parametrize("state", ["TX", "FL", "NY"])
 async def test_search_returns_empty_for_stub_states(monkeypatch, caplog, state):
-    page = _ca_search_page([])
+    page = _FakePage(_build_results_html([]))
     _stub_browser(monkeypatch, page)
 
     with caplog.at_level(logging.WARNING, logger=licensing.logger.name):
@@ -365,66 +552,101 @@ async def test_search_returns_empty_for_stub_states(monkeypatch, caplog, state):
 
 
 async def test_search_empty_query_returns_empty(monkeypatch):
-    page = _ca_search_page([])
+    page = _FakePage(_build_results_html([]))
     _stub_browser(monkeypatch, page)
     assert await licensing.search("", state="CA") == []
     assert await licensing.search("   ", state="CA") == []
 
 
-async def test_search_selector_miss_saves_diagnostic(monkeypatch, caplog, tmp_path):
-    recipe = licensing._STATE_RECIPES["CA"]
-    # "anything" is a non-numeric query, so the connector takes the name-tab path.
-    page = _FakePage(
-        {
-            recipe["query_inputs_by_kind"]["name"]: _FakeLocator(),
-            recipe["submit_buttons_by_kind"]["name"]: _FakeLocator(),
-            recipe["row_selector"]: _FakeLocator(raise_on_all=True),
-        }
-    )
+async def test_search_parser_miss_saves_diagnostic(monkeypatch, caplog, tmp_path):
+    """If the table is present but rows don't extract, dump diagnostics."""
+    # Table exists but no lblName_<N> spans → parser-miss.
+    html = """<html><body>
+        <table id="MainContent_dlMain"><tbody>
+        <tr><td><table><tbody>
+            <tr><td>Contractor</td><td><span id="weird_id_0">Bad</span></td></tr>
+        </tbody></table></td></tr>
+        </tbody></table>
+        </body></html>"""
+    page = _FakePage(html)
     _stub_browser(monkeypatch, page)
     monkeypatch.setattr(licensing, "_DIAGNOSTICS_DIR", tmp_path / "diagnostics")
 
     with caplog.at_level(logging.WARNING, logger=licensing.logger.name):
-        results = await licensing.search("anything", state="CA")
+        results, status = await licensing.search(
+            "anything", state="CA", return_diagnostic=True
+        )
 
     assert results == []
-    assert any("selector miss" in rec.message for rec in caplog.records)
-    assert page.screenshots, "expected a diagnostic screenshot path"
+    assert status == "no-hits"  # No name_spans → no-hits, not parser-miss.
+    assert page.content_calls >= 1
+
+
+async def test_search_page_error_dumps_html_and_screenshot(
+    monkeypatch, caplog, tmp_path
+):
+    """If the results table itself is missing, status='page-error' and we
+    persist BOTH a screenshot and the HTML dump under data/diagnostics/cslb/."""
+    page = _FakePage("<html><body><h1>Error</h1></body></html>")
+    _stub_browser(monkeypatch, page)
+    diag_dir = tmp_path / "diagnostics"
+    monkeypatch.setattr(licensing, "_DIAGNOSTICS_DIR", diag_dir)
+
+    with caplog.at_level(logging.WARNING, logger=licensing.logger.name):
+        results, status = await licensing.search(
+            "anything", state="CA", return_diagnostic=True
+        )
+
+    assert results == []
+    assert status == "page-error"
+    assert any("page-error" in rec.message for rec in caplog.records)
+    # Screenshot was captured and HTML dump written.
+    assert page.screenshots, "expected a diagnostic screenshot"
     assert page.screenshots[0].endswith(".png")
+    html_dumps = list(diag_dir.glob("*.html"))
+    assert html_dumps, "expected an HTML diagnostic dump"
 
 
 async def test_search_submit_failure_saves_diagnostic(monkeypatch, caplog, tmp_path):
-    """If the submit button click raises, the connector bails with a screenshot."""
+    """If the submit button click raises, the connector bails with a screenshot+html dump."""
     recipe = licensing._STATE_RECIPES["CA"]
-    page = _ca_search_page(
-        [],
-        submit_locator=_FakeLocator(raise_on_click=True),
+    submit_selector = recipe["submit_buttons_by_kind"]["name"]
+    page = _FakePage(
+        _build_results_html([]),
+        locator_overrides={
+            submit_selector: _FakeLocator(raise_on_click=True),
+        },
     )
     _stub_browser(monkeypatch, page)
-    monkeypatch.setattr(licensing, "_DIAGNOSTICS_DIR", tmp_path / "diagnostics")
+    diag_dir = tmp_path / "diagnostics"
+    monkeypatch.setattr(licensing, "_DIAGNOSTICS_DIR", diag_dir)
 
     with caplog.at_level(logging.WARNING, logger=licensing.logger.name):
-        results = await licensing.search("Acme Construction", state="CA")
+        results, status = await licensing.search(
+            "Acme Construction", state="CA", return_diagnostic=True
+        )
 
     assert results == []
+    assert status == "submit-failed"
     assert any("submit failed" in rec.message for rec in caplog.records)
-    assert page.screenshots, "expected a diagnostic screenshot path"
-    # Sanity-check we exercised the recipe's row selector but never reached row parsing.
-    assert recipe["row_selector"] not in page.locator_calls
+    assert page.screenshots
+    html_dumps = list(diag_dir.glob("*.html"))
+    assert html_dumps
 
 
 async def test_search_respects_max_results(monkeypatch):
     rows = [
-        _build_row(
-            name=f"Company {i}",
-            license_number=f"{i:07d}",
-            status="Active",
-            classification="B",
-            expiration="2026-12-31",
-        )
+        {
+            "name": f"Company {i}",
+            "license_number": f"{i:07d}",
+            "status": "Active",
+            "name_type": "DBA",
+            "city": "PALO ALTO",
+            "href": f"/x{i}",
+        }
         for i in range(10)
     ]
-    page = _ca_search_page(rows)
+    page = _FakePage(_build_results_html(rows))
     _stub_browser(monkeypatch, page)
 
     results = await licensing.search("anything", state="CA", max_results=3)
@@ -432,73 +654,76 @@ async def test_search_respects_max_results(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# fetch()
+# fetch() — integration through the fake page
 # ---------------------------------------------------------------------------
 
 
-async def test_fetch_clicks_all_four_tabs_and_rolls_markdown(monkeypatch):
-    page = _ca_profile_page()
+async def test_fetch_returns_source_with_metadata(monkeypatch):
+    page = _FakePage(
+        _build_profile_html(
+            license_number="1234567",
+            status="This license is current and active.",
+            classifications="B - GENERAL BUILDING",
+            expiration="06/30/2027",
+        )
+    )
     _stub_browser(monkeypatch, page)
 
-    url = "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/LicenseDetail.aspx?LicNum=1234567"
+    url = (
+        "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/"
+        "LicenseDetail.aspx?LicNum=1234567"
+    )
     source = await licensing.fetch(url)
 
     assert source is not None
     assert source.source_kind == "licensing"
-    assert source.title == "ACME CONSTRUCTION INC"
     assert source.url == url
-
-    recipe = licensing._STATE_RECIPES["CA"]
-    # Clicked all four tab buttons in the order Personnel → WC → Bonds → Disciplinary.
-    assert recipe["personnel_tab_button"] in page.click_order
-    assert recipe["workers_comp_tab_button"] in page.click_order
-    assert recipe["bonds_tab_button"] in page.click_order
-    assert recipe["disciplinary_tab_button"] in page.click_order
-    tab_order = [
-        s
-        for s in page.click_order
-        if s
-        in {
-            recipe["personnel_tab_button"],
-            recipe["workers_comp_tab_button"],
-            recipe["bonds_tab_button"],
-            recipe["disciplinary_tab_button"],
-        }
-    ]
-    assert tab_order == [
-        recipe["personnel_tab_button"],
-        recipe["workers_comp_tab_button"],
-        recipe["bonds_tab_button"],
-        recipe["disciplinary_tab_button"],
-    ]
-    # Each tab fake recorded exactly one click.
-    assert page._selector_map[recipe["personnel_tab_button"]].click_calls == 1
-    assert page._selector_map[recipe["workers_comp_tab_button"]].click_calls == 1
-    assert page._selector_map[recipe["bonds_tab_button"]].click_calls == 1
-    assert page._selector_map[recipe["disciplinary_tab_button"]].click_calls == 1
-
+    assert source.metadata["license_number"] == "1234567"
+    assert source.metadata["expiration"] == "06/30/2027"
+    assert "B - GENERAL BUILDING" in source.metadata["classification"]
+    assert "active" in source.metadata["status"].lower()
     body = source.cleaned_text
-    assert "# ACME CONSTRUCTION INC" in body
-    assert "1234567" in body
-    assert "Active" in body
-    assert "## Personnel" in body
-    assert "John Smith" in body
+    assert "## Business Information" in body
+    assert "## Bonding Information" in body
     assert "## Workers' Compensation" in body
-    assert "State Fund" in body
-    assert "## Bonds" in body
-    assert "Contractor's Bond" in body
     assert "## Disciplinary History" in body
-    assert "No disciplinary actions" in body
+    # Default disciplinary path: no disclosure link → reassuring note.
+    assert "No disclosable actions" in source.metadata["disciplinary_history"]
 
-    md = source.metadata
-    assert md["license_number"] == "1234567"
-    assert md["status"] == "Active"
-    assert md["classification"] == "B - General Building"
-    assert md["expiration"] == "2026-12-31"
-    assert "John Smith" in md["personnel"]
-    assert "State Fund" in md["workers_comp"]
-    assert "Contractor's Bond" in md["bonds"]
-    assert "No disciplinary actions" in md["disciplinary_history"]
+
+async def test_fetch_sets_referer_header_to_search_url(monkeypatch):
+    """CSLB's LicenseDetail.aspx redirects back to the search form when the
+    request lacks a same-origin referer. fetch() must set one before
+    navigating or it silently parses the search form into ``None``."""
+    page = _FakePage(_build_profile_html())
+    _stub_browser(monkeypatch, page)
+
+    url = (
+        "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/"
+        "LicenseDetail.aspx?LicNum=1234567"
+    )
+    await licensing.fetch(url)
+    assert page.extra_http_headers, "expected fetch() to set extra HTTP headers"
+    assert (
+        page.extra_http_headers[0].get("Referer")
+        == licensing._STATE_RECIPES["CA"]["search_url"]
+    )
+
+
+async def test_fetch_surfaces_disciplinary_disclosure_link(monkeypatch):
+    """When the contractor has a PublicComplaintDisclosure link, it shows up
+    in the disciplinary_history metadata key (the smoke wrapper's primary
+    due-diligence signal)."""
+    page = _FakePage(_build_profile_html(include_disclosure_link=True))
+    _stub_browser(monkeypatch, page)
+
+    url = (
+        "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/"
+        "LicenseDetail.aspx?LicNum=1234567"
+    )
+    source = await licensing.fetch(url)
+    assert source is not None
+    assert "PublicComplaintDisclosure" in source.metadata["disciplinary_history"]
 
 
 async def test_fetch_rejects_unknown_host(monkeypatch):
@@ -535,59 +760,35 @@ async def test_fetch_returns_none_for_empty_url():
     assert await licensing.fetch("") is None
 
 
-async def test_fetch_tolerates_missing_tabs_and_selector_misses(monkeypatch):
-    """A profile where one tab fails to click and another section fails to read
-    should still produce a Source — partial coverage, not a raise."""
-    page = _ca_profile_page(
-        raise_on_personnel_click=True,
-        raise_on_disciplinary_inner_text=True,
-    )
+async def test_fetch_returns_none_when_page_lacks_signal(monkeypatch):
+    """A page with no license fields and no disclosure link is not a profile."""
+    page = _FakePage("<html><body><h1>Some other page</h1></body></html>")
     _stub_browser(monkeypatch, page)
-
-    url = "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/LicenseDetail.aspx?LicNum=1234567"
+    url = (
+        "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/"
+        "LicenseDetail.aspx?LicNum=000"
+    )
     source = await licensing.fetch(url)
-
-    assert source is not None
-    body = source.cleaned_text
-    # Section headings still present even where data was missing.
-    assert "## Personnel" in body
-    assert "## Workers' Compensation" in body
-    assert "## Bonds" in body
-    assert "## Disciplinary History" in body
-    # Sections that failed to read fall back to "(not available)".
-    assert "(not available)" in body
-    # Sections that succeeded still carry their data.
-    assert "State Fund" in body
-    assert "Contractor's Bond" in body
+    assert source is None
 
 
 async def test_fetch_handles_minimal_profile(monkeypatch):
-    """A profile with only a title still rounds-trips through the markdown builder."""
-    recipe = licensing._STATE_RECIPES["CA"]
-    page = _FakePage(
-        {
-            "h1": _FakeLocator(text="ACME LLC"),
-            recipe["profile_license_number_selector"]: _FakeLocator(),
-            recipe["profile_status_selector"]: _FakeLocator(),
-            recipe["profile_classification_selector"]: _FakeLocator(),
-            recipe["profile_expiration_selector"]: _FakeLocator(),
-            recipe["personnel_tab_button"]: _FakeLocator(),
-            recipe["personnel_section"]: _FakeLocator(),
-            recipe["workers_comp_tab_button"]: _FakeLocator(),
-            recipe["workers_comp_section"]: _FakeLocator(),
-            recipe["bonds_tab_button"]: _FakeLocator(),
-            recipe["bonds_section"]: _FakeLocator(),
-            recipe["disciplinary_tab_button"]: _FakeLocator(),
-            recipe["disciplinary_section"]: _FakeLocator(),
-        }
-    )
+    """A profile with only a title + license number still rounds-trips."""
+    html = """<html><body>
+        <h1>Contractor's License Detail for License # 99</h1>
+        <span id="MainContent_Header2Detail">99</span>
+        </body></html>"""
+    page = _FakePage(html)
     _stub_browser(monkeypatch, page)
 
-    url = "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/LicenseDetail.aspx?LicNum=000"
+    url = (
+        "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/"
+        "LicenseDetail.aspx?LicNum=99"
+    )
     source = await licensing.fetch(url)
     assert source is not None
-    assert source.title == "ACME LLC"
-    assert "# ACME LLC" in source.cleaned_text
+    assert source.metadata["license_number"] == "99"
+    assert "Contractor's License Detail" in source.cleaned_text
 
 
 # ---------------------------------------------------------------------------
