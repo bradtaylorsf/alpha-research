@@ -16,7 +16,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -254,6 +256,71 @@ def check_tesseract() -> CheckResult:
     return CheckResult(name, "ok", required=False, detail=first_line or "available")
 
 
+_SANCTIONS_REFRESH_STALE_SECONDS = 7 * 24 * 60 * 60
+
+
+def check_sanctions_refresh() -> list[CheckResult]:
+    """Surface the most-recent successful refresh per sanctions list.
+
+    Issue #154: emits one ``sanctions:<KIND>`` row per known list. ``ok`` when
+    the list refreshed within the last 7 days, ``skip`` for intentionally
+    disabled lists (``EU`` is currently dropped per #154), and ``fail`` when a
+    list has never been refreshed or is stale beyond 7 days. All rows are
+    ``required=False`` so a stale optional list never flips ``doctor`` exit
+    code — the operator just sees the freshness on the dashboard.
+    """
+    from research_agent.tools import sanctions
+
+    results: list[CheckResult] = []
+    last = sanctions.get_last_refresh()
+    now = time.time()
+    for kind in sanctions.LIST_KINDS:
+        name = f"sanctions:{kind}"
+        if sanctions.is_list_disabled(kind):
+            results.append(
+                CheckResult(
+                    name,
+                    "skip",
+                    required=False,
+                    detail="refresh disabled (issue #154 — endpoint 403)",
+                )
+            )
+            continue
+        ts = last.get(kind)
+        if ts is None:
+            results.append(
+                CheckResult(
+                    name,
+                    "fail",
+                    required=False,
+                    detail="never refreshed",
+                )
+            )
+            continue
+        age = now - ts
+        when = datetime.fromtimestamp(ts, tz=UTC).date().isoformat()
+        if age <= _SANCTIONS_REFRESH_STALE_SECONDS:
+            results.append(
+                CheckResult(
+                    name,
+                    "ok",
+                    required=False,
+                    detail=f"last refresh {when}",
+                )
+            )
+        else:
+            days = int(age // 86_400)
+            results.append(
+                CheckResult(
+                    name,
+                    "fail",
+                    required=False,
+                    detail=f"stale: last refresh {when} ({days}d ago)",
+                )
+            )
+    return results
+
+
 def run_all_checks(
     loaded_env_files: list[Path],
     *,
@@ -272,6 +339,7 @@ def run_all_checks(
     results.append(check_models_yaml(root / "config" / "models.yaml"))
     results.append(check_tesseract())
     results.append(check_serpapi_cost_note())
+    results.extend(check_sanctions_refresh())
     return results
 
 

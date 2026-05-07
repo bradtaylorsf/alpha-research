@@ -68,8 +68,14 @@ SDN_XML_URL = "https://www.treasury.gov/ofac/downloads/sdn.xml"
 # The previous name was misleading: the parser only understands the basic
 # ``sdn.xml`` schema, not the relational ``sdn_advanced.xml`` schema.
 SDN_ADVANCED_URL = SDN_XML_URL
+# EU consolidated list — kept as a constant for ``fetch()`` permalink use only.
+# Issue #154: as of 2026-05, this URL returns HTTP 403 even with full browser
+# headers (UA + Accept + Accept-Language + Accept-Encoding). The Commission has
+# moved the bulk feed behind authentication and the previous ``europeaid`` path
+# now 307-redirects to a 403 endpoint. The EU refresh path is intentionally
+# disabled in ``_ensure_index``; SDN + UK still refresh normally.
 EU_CONSOLIDATED_URL = (
-    "https://webgate.ec.europa.eu/europeaid/fsd/fsf/public/files/"
+    "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
     "xmlFullSanctionsList_1_1/content"
 )
 UK_OFSI_URL = (
@@ -98,6 +104,11 @@ _ACCEPTED_HOSTS = frozenset(
 _rate_lock = asyncio.Lock()
 _last_call_monotonic: float | None = None
 _index_lock = asyncio.Lock()
+_eu_disabled_logged = False
+
+LIST_KINDS: tuple[str, ...] = ("SDN", "EU", "UK")
+# EU refresh is disabled (issue #154); doctor surfaces this as ``skip``.
+_DISABLED_LISTS: frozenset[str] = frozenset({"EU"})
 
 
 # ---------------------------------------------------------------------------
@@ -586,15 +597,81 @@ def _is_fresh(db_path: Path, *, now: float | None = None) -> bool:
     return age < _CACHE_TTL_SECONDS
 
 
+def _refresh_meta_path(db_path: Path) -> Path:
+    """Sidecar JSON path tracking last-successful refresh per list."""
+    return db_path.parent / (db_path.name + ".refresh.json")
+
+
+def _read_refresh_meta(db_path: Path) -> dict[str, float]:
+    path = _refresh_meta_path(db_path)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("sanctions refresh-meta read failed: %s", exc)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for kind, value in raw.items():
+        if isinstance(value, int | float):
+            out[str(kind)] = float(value)
+    return out
+
+
+def _write_refresh_meta(db_path: Path, meta: dict[str, float]) -> None:
+    path = _refresh_meta_path(db_path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(meta, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("sanctions refresh-meta write failed: %s", exc)
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def get_last_refresh() -> dict[str, float | None]:
+    """Return last-successful refresh epoch per list (``SDN``/``EU``/``UK``).
+
+    Reads the sidecar metadata next to the index DB. Lists that have never been
+    refreshed appear with value ``None``; lists intentionally disabled (e.g.
+    ``EU``, see issue #154) also show ``None`` until/unless re-enabled.
+    """
+    db_path = _index_path()
+    meta = _read_refresh_meta(db_path)
+    return {kind: meta.get(kind) for kind in LIST_KINDS}
+
+
+def is_list_disabled(kind: str) -> bool:
+    return kind in _DISABLED_LISTS
+
+
 async def _ensure_index(
     *,
     force: bool = False,
     http_get: Callable[..., Any] = _http_get,
 ) -> Path:
+    global _eu_disabled_logged
     db_path = _index_path()
     async with _index_lock:
         if not force and _is_fresh(db_path):
             return db_path
+
+        if not _eu_disabled_logged:
+            logger.info(
+                "sanctions EU consolidated list refresh disabled "
+                "(issue #154 — endpoint returns 403 even with browser headers); "
+                "SDN + UK still refresh"
+            )
+            _eu_disabled_logged = True
+
+        meta = _read_refresh_meta(db_path)
 
         sdn_status, sdn_bytes = await http_get(SDN_XML_URL)
         if sdn_status is None or sdn_status >= 400 or not sdn_bytes:
@@ -609,22 +686,22 @@ async def _ensure_index(
             return db_path
 
         sdn_entries = _parse_sdn_advanced(sdn_bytes)
+        if sdn_entries:
+            meta["SDN"] = time.time()
 
+        # EU refresh path intentionally dropped — see EU_CONSOLIDATED_URL comment
+        # and issue #154. Existing EU rows from a prior cached build (if any)
+        # are NOT carried forward; rebuilding the index without EU is the
+        # correct behaviour once the upstream feed is no longer reachable.
         eu_entries: list[dict[str, Any]] = []
-        try:
-            eu_status, eu_bytes = await http_get(EU_CONSOLIDATED_URL)
-            if eu_status and 200 <= eu_status < 300 and eu_bytes:
-                eu_entries = _parse_eu(eu_bytes)
-            else:
-                logger.warning("sanctions EU refresh failed (status=%s)", eu_status)
-        except Exception as exc:  # noqa: BLE001 — best-effort secondary list
-            logger.warning("sanctions EU refresh exception: %s", exc)
 
         uk_entries: list[dict[str, Any]] = []
         try:
             uk_status, uk_bytes = await http_get(UK_OFSI_URL)
             if uk_status and 200 <= uk_status < 300 and uk_bytes:
                 uk_entries = _parse_uk(uk_bytes)
+                if uk_entries:
+                    meta["UK"] = time.time()
             else:
                 logger.warning("sanctions UK refresh failed (status=%s)", uk_status)
         except Exception as exc:  # noqa: BLE001
@@ -636,6 +713,7 @@ async def _ensure_index(
             eu_entries=eu_entries,
             uk_entries=uk_entries,
         )
+        _write_refresh_meta(db_path, meta)
         return db_path
 
 
@@ -1001,16 +1079,20 @@ async def fetch(
 
 def reset_for_tests() -> None:
     """Clear per-process rate-limit + index-lock state."""
-    global _last_call_monotonic, _rate_lock, _index_lock
+    global _last_call_monotonic, _rate_lock, _index_lock, _eu_disabled_logged
     _last_call_monotonic = None
     _rate_lock = asyncio.Lock()
     _index_lock = asyncio.Lock()
+    _eu_disabled_logged = False
 
 
 __all__ = [
     "fetch",
+    "get_last_refresh",
+    "is_list_disabled",
     "reset_for_tests",
     "search",
+    "LIST_KINDS",
     "SDN_XML_URL",
     "SDN_ADVANCED_URL",
     "EU_CONSOLIDATED_URL",

@@ -76,7 +76,8 @@ async def test_ensure_index_populates_sqlite():
         conn.close()
     counts = {r[0]: r[1] for r in rows}
     assert counts.get("SDN") == 2
-    assert counts.get("EU") == 2
+    # EU refresh disabled (issue #154) — list is not populated.
+    assert "EU" not in counts
     assert counts.get("UK") == 2
 
 
@@ -232,35 +233,110 @@ async def test_fetch_uk_url_returns_marker_source():
 # ---------------------------------------------------------------------------
 
 
-async def test_eu_and_uk_rows_indexed():
+async def test_uk_rows_indexed():
     http_get = _make_http_get()
     await sanctions._ensure_index(force=True, http_get=http_get)
-
-    eu_results = await sanctions.search("Mordashov", http_get=http_get)
-    assert eu_results
-    assert eu_results[0].extras["list_kind"] == "EU"
 
     uk_results = await sanctions.search("Abramovich", http_get=http_get)
     assert uk_results
     assert uk_results[0].extras["list_kind"] == "UK"
 
 
-async def test_eu_failure_does_not_abort_sdn():
-    http_get = _make_http_get(eu_status=500, eu_body=b"")
+async def test_eu_refresh_path_is_skipped():
+    """EU URL must NOT be requested during refresh (issue #154 — endpoint 403)."""
+    http_get = _make_http_get()
+    await sanctions._ensure_index(force=True, http_get=http_get)
+    assert sanctions.EU_CONSOLIDATED_URL not in http_get.calls
+    # SDN + UK are still fetched.
+    assert sanctions.SDN_XML_URL in http_get.calls
+    assert sanctions.UK_OFSI_URL in http_get.calls
+
+
+async def test_eu_403_does_not_abort_index():
+    """Even if a future caller wires an EU 403, SDN + UK must still index."""
+    http_get = _make_http_get(eu_status=403, eu_body=b"")
     await sanctions._ensure_index(force=True, http_get=http_get)
     sdn_hits = await sanctions.search("Prigozhin", http_get=http_get)
-    assert sdn_hits, "SDN should still be queryable when EU fetch fails"
+    assert sdn_hits, "SDN should still be queryable when EU 403s"
     assert sdn_hits[0].extras["list_kind"] == "SDN"
+    uk_hits = await sanctions.search("Abramovich", http_get=http_get)
+    assert uk_hits, "UK should still be queryable when EU 403s"
+    assert uk_hits[0].extras["list_kind"] == "UK"
+    # And EU has no recorded refresh — it was never asked.
+    last = sanctions.get_last_refresh()
+    assert last["EU"] is None
 
 
 async def test_kinds_filter_narrows_results():
     http_get = _make_http_get()
     await sanctions._ensure_index(force=True, http_get=http_get)
     results = await sanctions.search(
-        "Severstal", kinds=["EU"], http_get=http_get
+        "Abramovich", kinds=["UK"], http_get=http_get
     )
     assert results
-    assert all(r.extras["list_kind"] == "EU" for r in results)
+    assert all(r.extras["list_kind"] == "UK" for r in results)
+
+
+# ---------------------------------------------------------------------------
+# Last-refresh tracking + EU dropped (issue #154)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_last_refresh_records_success_per_list():
+    """SDN + UK refresh records timestamps; EU stays None (refresh disabled)."""
+    http_get = _make_http_get()
+    before = time.time()
+    await sanctions._ensure_index(force=True, http_get=http_get)
+    after = time.time()
+
+    last = sanctions.get_last_refresh()
+    assert set(last.keys()) == {"SDN", "EU", "UK"}
+    assert last["EU"] is None  # refresh path dropped (issue #154)
+    assert last["SDN"] is not None
+    assert last["UK"] is not None
+    assert before <= last["SDN"] <= after
+    assert before <= last["UK"] <= after
+
+
+async def test_eu_disabled_logged_once_per_process(caplog):
+    http_get = _make_http_get()
+    with caplog.at_level("INFO", logger="research_agent.tools.sanctions"):
+        await sanctions._ensure_index(force=True, http_get=http_get)
+        # Drop the freshness gate by forcing again.
+        await sanctions._ensure_index(force=True, http_get=http_get)
+    info_lines = [r.message for r in caplog.records if r.levelname == "INFO"]
+    eu_disabled = [m for m in info_lines if "EU consolidated" in m]
+    assert len(eu_disabled) == 1
+
+
+def test_smoke_against_recorded_sdn_xml(monkeypatch, tmp_path):
+    """AC #1: smoke wrapper prints an SDN designation row for Prigozhin.
+
+    Pre-builds the index from the recorded SDN XML fixture, then exercises the
+    public smoke wrapper end-to-end. Asserts the output names the person, the
+    list, and the designation date — i.e. exactly what an operator sees when
+    they run ``research _smoke-tool sanctions "Yevgeny Prigozhin"``.
+    """
+    monkeypatch.setenv("SANCTIONS_DB_PATH", str(tmp_path / "sanctions.sqlite"))
+    sanctions.reset_for_tests()
+
+    import asyncio
+
+    http_get = _make_http_get()
+
+    async def _seed():
+        await sanctions._ensure_index(force=True, http_get=http_get)
+
+    asyncio.run(_seed())
+    monkeypatch.setattr(sanctions, "_http_get", http_get)
+
+    from research_agent.tools import _smoke_sanctions
+
+    out = _smoke_sanctions("Yevgeny Prigozhin")
+    assert isinstance(out, str)
+    assert "Prigozhin" in out
+    assert "SDN" in out
+    assert "2018-03-15" in out  # designation_date from the recorded XML
 
 
 # ---------------------------------------------------------------------------

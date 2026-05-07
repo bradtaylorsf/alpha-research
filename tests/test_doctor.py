@@ -264,3 +264,72 @@ def test_check_result_dataclass_shape():
     # Frozen dataclass — must reject mutation.
     with pytest.raises(FrozenInstanceError):
         result.status = "fail"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# sanctions_refresh check (issue #154)
+# ---------------------------------------------------------------------------
+
+
+def test_check_sanctions_refresh_surfaces_per_list(monkeypatch):
+    """Recent SDN -> ok, stale UK -> fail, missing/disabled EU -> skip."""
+    import time as _time
+
+    from research_agent.tools import sanctions
+
+    now = _time.time()
+    fake_meta = {
+        "SDN": now - 60,                         # fresh
+        "UK": now - (10 * 24 * 60 * 60),         # 10 days stale
+        # EU missing (disabled)
+    }
+
+    def _stub_get_last_refresh() -> dict[str, float | None]:
+        return {kind: fake_meta.get(kind) for kind in sanctions.LIST_KINDS}
+
+    monkeypatch.setattr(sanctions, "get_last_refresh", _stub_get_last_refresh)
+
+    results = doctor.check_sanctions_refresh()
+    by_name = {r.name: r for r in results}
+    assert set(by_name) == {"sanctions:SDN", "sanctions:EU", "sanctions:UK"}
+
+    sdn = by_name["sanctions:SDN"]
+    assert sdn.status == "ok"
+    assert sdn.required is False
+
+    eu = by_name["sanctions:EU"]
+    assert eu.status == "skip"
+    assert eu.required is False
+    assert "disabled" in eu.detail
+
+    uk = by_name["sanctions:UK"]
+    assert uk.status == "fail"
+    assert uk.required is False
+    assert "stale" in uk.detail
+
+
+def test_check_sanctions_refresh_never_refreshed(monkeypatch):
+    from research_agent.tools import sanctions
+
+    monkeypatch.setattr(
+        sanctions,
+        "get_last_refresh",
+        lambda: {kind: None for kind in sanctions.LIST_KINDS},
+    )
+    results = doctor.check_sanctions_refresh()
+    by_name = {r.name: r for r in results}
+    # Disabled list (EU) is skip; the other two are fail with "never refreshed".
+    assert by_name["sanctions:EU"].status == "skip"
+    assert by_name["sanctions:SDN"].status == "fail"
+    assert "never refreshed" in by_name["sanctions:SDN"].detail
+    assert by_name["sanctions:UK"].status == "fail"
+    # None of these should affect the doctor exit code.
+    assert all(r.required is False for r in results)
+
+
+def test_run_all_checks_includes_sanctions_refresh(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.yaml").write_text("tiers: {}\n", encoding="utf-8")
+    results = doctor.run_all_checks([], repo_root=tmp_path)
+    names = {r.name for r in results}
+    assert {"sanctions:SDN", "sanctions:EU", "sanctions:UK"}.issubset(names)
