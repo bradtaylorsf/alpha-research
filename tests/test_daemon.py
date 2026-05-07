@@ -436,6 +436,64 @@ async def test_run_daemon_completed_status_when_plan_is_complete(
 
 
 @pytest.mark.asyncio
+async def test_run_daemon_classifies_goal_complete_when_final_synthesis_closes_subgoals(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If post-loop final_synthesis closes subgoals, classify as goal_complete (issue #160).
+
+    Reproducer: ``run_loop`` returns with the plan still open, then the post-loop
+    ``final_synthesis`` pass fires a synthesizer that calls ``update_subgoal_done``
+    and writes a new plan version with ``done=True`` for every subgoal. The
+    daemon must re-load the plan AFTER ``final_synthesis`` so ``plan.is_complete()``
+    sees the closures; otherwise the stale plan falls through to the ``user_stopped``
+    branch even though the run finished cleanly.
+    """
+    monkeypatch.setenv("RESEARCH_DAEMON_SKIP_HEALTH_CHECKS", "1")
+
+    async def _open_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        # Loop returns without flipping any subgoal — simulates the case where
+        # closure happens later, in the post-loop synthesis pass.
+        return {"tasks_done": 1, "stopped": False, "completed": False, "cap_hit": False}
+
+    async def _closing_final_synth(job: Job, plan: Plan, *, router: Any) -> None:
+        # Mimic synth.update_subgoal_done writing a NEW plan version with
+        # every subgoal closed.
+        plan_dump = {
+            "version": plan.version + 1,
+            "objective": plan.objective,
+            "subgoals": [{"id": 1, "description": "Gather", "done": True}],
+            "task_template": [{"kind": "web_search"}],
+            "expected_iterations": 3,
+        }
+        write_plan(job, plan_dump)
+        return None
+
+    monkeypatch.setattr(
+        "research_agent.orchestrator.loop.run_loop",
+        _open_run_loop,
+    )
+    monkeypatch.setattr(
+        "research_agent.orchestrator.synth.final_synthesis",
+        _closing_final_synth,
+    )
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert exit_code == 0
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "completed"
+    assert refreshed.completion_reason == "goal_complete"
+
+
+@pytest.mark.asyncio
 async def test_run_daemon_handles_budget_exceeded_mid_loop(
     seeded_job: Job, monkeypatch: pytest.MonkeyPatch
 ) -> None:
