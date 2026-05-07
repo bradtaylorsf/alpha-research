@@ -15,10 +15,12 @@ from research_agent.orchestrator.loop import (
     MAX_TASKS_PER_JOB,
     RETRY_MAX_ATTEMPTS,
     Handler,
+    _expand_search_to_fetches,
     default_handlers,
     run_loop,
 )
-from research_agent.orchestrator.plan import Plan, Subgoal, TaskSpec
+from research_agent.orchestrator.plan import Plan, ScopeClass, Subgoal, TaskSpec
+from research_agent.tools.models import SearchResult
 from research_agent.storage import db
 from research_agent.storage.jobs import Job
 from research_agent.storage.markdown import write_plan
@@ -660,3 +662,89 @@ async def test_drain_replan_break_on_empty_template(
 
 def test_max_drain_replans_default_is_ten() -> None:
     assert MAX_DRAIN_REPLANS == 10
+
+
+# ---------------------------------------------------------------------------
+# _expand_search_to_fetches scope-aware top_K (issue #178)
+# ---------------------------------------------------------------------------
+
+
+def _make_results(n: int) -> list[SearchResult]:
+    return [
+        SearchResult(
+            url=f"https://example.com/{i}",
+            title=f"Hit {i}",
+            snippet="…",
+            source_kind="web",
+        )
+        for i in range(n)
+    ]
+
+
+def _persist_plan_with_scope(job: Job, scope: ScopeClass | None) -> None:
+    p = Plan(
+        version=1,
+        objective="Investigate the target",
+        subgoals=[Subgoal(id=1, description="Gather", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=3,
+        scope_class=scope,
+    )
+    write_plan(job, p.model_dump())
+
+
+def test_expand_search_to_fetches_broad_scope_emits_seven(job: Job) -> None:
+    _persist_plan_with_scope(job, "broad")
+    results = _make_results(10)
+
+    out = _expand_search_to_fetches(job, {"query": "q"}, results)
+
+    assert len(out["follow_up_tasks"]) == 7
+    assert len(out["results"]) == 10
+
+
+@pytest.mark.parametrize(
+    "scope,expected",
+    [
+        ("narrow", 3),
+        ("medium", 5),
+        ("broad", 7),
+        ("comprehensive", 10),
+    ],
+)
+def test_expand_search_to_fetches_scope_mapping(
+    job: Job, scope: ScopeClass, expected: int
+) -> None:
+    _persist_plan_with_scope(job, scope)
+    results = _make_results(10)
+
+    out = _expand_search_to_fetches(job, {"query": "q"}, results)
+
+    assert len(out["follow_up_tasks"]) == expected
+
+
+def test_expand_search_to_fetches_payload_override_still_wins(job: Job) -> None:
+    _persist_plan_with_scope(job, "broad")
+    results = _make_results(10)
+
+    out = _expand_search_to_fetches(job, {"query": "q", "expand_top_k": 2}, results)
+
+    assert len(out["follow_up_tasks"]) == 2
+
+
+def test_expand_search_to_fetches_unknown_scope_falls_back_to_three(job: Job) -> None:
+    _persist_plan_with_scope(job, None)
+    results = _make_results(10)
+
+    out = _expand_search_to_fetches(job, {"query": "q"}, results)
+
+    assert len(out["follow_up_tasks"]) == 3
+
+
+def test_expand_search_to_fetches_no_plan_falls_back_to_three(job: Job) -> None:
+    # No plan persisted at all — handler should still default to 3.
+    results = _make_results(10)
+
+    out = _expand_search_to_fetches(job, {"query": "q"}, results)
+
+    assert len(out["follow_up_tasks"]) == 3
