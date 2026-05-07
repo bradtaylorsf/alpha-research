@@ -129,6 +129,15 @@ local-tier planner. Each entry is also compressed to a small summary dict so a
 long-running goal can't push the prompt past the model's context window —
 issue #176 saw a 524k-token payload at task 96."""
 
+MAX_FINDINGS_FOR_REPLAN = 60
+"""Cap on ``findings`` shipped into the ``tactical_replan`` payload (issue #179).
+
+Drilling down into named claims (Schedule F, WOTUS, mifepristone) requires the
+planner to *see* those claims — but a long broad-scope run can accumulate
+hundreds of findings, so we keep the most recent N (highest ids) and re-order
+them ascending before injection. Each entry is also compressed by
+:func:`_summarize_finding` so the per-entry footprint stays small."""
+
 _SUMMARY_REPR_MAX_CHARS = 500
 
 
@@ -210,6 +219,30 @@ def _summarize_recent_result(r: dict[str, Any]) -> dict[str, Any]:
         "status": status,
         "summary": summary,
     }
+
+
+def _summarize_finding(f: dict[str, Any]) -> dict[str, Any]:
+    """Compress one finding row into a planner-sized dict (issue #179).
+
+    The planner needs the *claim text* (so it can drill into the named
+    entity/proposal/rule), plus minimal evidence weight (``confidence``,
+    ``tags``, one source pointer). The full ``source_ids`` list is dropped
+    in favor of a single ``source_id`` — chasing every source URL is the
+    fetcher's job, not the planner's.
+    """
+    src_ids = f.get("source_ids")
+    first_source: Any = None
+    if isinstance(src_ids, list) and src_ids:
+        first_source = src_ids[0]
+
+    summarized: dict[str, Any] = {
+        "id": f.get("id"),
+        "claim": f.get("claim"),
+        "confidence": f.get("confidence"),
+        "tags": f.get("tags"),
+        "source_id": first_source,
+    }
+    return summarized
 
 
 class PlanVersionCapExceeded(RuntimeError):
@@ -449,8 +482,29 @@ async def tactical_replan(
         "prior_plan": plan.model_dump(),
         "recent_results": summarized,
     }
+
+    # issue #179: include a bounded view of the running ``findings`` so the
+    # planner can drill into named claims (Schedule F, WOTUS, mifepristone)
+    # rather than re-emitting the same per-department generic queries. Cap to
+    # the most recent MAX_FINDINGS_FOR_REPLAN entries (highest ids first, then
+    # re-ordered ascending) and compress each via ``_summarize_finding``.
+    findings_truncation: tuple[int, int] | None = None
     if findings is not None:
-        payload["findings"] = findings
+        findings_before = len(findings)
+        if findings_before > MAX_FINDINGS_FOR_REPLAN:
+            top_recent = sorted(
+                findings,
+                key=lambda f: f.get("id") if isinstance(f.get("id"), int) else -1,
+                reverse=True,
+            )[:MAX_FINDINGS_FOR_REPLAN]
+            tail_findings = sorted(
+                top_recent,
+                key=lambda f: f.get("id") if isinstance(f.get("id"), int) else -1,
+            )
+            findings_truncation = (findings_before, len(tail_findings))
+        else:
+            tail_findings = list(findings)
+        payload["findings"] = [_summarize_finding(f) for f in tail_findings]
     if synthesis_md is not None:
         payload["synthesis_md"] = synthesis_md
     context = json.dumps(payload, sort_keys=True, default=str)
@@ -466,6 +520,19 @@ async def tactical_replan(
                 "after": len(summarized),
                 "compressed": True,
                 "max": MAX_RECENT_RESULTS_FOR_REPLAN,
+            },
+        )
+    if findings_truncation is not None:
+        emit(
+            job,
+            "WARN",
+            "planner",
+            "findings_truncated",
+            {
+                "before": findings_truncation[0],
+                "after": findings_truncation[1],
+                "compressed": True,
+                "max": MAX_FINDINGS_FOR_REPLAN,
             },
         )
     raw = await _run_planner_for_yaml(
@@ -630,6 +697,7 @@ async def cloud_replan(
 
 
 __all__ = [
+    "MAX_FINDINGS_FOR_REPLAN",
     "MAX_PLAN_VERSIONS",
     "MAX_RECENT_RESULTS_FOR_REPLAN",
     "Plan",

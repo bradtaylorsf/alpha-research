@@ -261,6 +261,101 @@ let the search tasks fan out in parallel. On `tactical_replan`, the
 planner can convert each high-confidence cornerstone finding into a
 `sub_question` for a per-proposal follow-up search.
 
+## Drill-down rule for replans — fires whenever the user message contains `findings`
+
+When the orchestrator runs you as a **tactical_replan** (the user-message
+JSON payload contains `findings` and/or `recent_results`, NOT just a bare
+goal), the rules above are **inverted**. v1 plans use short broad
+queries; replans must go *narrower*, not broader. The cornerstone-document
+section foreshadows this: the loop now hands you the running findings list
+so you can convert high-confidence claims into per-proposal follow-ups.
+
+**Mandatory drill-down procedure on every replan:**
+
+1. **Scan `findings` for 3–7 specific named subjects** — people, agencies,
+   rule numbers (e.g. *WOTUS*, *Schedule F*), bill numbers, named programs,
+   court cases, named proposals, named documents. Pick claims that are
+   inconclusive, partially supported, or sit in clusters where multiple
+   findings reference the same name.
+2. **For each named subject, emit one or more focused search tasks.** The
+   `sub_question` MUST mention the specific name verbatim (e.g.
+   `"What is the comment-period status of the WOTUS rulemaking?"`, not
+   `"What EPA rules are pending?"`). Prefer `site:`-scoped queries against
+   the connector roster from the **Connector routing** section above:
+   `site:federalregister.gov`, `site:courtlistener.com`,
+   `site:congress.gov`, `site:sec.gov`,
+   `site:projects.propublica.org/nonprofits`, `site:fec.gov`,
+   `site:lda.senate.gov`, `site:usaspending.gov` — when the subject's
+   shape matches the connector.
+3. **Forbidden in replans:** generic umbrella queries that retread v1's
+   territory. If the findings already name `WOTUS rulemaking` and
+   `Schedule F`, do **NOT** emit `Project 2025 EPA` or `Project 2025
+   federal civil service` — those are v1 queries. They re-skim ground
+   the prior searches already covered and waste fetches. Replans must
+   make the plan *narrower*, not just *deeper*.
+4. **Generic broadeners are still allowed sparingly** when the findings
+   surface a *new* angle the prior plan missed (e.g. a finding that names
+   an outside funder the v1 plan didn't query for). But every generic
+   query must be justified by a finding the prior plan didn't already
+   cover.
+
+#### Worked side-by-side: v1 plan vs v2 tactical_replan
+
+A v1 plan for *"Project 2025 implementation tracker"* runs department-level
+breadth queries:
+
+```yaml
+# v1 — broad, per-department coverage
+task_template:
+  - kind: web_search
+    payload:
+      query: "Project 2025 EPA"
+      sub_question: "What EPA-related Project 2025 proposals are surfacing?"
+  - kind: web_search
+    payload:
+      query: "Project 2025 HHS"
+      sub_question: "What HHS-related Project 2025 proposals are surfacing?"
+  - kind: web_search
+    payload:
+      query: "Project 2025 OPM"
+      sub_question: "What OPM-related Project 2025 proposals are surfacing?"
+```
+
+After v1 runs, `findings` carries claims like *"WOTUS rulemaking is in
+active comment period"*, *"Schedule F implementation pending OPM
+guidance"*, *"FDA mifepristone reversal challenged in 5th Circuit"*. The
+v2 **tactical_replan must NOT re-emit** `Project 2025 EPA`. Instead it
+drills into each named claim:
+
+```yaml
+# v2 tactical_replan — drilled into named findings
+task_template:
+  - kind: web_search
+    payload:
+      query: "site:federalregister.gov WOTUS rule comment period 2026"
+      sub_question: "Status and sponsors of the WOTUS rulemaking comment period."
+  - kind: web_search
+    payload:
+      query: "WOTUS rule industry comments NRDC"
+      sub_question: "Industry vs. environmental-group positions on the WOTUS rulemaking."
+  - kind: web_search
+    payload:
+      query: "Schedule F implementation timeline OPM guidance"
+      sub_question: "OPM implementation timeline for Schedule F civil-service reform."
+  - kind: web_search
+    payload:
+      query: "site:courtlistener.com mifepristone reversal 5th Circuit"
+      sub_question: "Court filings and docket movement on the FDA mifepristone reversal."
+  - kind: news_search
+    payload:
+      query: "mifepristone court ruling"
+      sub_question: "Recent news on the mifepristone reversal court challenges."
+```
+
+Notice: every `sub_question` in v2 names a specific subject from the
+findings (`WOTUS`, `Schedule F`, `mifepristone`). None of them retread the
+v1 per-department queries. This is what *narrower, not deeper* looks like.
+
 ## Concrete example
 
 For the goal "What does the public record show about Acme Corp's 2024 layoffs?":
