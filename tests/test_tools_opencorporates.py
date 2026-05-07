@@ -21,9 +21,11 @@ from research_agent.tools import opencorporates
 def _reset_state(monkeypatch):
     opencorporates.reset_for_tests()
     monkeypatch.setattr(opencorporates.asyncio, "sleep", AsyncMock())
-    # Default: no API key set so anonymous-tier behaviour is exercised by
-    # default. Tests that need a token set it explicitly via monkeypatch.
-    monkeypatch.delenv("OPENCORPORATES_API_KEY", raising=False)
+    # Default: a stub API key so happy-path tests exercise the network
+    # path. OpenCorporates removed anonymous v0.4 access, so without a key
+    # search()/fetch() short-circuit to []/None. Tests that need to verify
+    # the no-key path delete the env var explicitly.
+    monkeypatch.setenv("OPENCORPORATES_API_KEY", "test-token")
     yield
     opencorporates.reset_for_tests()
 
@@ -224,17 +226,20 @@ async def test_search_with_jurisdiction_filter(monkeypatch):
     assert params["jurisdiction_code"] == "us_ca"
 
 
-async def test_search_no_key_omits_api_token(monkeypatch):
-    """Anonymous-tier requests must not include ``api_token`` in params."""
-    payload = json.dumps({"results": {"companies": []}})
+async def test_search_without_key_short_circuits(monkeypatch):
+    """No key ⇒ search() returns ``[]`` without making any HTTP call.
+
+    Anonymous v0.4 access is gated (HTTP 401), so the connector skips
+    the network call entirely instead of burning a guaranteed-401 request.
+    """
+    monkeypatch.delenv("OPENCORPORATES_API_KEY", raising=False)
 
     def _respond(url, params):
-        return 200, payload
+        raise AssertionError("should not be called when no API key is set")
 
     captured = _patch_httpx(monkeypatch, responder=_respond)
-    await opencorporates.search("anything")
-    params = captured["params"][0]
-    assert "api_token" not in params
+    assert await opencorporates.search("anything") == []
+    assert captured["urls"] == []
 
 
 async def test_search_with_key_includes_api_token(monkeypatch):
@@ -384,6 +389,19 @@ async def test_fetch_returns_none_for_empty_url():
     assert await opencorporates.fetch("") is None
 
 
+async def test_fetch_without_key_short_circuits(monkeypatch):
+    """No key ⇒ fetch() returns ``None`` without making any HTTP call."""
+    monkeypatch.delenv("OPENCORPORATES_API_KEY", raising=False)
+
+    def _respond(url, params):
+        raise AssertionError("should not be called when no API key is set")
+
+    captured = _patch_httpx(monkeypatch, responder=_respond)
+    url = "https://opencorporates.com/companies/us_ca/201234567890"
+    assert await opencorporates.fetch(url) is None
+    assert captured["urls"] == []
+
+
 async def test_fetch_with_key_sends_api_token(monkeypatch):
     """When set, the token rides along on the detail call as well."""
 
@@ -461,3 +479,13 @@ def test_smoke_registry_includes_opencorporates():
     from research_agent.tools import TOOL_REGISTRY
 
     assert "opencorporates" in TOOL_REGISTRY
+
+
+def test_smoke_wrapper_skips_when_no_key(monkeypatch):
+    """Smoke wrapper returns the standard skip string when no key is set."""
+    from research_agent.tools import _smoke_opencorporates
+
+    monkeypatch.delenv("OPENCORPORATES_API_KEY", raising=False)
+    out = _smoke_opencorporates("Heritage Foundation")
+    assert "OPENCORPORATES_API_KEY" in out
+    assert "skipped" in out

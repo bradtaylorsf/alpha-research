@@ -15,12 +15,14 @@ OpenCorporates is the canonical free-tier global registry. Critical for
 **shell-company unmasking**: same registered agent across multiple LLCs at
 one address is a classic red flag for political/financial investigations.
 
-Auth: anonymous tier (~50 calls/day, limited fields) works for v1; setting
-``OPENCORPORATES_API_KEY`` adds the token as ``?api_token=<key>`` (richer
-fields per the OpenCorporates docs). Free public-benefit access requires
-emailing service desk; commercial pricing £2,250–£12,000/yr.
+Auth: OpenCorporates removed anonymous v0.4 access — ``OPENCORPORATES_API_KEY``
+is required for any live request. Without it, ``search()`` and ``fetch()``
+return ``[]`` / ``None`` without making a network call (anonymous calls
+return HTTP 401). The token rides as ``?api_token=<key>``. Free
+public-benefit access requires emailing service desk; commercial
+pricing £2,250–£12,000/yr.
 
-Per AC: 0.5 RPS per-host gate to be safe on the anonymous tier.
+Per-host rate gate: 0.5 RPS to stay polite on the authenticated tier.
 """
 
 from __future__ import annotations
@@ -249,22 +251,28 @@ async def search(
     """Run an OpenCorporates company search and return up to ``max_results`` hits.
 
     ``jurisdiction`` is the OpenCorporates jurisdiction code (e.g. ``us_ca``
-    for California, ``gb`` for the UK). When ``OPENCORPORATES_API_KEY`` is
-    set, the token is appended as ``?api_token=...`` to unlock richer fields
-    on the response.
+    for California, ``gb`` for the UK). ``OPENCORPORATES_API_KEY`` is
+    required — anonymous v0.4 access is gated and returns HTTP 401, so
+    without a key this returns ``[]`` without making a network call.
 
     Returns ``[]`` on transport / HTTP error or non-JSON body — connector
     failures must never crash the planner.
     """
+    api_key = _resolve_api_key()
+    if not api_key:
+        logger.info(
+            "opencorporates search skipped: OPENCORPORATES_API_KEY not set"
+            " (anonymous v0.4 access is gated)"
+        )
+        return []
+
     params: dict[str, Any] = {
         "q": query,
         "per_page": min(max_results, 100),
+        "api_token": api_key,
     }
     if jurisdiction:
         params["jurisdiction_code"] = jurisdiction
-    api_key = _resolve_api_key()
-    if api_key:
-        params["api_token"] = api_key
 
     await _rate_limit_gate()
     url = urljoin(_BASE_URL, "companies/search")
@@ -442,15 +450,20 @@ async def fetch(url: str, timeout: float = 30.0) -> Source | None:
         return None
     jurisdiction, company_number = parts
 
-    api_url = urljoin(_BASE_URL, f"companies/{jurisdiction}/{company_number}")
-    params: dict[str, Any] = {}
     api_key = _resolve_api_key()
-    if api_key:
-        params["api_token"] = api_key
+    if not api_key:
+        logger.info(
+            "opencorporates fetch skipped: OPENCORPORATES_API_KEY not set"
+            " (anonymous v0.4 access is gated)"
+        )
+        return None
+
+    api_url = urljoin(_BASE_URL, f"companies/{jurisdiction}/{company_number}")
+    params: dict[str, Any] = {"api_token": api_key}
 
     await _rate_limit_gate()
     status, payload = await _http_get_json(
-        api_url, params=params or None, timeout=timeout
+        api_url, params=params, timeout=timeout
     )
     if status is None or status >= 400 or not isinstance(payload, dict):
         if status is not None and status >= 400:
