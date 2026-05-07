@@ -16,6 +16,7 @@ from research_agent.orchestrator.loop import (
     RETRY_MAX_ATTEMPTS,
     Handler,
     _expand_search_to_fetches,
+    _run_extract_findings,
     default_handlers,
     run_loop,
 )
@@ -748,3 +749,233 @@ def test_expand_search_to_fetches_no_plan_falls_back_to_three(job: Job) -> None:
     out = _expand_search_to_fetches(job, {"query": "q"}, results)
 
     assert len(out["follow_up_tasks"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Cornerstone-document extraction (issue #177)
+# ---------------------------------------------------------------------------
+
+
+class _StubRouter:
+    """Minimal router stand-in for ``_run_extract_findings`` tests.
+
+    Captures every ``call(tier, agent, ...)`` invocation so tests can
+    assert tier + agent.system_prompt without going through Pydantic AI.
+    The configured ``yaml_output`` is what the model "emits".
+
+    ``model_for`` returns a Pydantic AI :class:`TestModel` because the
+    handler constructs an ``Agent`` before our :meth:`call` ever runs,
+    and the Agent constructor refuses raw objects.
+    """
+
+    def __init__(self, yaml_output: str) -> None:
+        self.yaml_output = yaml_output
+        self.calls: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]] = []
+
+    def model_for(self, tier: str) -> Any:
+        from pydantic_ai.models.test import TestModel
+
+        return TestModel()
+
+    async def call(self, tier: str, agent: Any, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((tier, agent, args, kwargs))
+
+        class _Result:
+            output = self.yaml_output
+
+        return _Result()
+
+
+def _seed_source(job: Job, *, url: str, body: str) -> int:
+    from research_agent.storage.sources import write_source
+
+    return write_source(
+        job,
+        url=url,
+        title="Cornerstone Document",
+        raw_content=body,
+        kind="web",
+    )
+
+
+def _persist_plan_with_cornerstone(job: Job, url: str | None) -> None:
+    p = Plan(
+        version=1,
+        objective="Index the cornerstone",
+        subgoals=[Subgoal(id=1, description="Index", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=1,
+        cornerstone_url=url,
+    )
+    write_plan(job, p.model_dump())
+
+
+_CORNERSTONE_BODY = (
+    "DOJ: Proposal 1: Restore Schedule F across the executive branch.\n"
+    "DOJ: Proposal 2: Relocate FBI domestic-intelligence operations.\n"
+    "DOJ: Proposal 3: Reorganize the Antitrust Division.\n"
+    "DOJ: Proposal 4: Clarify the AG's removal authority.\n"
+    "State: Proposal 5: Withdraw from the Paris Agreement.\n"
+    "State: Proposal 6: Restructure USAID.\n"
+    "State: Proposal 7: Re-list the Houthis as a foreign terrorist organization.\n"
+    "State: Proposal 8: Limit refugee admissions.\n"
+    "EPA: Proposal 9: Halt Clean Air Act greenhouse-gas enforcement.\n"
+    "EPA: Proposal 10: Rescind the endangerment finding.\n"
+    "EPA: Proposal 11: Devolve Superfund authority to the states.\n"
+    "EPA: Proposal 12: End ESG-style cost-benefit calculations.\n"
+)
+
+_CORNERSTONE_YAML = """\
+```yaml
+- claim: "Restore Schedule F across the executive branch (DOJ)."
+  confidence: 0.9
+  quote: "Restore Schedule F across the executive branch."
+  tags: [doj, schedule-f]
+- claim: "Relocate FBI domestic-intelligence operations (DOJ)."
+  confidence: 0.85
+  quote: "Relocate FBI domestic-intelligence operations."
+  tags: [doj, fbi]
+- claim: "Reorganize the Antitrust Division (DOJ)."
+  confidence: 0.8
+  quote: "Reorganize the Antitrust Division."
+  tags: [doj, antitrust]
+- claim: "Clarify the AG's removal authority (DOJ)."
+  confidence: 0.8
+  quote: "Clarify the AG's removal authority."
+  tags: [doj, removal]
+- claim: "Withdraw from the Paris Agreement (State)."
+  confidence: 0.95
+  quote: "Withdraw from the Paris Agreement."
+  tags: [state, climate]
+- claim: "Restructure USAID (State)."
+  confidence: 0.8
+  quote: "Restructure USAID."
+  tags: [state, usaid]
+- claim: "Re-list the Houthis as a foreign terrorist organization (State)."
+  confidence: 0.8
+  quote: "Re-list the Houthis as a foreign terrorist organization."
+  tags: [state, terrorism]
+- claim: "Limit refugee admissions (State)."
+  confidence: 0.8
+  quote: "Limit refugee admissions."
+  tags: [state, refugees]
+- claim: "Halt Clean Air Act greenhouse-gas enforcement (EPA)."
+  confidence: 0.9
+  quote: "Halt Clean Air Act greenhouse-gas enforcement."
+  tags: [epa, climate]
+- claim: "Rescind the endangerment finding (EPA)."
+  confidence: 0.85
+  quote: "Rescind the endangerment finding."
+  tags: [epa, endangerment]
+- claim: "Devolve Superfund authority to the states (EPA)."
+  confidence: 0.8
+  quote: "Devolve Superfund authority to the states."
+  tags: [epa, superfund]
+- claim: "End ESG-style cost-benefit calculations (EPA)."
+  confidence: 0.8
+  quote: "End ESG-style cost-benefit calculations."
+  tags: [epa, esg]
+```
+"""
+
+
+@pytest.mark.asyncio
+async def test_extract_findings_cornerstone_path(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cornerstone source: structured-index prompt + uncapped findings.
+
+    A planner-marked cornerstone URL must (a) route extraction through
+    ``researcher_cornerstone.md`` (not ``researcher.md``), (b) write all
+    12 findings — past the 8-finding default cap, (c) preserve the
+    department tag on each finding so downstream tactical_replan can
+    convert them into per-proposal sub-questions.
+    """
+    url = "https://example.test/policy.md"
+    _persist_plan_with_cornerstone(job, url)
+    source_id = _seed_source(job, url=url, body=_CORNERSTONE_BODY)
+
+    # _run_extract_findings does ``from research_agent.prompts.loader import
+    # load_prompt`` inside the function body, so each call re-resolves the
+    # name against the loader module. Patching the module attribute is
+    # enough — no need to also patch any orchestrator-side symbol.
+    import research_agent.prompts.loader as _loader_mod
+
+    loaded_prompts: list[str] = []
+    real_load = _loader_mod.load_prompt
+
+    def _spy_load(name: str, *args: Any, **kwargs: Any) -> str:
+        loaded_prompts.append(name)
+        return real_load(name, *args, **kwargs)
+
+    monkeypatch.setattr(_loader_mod, "load_prompt", _spy_load)
+
+    router = _StubRouter(_CORNERSTONE_YAML)
+    task = {"payload": {"source_id": source_id, "sub_question": "List proposals."}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    assert result["findings_written"] == 12
+    assert result["skipped"] == 0
+    assert "researcher_cornerstone" in loaded_prompts
+    assert "researcher" not in loaded_prompts
+
+    # Every finding should carry a department tag.
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT tags FROM findings WHERE job_id = ? ORDER BY id ASC",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 12
+    import json as _json
+
+    departments = {"doj", "state", "epa"}
+    for row in rows:
+        tags = _json.loads(row["tags"]) if row["tags"] else []
+        assert any(t in departments for t in tags), tags
+
+    # cornerstone_extract event must have been emitted.
+    events = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_extract" in events
+
+
+@pytest.mark.asyncio
+async def test_extract_findings_non_cornerstone_uses_default_cap(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-cornerstone source still caps at 8 findings via the default prompt."""
+    url = "https://example.test/article.html"
+    _persist_plan_with_cornerstone(job, "https://example.test/totally-different.pdf")
+    source_id = _seed_source(job, url=url, body="A short news article body.")
+
+    loaded_prompts: list[str] = []
+    import research_agent.prompts.loader as _loader_mod
+
+    real_load = _loader_mod.load_prompt
+
+    def _spy_load(name: str, *args: Any, **kwargs: Any) -> str:
+        loaded_prompts.append(name)
+        return real_load(name, *args, **kwargs)
+
+    monkeypatch.setattr(_loader_mod, "load_prompt", _spy_load)
+
+    # Emit 12 findings — the default cap should drop the last 4.
+    yaml_payload = "```yaml\n" + "".join(
+        f'- claim: "Claim {i}"\n  confidence: 0.8\n  quote: ""\n  tags: [t{i}]\n'
+        for i in range(12)
+    ) + "```\n"
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "What?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    assert result["findings_written"] == 8
+    assert "researcher" in loaded_prompts
+    assert "researcher_cornerstone" not in loaded_prompts

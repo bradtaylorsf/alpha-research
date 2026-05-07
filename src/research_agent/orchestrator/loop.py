@@ -660,11 +660,70 @@ def _load_source_text(job: Job, source_id: int) -> tuple[str, dict[str, Any]] | 
 _EXTRACT_TEXT_LIMIT = 20000  # ~5k tokens; well under any tier's window
 _FINDINGS_PER_SOURCE_LIMIT = 8
 
+# Issue #177: cornerstone documents (the document the goal is anchored on —
+# the Mandate for Leadership PDF, a 10-K, a court opinion) carry the spine
+# of the investigation. Article-sized caps starve the rest of the run, so
+# the cornerstone path uses a much larger text window and a much higher
+# findings ceiling. The ceiling exists only to bound truly pathological
+# model output, not to constrain a real indexing pass.
+_CORNERSTONE_EXTRACT_TEXT_LIMIT = 80000  # ~20k tokens; still inside frontier windows
+_CORNERSTONE_FINDINGS_PER_SOURCE_LIMIT = 500
+# Documents that nobody marked as cornerstone but whose body is bigger than
+# this still get the cornerstone treatment — the planner's marker is the
+# primary signal, this is a fallback for runs whose plans pre-date #177.
+_CORNERSTONE_FALLBACK_MIN_CHARS = 200_000
+
 
 def _truncate_for_prompt(text: str, limit: int = _EXTRACT_TEXT_LIMIT) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "\n\n[…truncated]"
+
+
+def _normalize_url_for_compare(url: str | None) -> str | None:
+    """Lowercase host + strip trailing slash so URL equality is forgiving.
+
+    The planner emits ``cornerstone_url`` as a literal string; the source
+    row stores whatever URL the fetch resolved. Casing of the host and a
+    trailing slash on the path are the only differences worth tolerating —
+    anything more involved (query reordering, scheme upgrade) would risk
+    aliasing two genuinely different resources.
+    """
+    if not isinstance(url, str) or not url:
+        return None
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return None
+    host = parts.hostname or ""
+    netloc = host.lower()
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    path = parts.path.rstrip("/")
+    return urlunsplit((parts.scheme.lower(), netloc, path, parts.query, ""))
+
+
+def _is_cornerstone_source(job: Job, meta: dict[str, Any], text: str) -> bool:
+    """True when this source is the plan's declared cornerstone document.
+
+    Primary signal: the latest persisted plan's ``cornerstone_url`` matches
+    the source's URL (after light normalization). Fallback: the source's
+    body exceeds :data:`_CORNERSTONE_FALLBACK_MIN_CHARS`, which catches
+    runs whose plans pre-date #177 — better to over-trigger here than to
+    cap a 920-page document at 8 findings because the planner forgot to
+    set the marker.
+    """
+    plan = _load_latest_plan(job)
+    if plan is not None and plan.cornerstone_url:
+        norm_plan = _normalize_url_for_compare(plan.cornerstone_url)
+        norm_src = _normalize_url_for_compare(meta.get("url"))
+        if norm_plan and norm_src and norm_plan == norm_src:
+            return True
+    if isinstance(text, str) and len(text) >= _CORNERSTONE_FALLBACK_MIN_CHARS:
+        return True
+    return False
 
 
 _YAML_FENCE_RE = re.compile(r"```(?:yaml|yml)?\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
@@ -729,13 +788,35 @@ async def _run_extract_findings(
 
     sub_question = payload.get("sub_question") or job.goal
 
-    rendered = load_prompt("researcher", job=job, goal=job.goal)
+    is_cornerstone = _is_cornerstone_source(job, meta, text)
+    if is_cornerstone:
+        prompt_name = "researcher_cornerstone"
+        text_limit = _CORNERSTONE_EXTRACT_TEXT_LIMIT
+        findings_limit = _CORNERSTONE_FINDINGS_PER_SOURCE_LIMIT
+        emit(
+            job,
+            "INFO",
+            "loop",
+            "cornerstone_extract",
+            {
+                "source_id": source_id,
+                "url": meta.get("url"),
+                "prompt": prompt_name,
+                "text_chars": len(text),
+            },
+        )
+    else:
+        prompt_name = "researcher"
+        text_limit = _EXTRACT_TEXT_LIMIT
+        findings_limit = _FINDINGS_PER_SOURCE_LIMIT
+
+    rendered = load_prompt(prompt_name, job=job, goal=job.goal)
     agent = Agent(router.model_for("general"), output_type=str, system_prompt=rendered)
     context = (
         f"Sub-question: {sub_question}\n"
         f"Source URL: {meta.get('url')}\n"
         f"Source title: {meta.get('title')}\n\n"
-        f"Source content:\n{_truncate_for_prompt(text)}"
+        f"Source content:\n{_truncate_for_prompt(text, text_limit)}"
     )
     result = await router.call("general", agent, context)
     raw = result.output if isinstance(result.output, str) else str(result.output)
@@ -761,7 +842,7 @@ async def _run_extract_findings(
 
     written: list[int] = []
     skipped = 0
-    for item in parsed[:_FINDINGS_PER_SOURCE_LIMIT]:
+    for item in parsed[:findings_limit]:
         if not isinstance(item, dict):
             skipped += 1
             continue
