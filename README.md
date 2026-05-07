@@ -1,19 +1,42 @@
 # research-agent
 
+## What is this and why does it exist?
+
+Existing AI research agents are cloud-only, opaque about where their answers
+came from, and lock you into one vendor. **alpha-research** is a different
+shape: a CLI daemon that runs on your laptop, defaults to local models via
+LM Studio (so the wallet cost is `$0`), and treats every claim as something
+that has to land in a footnote with a Wayback archive URL behind it.
+
+You hand it a goal — *"Compare Pydantic AI, LangGraph, and CrewAI"*,
+*"Profile this contractor for due diligence"*, *"Track Project 2025
+implementation across federal agencies"* — and walk away. A planner spawns
+worker tasks (fetch, extract, dedup, classify), findings accumulate in a
+per-job folder with a SQLite index, a synthesizer rewrites a `report.md`
+with inline citations, a critic on a different model pushes back, and the
+whole thing runs under a deterministic job ID with `start` / `status` /
+`stop` / `resume` lifecycle commands a sysadmin would recognize.
+
+**Who it's for:** investigative journalists, security researchers,
+due-diligence work, anyone who needs to kick off a multi-hour run overnight
+and wake up to a report with citations they can defend.
+
+**What it's NOT:** a chatbot, a real-time tool, or the right answer to a
+one-off question you could resolve with a single web search.
+
 > 🚧 **Status: actively developed.** v1 baseline is shipped and validated
 > end-to-end ($0 local-mode runs produce real, sourced reports). The
 > [open issues](../../issues) are the roadmap — see
-> [#107](../../issues/107) for the connector buildout epic. Expect rough
-> edges; PRs and issue reports welcome.
+> [#107](../../issues/107) for the connector buildout epic and
+> [#158](../../issues/158) for the active connector smoke-fix sweep.
+> Expect rough edges; PRs and issue reports welcome.
 
-Autonomous CLI research agent. Run `research start` against a goal and walk
-away — the daemon plans, fetches, synthesizes, and cites until the goal is
-met (or the budget / time cap fires).
+> **MIT licensed**, contributions welcome — see
+> [`CONTRIBUTING.md`](CONTRIBUTING.md) for the issue-driven workflow and
+> [`LICENSE`](LICENSE) for terms.
 
 This README is the entry point. It walks an operator from "fresh laptop" to
-"24-hour soak running unattended". Deeper detail (architecture, tier
-routing, connector design) lives in the three foundational research docs in
-this repo:
+"24-hour soak running unattended". Deeper detail lives alongside it:
 
 - [`ai-agent-research-setup.md`](ai-agent-research-setup.md) — model
   routing, hardware sizing, LM Studio ergonomics.
@@ -22,8 +45,91 @@ this repo:
 - [`research-agent-implementation-guide.md`](research-agent-implementation-guide.md)
   — the locked-in v1 architecture (Pydantic AI, SQLite, per-job folder,
   Typer CLI, model tiers).
+- [`AGENTS.md`](AGENTS.md) — repo map, tech stack, and conventions for
+  AI coding agents (and humans) working in this codebase.
+- [`CLAUDE.md`](CLAUDE.md) — how the
+  [alpha-loop](https://github.com/bradtaylorsf/alpha-loop) issue-driven
+  build loop drives planning / build / PR flow here.
 
-`CLAUDE.md` describes the issue-driven build loop.
+## Architecture
+
+```mermaid
+flowchart TD
+    Goal["Goal (interactive intake)"] --> Planner["Planner<br/>(frontier / frontier_speed)"]
+    Planner --> Workers["Worker pool<br/>fetch · extract · dedup · classify<br/>(general · fast)"]
+    Workers --> Findings["findings/NNNNNN.md"]
+    Findings <--> SQLite["SQLite (WAL)<br/>FTS5 + embeddings<br/>(embeddings tier)"]
+    Findings --> Synth["Synthesis<br/>(frontier)"]
+    Synth <--> Critique["Critique<br/>(frontier_alt)"]
+    Synth --> Report["report.md<br/>+ history/"]
+
+    classDef local fill:#e6f4ff,stroke:#2563eb,color:#0b3d91
+    classDef cloud fill:#fff4e6,stroke:#d97706,color:#7c2d12
+    class Workers,Findings,SQLite local
+    class Planner,Synth,Critique,Report cloud
+```
+
+Blue = local LM Studio tiers (free at the wallet). Orange = OpenRouter
+cloud tiers (priced — see [Costs](#costs)). The full tier roster lives in
+[`config/models.yaml`](config/models.yaml).
+
+## What does the output actually look like?
+
+Every job ends with a `jobs/<job-id>/report.md` — markdown with inline
+numeric citations and a source list at the bottom. Trimmed real example:
+
+```markdown
+# Investigation Report: Project 2025 Implementation Tracker
+
+## Executive Summary
+
+- **Active Regulatory Shifts:** The EPA and Army Corps of Engineers are
+  currently in a public comment period (open through January 5, 2026)
+  regarding the revision of "Waters of the United States" (WOTUS)
+  definitions following the *Sackett v. EPA* ruling [40, 99].
+- **Health Policy Revisions:** Significant proposals within Project 2025
+  target HHS and the CDC, including reversing FDA approvals for abortion
+  medication (mifepristine), restructuring the CDC into two separate
+  agencies, and implementing Medicaid work requirements [38, 43, 44, 116].
+- **Expansion of Executive Authority:** The blueprint advocates for
+  "unitary executive theory," aiming to place the federal bureaucracy
+  under direct presidential control [38, 87].
+
+## Hypotheses
+
+### H1: Identify core policy pillars and specific proposals
+**Status:** Confirmed
+- **Supporting:** The investigation identified key pillars including
+  abortion access restrictions (Comstock Act), immigration overhaul,
+  voting rights limitations, and the expansion of executive power [37, 38].
+
+## Open Questions
+
+- **Specific Implementation Dates:** While IRS workforce downsizing is
+  noted, the exact timeline for the "quiet cuts" remains unverified [127].
+
+## Recommended Human Follow-Ups
+
+### FOIA candidates
+- Correspondence between the EPA and Army Corps of Engineers regarding
+  the "wet season" definition in the proposed WOTUS rule [40, 98].
+
+## Sources
+
+1. https://www.aclu.org/project-2025-explained — "Project 2025, Explained"
+   (retrieved 2025-05-20)
+2. https://www.bbc.com/news/articles/c977njnvq2do — "What is Project 2025?"
+   (retrieved 2025-05-20)
+40. https://www.alston.com/en/insights/publications/2025/12/epa-army-corps...
+    — "EPA, Army Corps of Engineers Proposal on Revised WOTUS Definition"
+    (retrieved 2025-05-20)
+...
+```
+
+Bracketed numbers in the body resolve to the numbered list at the bottom.
+Each source row carries the canonical URL, the resolved title, and the
+retrieval date. Wayback archive URLs are mirrored alongside in
+`jobs/<job-id>/sources/` so a deleted page is still defensible.
 
 ## Install
 
@@ -59,17 +165,27 @@ The full list of recognized keys lives in `src/research_agent/config.py`
 (`EXPECTED_ENV_KEYS`). `.env.example` and `research doctor` both read from
 that list, so there is no drift.
 
+### Required / commonly used
+
 | Key | Required | Purpose |
 |---|---|---|
 | `OPENROUTER_API_KEY` | yes | Cloud synthesis tier (Claude Opus / Haiku via OpenRouter). |
 | `BRAVE_SEARCH_API_KEY` | no | Brave Search API key (free tier ~2000 queries/month). When set, `web_search` engine `auto` picks Brave over the DDG-Playwright scraper. |
-| `RESEARCH_USER_AGENT` | no | Override default UA sent by httpx + Playwright. |
+| `LMSTUDIO_BASE_URL` | no | Override the default `http://localhost:1234/v1`. |
 | `RESEARCH_HEADFUL` | no | Set to `1` to launch Playwright in headed mode for debugging. |
+| `YOUTUBE_API_KEY` | no | YouTube Data API v3 key (free quota: 10,000 units/day). When set, `tools/youtube.py:search` uses the official API; absent, it falls back to scraping the public results page via Playwright. |
+
+### Connector-specific and advanced
+
+<details>
+<summary>Click to expand — escalation toggles, connector API keys, broker switches</summary>
+
+| Key | Required | Purpose |
+|---|---|---|
+| `RESEARCH_USER_AGENT` | no | Override default UA sent by httpx + Playwright. |
 | `RESEARCH_IGNORE_ROBOTS` | no | Set to `1` to bypass robots.txt checks in `web_fetch`. |
 | `RESEARCH_PDF_VLM_ESCALATION` | no | Set to `1` to enable Opus 4.7 vision escalation for PDFs that fail every cheaper layer. Off by default — costs real money; emits a `pdf_vlm_escalation` WARN event when fired. |
 | `RESEARCH_OCR_VLM_ESCALATION` | no | Set to `1` to enable Opus 4.7 vision escalation for image OCR when Tesseract and the local VLM both fail. Off by default — costs real money; emits an `ocr_vlm_escalation` WARN event when fired. |
-| `LMSTUDIO_BASE_URL` | no | Override the default `http://localhost:1234/v1`. |
-| `YOUTUBE_API_KEY` | no | YouTube Data API v3 key (free quota: 10,000 units/day). When set, `tools/youtube.py:search` uses the official API; absent, it falls back to scraping the public results page via Playwright. |
 | `RESEARCH_DAEMON_PROGRESS` | no | Set to `0` to suppress the foreground Rich progress bar the daemon writes to stdout when run interactively. |
 | `COURTLISTENER_API_TOKEN` | no | CourtListener API token (free w/ signup) — required by `tools/courtlistener.py`. Authenticated tier is 5,000 req/hr; anonymous traffic is throttled to the point of unusability. |
 | `DATA_GOV_API_KEY` | no | api.data.gov key (free w/ signup at <https://api.data.gov/signup/>) — used by `tools/fec.py` (OpenFEC). Authenticated tier is 1,000 req/hr; falls back to `DEMO_KEY` (~40 req/hr per IP) when unset. |
@@ -79,6 +195,8 @@ that list, so there is no drift.
 | `LINKEDIN_DATA_API_KEY` | no | LinkedIn data-broker key (default broker: Proxycurl) — required by `tools/linkedin.py`. Per-lookup ≈ $0.01–$0.05; gate fetches behind explicit planner tasks. Sign up at <https://nubela.co/proxycurl/>. |
 | `LINKEDIN_BROKER` | no | Broker recipe used by `tools/linkedin.py`. `proxycurl` (default) or `lix`; switching to `lix` consults `LIX_API_KEY` instead of `LINKEDIN_DATA_API_KEY`. |
 | `LIX_API_KEY` | no | Lix data-broker key (<https://lix-it.com/>) — only consulted when `LINKEDIN_BROKER=lix`. Similar per-lookup pricing to Proxycurl. |
+
+</details>
 
 ## LM Studio
 
@@ -193,6 +311,54 @@ research resume "$JOB"
 ```
 
 For long unattended runs, see [macOS hygiene](#macos-hygiene) below.
+
+## Directory layout
+
+### Per-job folder (`jobs/<job-id>/`)
+
+Every job is a self-contained folder. The cross-job DB only mirrors
+metadata for fast queries — the folder is the source of truth.
+
+```
+jobs/<job-id>/
+├── job.json              # canonical metadata (id, goal, status, timestamps)
+├── intake.json           # frozen intake answers
+├── goal.md               # human-readable goal + scope
+├── plan/                 # planner state (versioned)
+├── findings/             # findings/NNNNNN.md (zero-padded, monotonic)
+├── sources/              # symlinks/copies of canonical source markdown
+├── synthesis/            # synthesis/NNNN.md (versioned)
+├── critique/             # critique/NNNN.md (versioned)
+├── report.md             # current report (rotated to report.history/ on rewrite)
+├── report.history/       # archived prior reports
+├── events.jsonl          # append-only event log
+├── daemon.pid            # written on spawn, removed on clean exit
+├── daemon.out.log        # daemon stdout
+├── daemon.err.log        # daemon stderr
+└── STOP                  # presence signals graceful stop request
+```
+
+Job IDs are deterministic: `YYYY-MM-DD-<slug>` derived from the intake
+goal. All on-disk writes go through atomic `*.tmp` + `os.replace` so a
+crashed process never leaves half-written sidecars.
+
+### Cross-job state (`data/`)
+
+```
+data/
+├── index.sqlite          # WAL-mode; jobs, findings, sources, llm_calls, FTS5, embeddings
+├── index.sqlite-wal
+├── index.sqlite-shm
+└── llm_cache.sqlite      # LLM response cache (separate file for safe wipe)
+```
+
+`research config cache-clear` wipes `llm_cache.sqlite` (and its `-wal`/
+`-shm` sidecars) without touching `index.sqlite`.
+
+### Gitignored regenerable dirs
+
+`jobs/`, `runs/`, `data/`, `logs/`, `sessions/`, `.alpha-loop/`, `.venv/`.
+Lockfiles (`uv.lock`) are committed.
 
 ## CLI surface
 
@@ -331,53 +497,64 @@ OpenRouter clients exist elsewhere.
   `llm_calls`; only OpenRouter tiers are priced. Pricing is read from
   the `pricing:` block in `config/models.yaml` (manually maintained).
 
-## Directory layout
+## Compared to other research tools
 
-### Per-job folder (`jobs/<job-id>/`)
+The questions you're going to ask (and that issue reporters will ask):
+*"why not LangGraph / CrewAI / Gemini Deep Research / Perplexity?"* Honest
+answer is "because they're solving slightly different problems" — laid
+out so you can pick the right tool for what you're doing:
 
-Every job is a self-contained folder. The cross-job DB only mirrors
-metadata for fast queries — the folder is the source of truth.
+| | alpha-research | LangGraph | Gemini Deep Research | Perplexity Pro |
+|---|---|---|---|---|
+| Runs locally | ✅ | ⚠️ framework — you provide infra | ❌ | ❌ |
+| $0 default cost | ✅ | depends | ❌ | ❌ subscription |
+| Source attribution + Wayback archival | ✅ | manual | ⚠️ partial | ✅ |
+| Multi-hour unattended runs | ✅ | manual | ❌ | ❌ |
+| CLI lifecycle (`start` / `stop` / `resume`) | ✅ | ❌ | ❌ | ❌ |
+| Per-job folder + cross-job index | ✅ | ❌ | ❌ | ❌ |
+| Cost cap enforcement | ✅ | manual | ❌ | n/a |
+| Pre-built agentic primitives | ❌ build-your-own | ✅ | ✅ | ✅ |
+| Conversational UX | ❌ | ❌ | ✅ | ✅ |
 
-```
-jobs/<job-id>/
-├── job.json              # canonical metadata (id, goal, status, timestamps)
-├── intake.json           # frozen intake answers
-├── goal.md               # human-readable goal + scope
-├── plan/                 # planner state (versioned)
-├── findings/             # findings/NNNNNN.md (zero-padded, monotonic)
-├── sources/              # symlinks/copies of canonical source markdown
-├── synthesis/            # synthesis/NNNN.md (versioned)
-├── critique/             # critique/NNNN.md (versioned)
-├── report.md             # current report (rotated to report.history/ on rewrite)
-├── report.history/       # archived prior reports
-├── events.jsonl          # append-only event log
-├── daemon.pid            # written on spawn, removed on clean exit
-├── daemon.out.log        # daemon stdout
-├── daemon.err.log        # daemon stderr
-└── STOP                  # presence signals graceful stop request
-```
+If you want a chat box that answers a single question, use Perplexity. If
+you want to wire a graph by hand, use LangGraph. If you want to hand a
+CLI a goal and walk away with a defensible report eight hours later,
+that's the niche this project is in.
 
-Job IDs are deterministic: `YYYY-MM-DD-<slug>` derived from the intake
-goal. All on-disk writes go through atomic `*.tmp` + `os.replace` so a
-crashed process never leaves half-written sidecars.
+## Roadmap / known limitations
 
-### Cross-job state (`data/`)
+The 🚧 callout above is honest, but vague. Specifics, in priority order:
 
-```
-data/
-├── index.sqlite          # WAL-mode; jobs, findings, sources, llm_calls, FTS5, embeddings
-├── index.sqlite-wal
-├── index.sqlite-shm
-└── llm_cache.sqlite      # LLM response cache (separate file for safe wipe)
-```
+- **Single-machine only.** v1 ships single-host; no multi-machine /
+  distributed coordination is on the roadmap. A "control plane" would be
+  a separate project.
+- **No web UI.** CLI-first is intentional — operators run this over SSH
+  on a workstation overnight. A read-only status dashboard might land
+  later but is not committed.
+- **macOS / Linux only.** LM Studio runs on macOS (MLX) or Linux/Windows
+  (CUDA), but the daemon's lifecycle code (`launchd` plist, `caffeinate`
+  guidance, `softwareupdate`) is only documented for macOS. Linux works
+  but needs equivalent `systemd-inhibit` wiring; Windows is untested.
+- **Cost model drifts.** OpenRouter pricing in `config/models.yaml` is
+  manually maintained — provider price changes don't auto-sync. Run
+  `research doctor --json` and compare against the OpenRouter dashboard
+  if your spend looks off.
+- **Connector buildout is in flight.** Issue [#107](../../issues/107) is
+  the connector epic; [#158](../../issues/158) is the active smoke-fix
+  sweep against the post-#107 bug list (anonymous-tier breakages,
+  request-shape regressions, env-var skip behavior). Expect intermittent
+  smoke skips on niche connectors until that closes.
+- **Synthesizer can close subgoals too aggressively.** Tracked at
+  [#159](../../issues/159) — broad-scope subgoals sometimes terminate
+  overnight runs early. Workaround: phrase the goal narrowly, or run with
+  a longer `--time-cap`.
+- **`completion_reason` mislabel.** Tracked at
+  [#160](../../issues/160) — clean subgoal closes are labeled
+  `user_stopped` rather than `goal_complete`. Cosmetic but misleading
+  in `research status` output.
 
-`research config cache-clear` wipes `llm_cache.sqlite` (and its `-wal`/
-`-shm` sidecars) without touching `index.sqlite`.
-
-### Gitignored regenerable dirs
-
-`jobs/`, `runs/`, `data/`, `logs/`, `sessions/`, `.alpha-loop/`, `.venv/`.
-Lockfiles (`uv.lock`) are committed.
+Bug reports are how this list shrinks — open an issue if you hit
+something not on it.
 
 ## macOS hygiene
 
