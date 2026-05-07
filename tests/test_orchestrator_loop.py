@@ -7,9 +7,11 @@ from typing import Any
 
 import pytest
 
+from research_agent.orchestrator import plan as plan_module
 from research_agent.orchestrator.errors import FatalError, RetriableError
 from research_agent.orchestrator.loop import (
     HEURISTIC_CHECK_EVERY_N,
+    MAX_DRAIN_REPLANS,
     MAX_TASKS_PER_JOB,
     RETRY_MAX_ATTEMPTS,
     Handler,
@@ -437,8 +439,6 @@ async def test_loop_exits_when_subgoals_all_done(job: Job, db_path: Path) -> Non
     guard sees ``plan.is_complete()`` and exits cleanly. The daemon then
     maps that to ``completion_reason='goal_complete'`` (see daemon.py:796).
     """
-    from research_agent.orchestrator import plan as plan_module
-
     seeded = Plan(
         version=1,
         objective="Investigate the target",
@@ -486,3 +486,177 @@ async def test_loop_exits_when_subgoals_all_done(job: Job, db_path: Path) -> Non
     pending_count = sum(1 for r in rows if r["status"] == STATUS_PENDING)
     assert done_count == HEURISTIC_CHECK_EVERY_N
     assert pending_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Drain-replan (issue #117) — keep the loop running when the queue empties
+# but the plan is not yet complete and the cap hasn't fired.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_drain_replan_chains_when_queue_empties(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the queue drains, fire ``tactical_replan`` and keep going."""
+    _seed_tasks(job, ["web_search"] * 4)
+
+    drain_calls = {"n": 0}
+
+    async def fake_tactical_replan(
+        job_arg: Job,
+        prior_plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+    ) -> Plan:
+        drain_calls["n"] += 1
+        next_version = prior_plan.version + 1
+        if drain_calls["n"] == 1:
+            template = [TaskSpec(kind="web_search", payload={"q": f"r{i}"}) for i in range(4)]
+        else:
+            template = []
+        new = Plan(
+            version=next_version,
+            objective=prior_plan.objective,
+            subgoals=prior_plan.subgoals,
+            task_template=template,
+            expected_iterations=prior_plan.expected_iterations,
+        )
+        write_plan(job_arg, new.model_dump())
+        if template:
+            enqueue(job_arg, list(template), next_version)
+        return new
+
+    monkeypatch.setattr(plan_module, "tactical_replan", fake_tactical_replan)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert drain_calls["n"] == 2
+    assert result["drain_replans"] == 2
+    assert result["tasks_done"] >= 8
+
+    events = _read_event_kinds(db_path, job.id)
+    assert events.count("drain_replan") == 2
+
+
+@pytest.mark.asyncio
+async def test_drain_replan_respects_cap(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past ``MAX_DRAIN_REPLANS`` the loop must bail with a cap-hit warning."""
+    _seed_tasks(job, ["web_search"])
+
+    monkeypatch.setattr("research_agent.orchestrator.loop.MAX_DRAIN_REPLANS", 3)
+
+    async def fake_tactical_replan(
+        job_arg: Job,
+        prior_plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+    ) -> Plan:
+        next_version = prior_plan.version + 1
+        template = [TaskSpec(kind="web_search", payload={"q": "more"})]
+        new = Plan(
+            version=next_version,
+            objective=prior_plan.objective,
+            subgoals=prior_plan.subgoals,
+            task_template=template,
+            expected_iterations=prior_plan.expected_iterations,
+        )
+        write_plan(job_arg, new.model_dump())
+        enqueue(job_arg, list(template), next_version)
+        return new
+
+    monkeypatch.setattr(plan_module, "tactical_replan", fake_tactical_replan)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["drain_replans"] == 3
+
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM events WHERE job_id = ? AND kind = 'warning'",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    import json as _json
+
+    assert any(
+        _json.loads(r["payload_json"]).get("drain_replan_cap_hit") is True for r in rows
+    )
+
+
+@pytest.mark.asyncio
+async def test_drain_replan_break_on_empty_template(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty task_template means the planner thinks the goal is exhausted."""
+    _seed_tasks(job, ["web_search"])
+
+    async def fake_tactical_replan(
+        job_arg: Job,
+        prior_plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+    ) -> Plan:
+        next_version = prior_plan.version + 1
+        new = Plan(
+            version=next_version,
+            objective=prior_plan.objective,
+            subgoals=prior_plan.subgoals,
+            task_template=[],
+            expected_iterations=prior_plan.expected_iterations,
+        )
+        write_plan(job_arg, new.model_dump())
+        return new
+
+    monkeypatch.setattr(plan_module, "tactical_replan", fake_tactical_replan)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["drain_replans"] == 1
+    assert result["tasks_done"] == 1
+    events = _read_event_kinds(db_path, job.id)
+    assert events.count("drain_replan") == 1
+
+
+def test_max_drain_replans_default_is_ten() -> None:
+    assert MAX_DRAIN_REPLANS == 10
