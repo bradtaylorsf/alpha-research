@@ -103,7 +103,7 @@ hand; the planner only needs to seed the discovery query.
 
 ### Payload shapes
 
-- `web_search`: `{ query: "…", sub_question: "…", max_results: 10, engine: "auto", expand_top_k: 3 }`
+- `web_search`: `{ query: "…", sub_question: "…", max_results: 10, engine: "auto" }` (optional `expand_top_k` to override the scope-aware default)
 - `news_search`: `{ query: "…", sub_question: "…" }`
 - `reddit_search`: `{ query: "…", sub_question: "…" }`
 - `arxiv_search`: `{ query: "…", sub_question: "…", max_results: 10 }`
@@ -171,9 +171,23 @@ task_template:
     depends_on: []
 ```
 
-Each search above will be automatically expanded into 3 fetches and 3
-extracts by the loop (configurable via `expand_top_k`). You do not need
-to write those fetch/extract tasks yourself.
+Each search above will be automatically expanded into N fetches (and N
+extracts) by the loop, where N defaults to the plan's `scope_class`:
+narrow→3, medium→5, broad→7, comprehensive→10. You do not need to write
+those fetch/extract tasks yourself.
+
+You can override per task by setting `expand_top_k` in the search
+payload. Use this when a single search has a different role from the
+rest of the plan:
+
+- **Broad-net mainstream-news scan** (e.g. `Project 2025 mainstream
+  coverage`) → set `expand_top_k: 10` so you fan out across many
+  outlets.
+- **Targeted "find the canonical source"** (e.g. a query whose only
+  good answer is one specific PDF or one official-record URL) → set
+  `expand_top_k: 1` so you don't waste fetches on near-duplicate hits.
+
+If you don't set it, the scope-aware default applies.
 
 ## Scope-aware planning
 
@@ -239,6 +253,8 @@ or by sub-policy is `broad` or `comprehensive`.
 - Always include a top-level `scope_class` field. Size `task_template`
   to match it (narrow 3–8, medium 8–20, broad 20–50, comprehensive
   50+). The orchestrator's `MAX_TASKS_PER_JOB` cap is 10000, and each
-  search expands to roughly 6 follow-up tasks — even 50 searches
-  (~300 tasks) fits comfortably; do not undersize a broad goal out of
-  caution.
+  search expands to a scope-dependent number of follow-up tasks
+  (~3× for narrow, ~5× for medium, ~7× for broad, ~10× for
+  comprehensive, plus one extract per fetch — so multiply by ~2 for
+  total fan-out). Even 50 broad-scope searches (~700 tasks) fits
+  comfortably; do not undersize a broad goal out of caution.

@@ -65,6 +65,18 @@ RETRY_WAITS: tuple[int, ...] = (1, 2, 4, 8, 16, 30, 60)
 RETRY_MAX_ATTEMPTS = 5
 MAX_DRAIN_REPLANS = 10
 
+# Scope-aware default for how many top hits per search become web_fetch
+# follow-ups. Issue #178: a global default of 3 starves broad/comprehensive
+# investigations of fetch surface area. The planner can still override per
+# task via ``payload["expand_top_k"]``.
+_DEFAULT_TOP_K_BY_SCOPE: dict[str, int] = {
+    "narrow": 3,
+    "medium": 5,
+    "broad": 7,
+    "comprehensive": 10,
+}
+_DEFAULT_TOP_K_FALLBACK = 3
+
 Handler = Callable[[Job, dict[str, Any]], Awaitable[dict[str, Any] | None]]
 
 
@@ -530,15 +542,23 @@ def _expand_search_to_fetches(
     ``extract_findings`` follow-up inherits context.
 
     ``payload`` knobs:
-      * ``expand_top_k`` (default 3) — cap follow-ups per search to keep
-        the queue from exploding.
+      * ``expand_top_k`` — cap follow-ups per search to keep the queue
+        from exploding. If the planner sets it explicitly, that wins.
+        Otherwise the default scales with the plan's ``scope_class``
+        (narrow→3, medium→5, broad→7, comprehensive→10), falling back
+        to 3 when no plan / no scope is available.
       * ``sub_question`` — overrides the auto-derived question.
       * ``query`` — used as the sub_question fallback if neither
         ``sub_question`` nor ``job.goal`` are set.
     """
     from research_agent.orchestrator.plan import TaskSpec
 
-    top_k = int(payload.get("expand_top_k", 3))
+    if "expand_top_k" in payload:
+        top_k = int(payload["expand_top_k"])
+    else:
+        plan = _load_latest_plan(job)
+        scope = plan.scope_class if plan is not None else None
+        top_k = _DEFAULT_TOP_K_BY_SCOPE.get(scope or "", _DEFAULT_TOP_K_FALLBACK)
     sub_question = payload.get("sub_question") or payload.get("query") or job.goal
 
     follow_ups: list[TaskSpec] = [
