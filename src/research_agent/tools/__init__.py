@@ -591,25 +591,51 @@ def _smoke_licensing(query: str) -> str:
     the top-5 hits with license number / status / classification / expiration
     / URL, then attempts ``fetch()`` on the top hit and prints a Disciplinary
     History excerpt — the primary due-diligence signal.
+
+    On a zero-result run, the message distinguishes 'CSLB returned 0 hits'
+    from 'parser missed every row' so an operator can tell apart a real
+    no-such-contractor result from selector drift without re-running.
     """
     from research_agent.tools import browser, licensing
 
     async def _run() -> str:
         try:
-            results = await licensing.search(query, state="CA", max_results=5)
+            results, status = await licensing.search(
+                query, state="CA", max_results=5, return_diagnostic=True
+            )
             if not results:
-                return f"licensing search returned no results for {query!r}"
+                if status == "no-hits":
+                    return (
+                        f"CSLB returned 0 hits for {query!r} "
+                        f"(board's results table rendered empty)"
+                    )
+                if status == "submit-failed":
+                    return (
+                        f"CSLB search submit failed for {query!r} — "
+                        f"diagnostic dump under data/diagnostics/cslb/"
+                    )
+                if status == "parser-miss":
+                    return (
+                        f"CSLB result page parser found 0 rows for {query!r}"
+                        f" — selector drift suspected; diagnostic dump under "
+                        f"data/diagnostics/cslb/"
+                    )
+                # page-error / unexpected — surface the status code.
+                return (
+                    f"CSLB licensing search aborted for {query!r} "
+                    f"(status={status}); see data/diagnostics/cslb/"
+                )
             lines: list[str] = []
             for hit in results:
                 number = hit.extras.get("license_number") or "?"
-                status = hit.extras.get("status") or "?"
+                hit_status = hit.extras.get("status") or "?"
                 classification = hit.extras.get("classification") or "?"
                 expiration = hit.extras.get("expiration") or "?"
                 snippet = hit.snippet.replace("\n", " ")
                 if len(snippet) > 200:
                     snippet = snippet[:200] + "…"
                 lines.append(
-                    f"- {hit.title} — {number} — {classification} — {status} —"
+                    f"- {hit.title} — {number} — {classification} — {hit_status} —"
                     f" exp {expiration}\n"
                     f"  {hit.url}\n"
                     f"  {snippet}"
@@ -627,9 +653,18 @@ def _smoke_licensing(query: str) -> str:
                 if len(excerpt) > 400:
                     excerpt = excerpt[:400] + "…"
                 lines.append(f"\nProfile for {top.title}")
-                lines.append(f"  license_number: {source.metadata.get('license_number') or '?'}")
-                lines.append(f"  status: {source.metadata.get('status') or '?'}")
-                lines.append(f"  expiration: {source.metadata.get('expiration') or '?'}")
+                lines.append(
+                    f"  license_number: {source.metadata.get('license_number') or '?'}"
+                )
+                lines.append(
+                    f"  status: {source.metadata.get('status') or '?'}"
+                )
+                lines.append(
+                    f"  classification: {source.metadata.get('classification') or '?'}"
+                )
+                lines.append(
+                    f"  expiration: {source.metadata.get('expiration') or '?'}"
+                )
                 lines.append(f"  disciplinary_history: {excerpt}")
             return "\n".join(lines)
         finally:
