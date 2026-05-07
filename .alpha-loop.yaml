@@ -55,7 +55,12 @@ dev_command: uv run research doctor
 #
 # Playwright browsers cache to ~/Library/Caches/ms-playwright (shared across
 # worktrees), so the first run downloads ~150MB once and subsequent runs no-op.
-setup_command: uv sync 2>/dev/null || true; uv pip install -e . 2>/dev/null || true; uv tool install -e . 2>/dev/null || true; uv run playwright install chromium 2>/dev/null || true
+#
+# `tesseract` is a best-effort `brew install` so the PDF OCR escalation layer
+# (scanned FOIA responses, image-PDF court filings) has a binary to call. The
+# step is silenced/no-ops when brew is missing or the install fails — `doctor`
+# surfaces the gap separately as a `skip`.
+setup_command: uv sync 2>/dev/null || true; uv pip install -e . 2>/dev/null || true; uv tool install -e . 2>/dev/null || true; uv run playwright install chromium 2>/dev/null || true; command -v tesseract >/dev/null || (brew install tesseract 2>/dev/null || true)
 
 # This is a Python repo — skip the default `pnpm install` step.
 skip_install: true
