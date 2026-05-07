@@ -30,7 +30,7 @@ import asyncio
 import logging
 import re
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -78,6 +78,7 @@ _SEARCH_FIELDS = [
     "Awarding Agency",
     "Awarding Sub Agency",
     "Action Date",
+    "Last Modified Date",
     "Period of Performance Start Date",
     "Period of Performance Current End Date",
     "NAICS",
@@ -162,6 +163,19 @@ def _award_permalink(award_id: str) -> str:
     return f"{_SITE_BASE}/award/{award_id}/"
 
 
+def _coerce_code(value: Any) -> str:
+    """Pull a code string from either a bare string or ``{code, description}`` dict.
+
+    USAspending's spending_by_award response shape varies per field — NAICS and
+    PSC sometimes come back as flat strings and sometimes as nested objects.
+    """
+    if isinstance(value, dict):
+        return str(value.get("code") or "").strip()
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def _agency_name(value: Any) -> str:
     """Pull a human name from either a dict-of-strings or a bare string."""
     if isinstance(value, dict):
@@ -198,6 +212,27 @@ async def _post(
         logger.warning("usaspending POST failed for %s: %s", path, exc)
         return None, None
     if response.status_code != 200:
+        if response.status_code in (400, 422):
+            try:
+                err_payload = response.json()
+            except ValueError:
+                err_payload = None
+            if isinstance(err_payload, dict):
+                detail = err_payload.get("errors") or err_payload.get("detail")
+                logger.warning(
+                    "usaspending POST %s returned HTTP %s: %s",
+                    path,
+                    response.status_code,
+                    detail if detail is not None else err_payload,
+                )
+            else:
+                snippet = (response.text or "")[:500]
+                logger.warning(
+                    "usaspending POST %s returned HTTP %s (non-JSON): %s",
+                    path,
+                    response.status_code,
+                    snippet,
+                )
         return response.status_code, None
     try:
         return response.status_code, response.json()
@@ -249,8 +284,8 @@ def _build_search_result(
     awarding_agency = (hit.get("Awarding Agency") or "").strip()
     awarding_sub = (hit.get("Awarding Sub Agency") or "").strip()
     action_date = hit.get("Action Date")
-    naics_code = (hit.get("NAICS") or "").strip()
-    psc_code = (hit.get("psc") or hit.get("PSC") or "").strip()
+    naics_code = _coerce_code(hit.get("NAICS"))
+    psc_code = _coerce_code(hit.get("psc") or hit.get("PSC"))
     description = (hit.get("Description") or "").strip()
     extent_competed = hit.get("extent_competed")
     award_id = (hit.get("Award ID") or "").strip()
@@ -335,16 +370,32 @@ async def search(
         )
         return []
 
-    filters: dict[str, Any] = {"keywords": [query]}
+    # USAspending's spending_by_award endpoint requires both time_period and
+    # award_type_codes in filters; omitting either trips a 422. Default the
+    # window to the last ~5 years and the type bucket to contracts (A/B/C/D)
+    # so a bare keyword search just works.
+    end_date = datetime.now(UTC).date()
+    start_date = end_date - timedelta(days=365 * 5)
+    filters: dict[str, Any] = {
+        "keywords": [query],
+        "time_period": [
+            {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
+        ],
+    }
     if award_type is not None:
         filters["award_type_codes"] = list(_AWARD_TYPE_CODES[award_type])
+    else:
+        filters["award_type_codes"] = list(_AWARD_TYPE_CODES["contracts"])
 
     body: dict[str, Any] = {
         "filters": filters,
         "fields": list(_SEARCH_FIELDS),
         "page": 1,
         "limit": max_results,
-        "sort": "Action Date",
+        # USAspending's spending_by_award only allows sort fields drawn from
+        # its Contract Award mapping. "Action Date" is not in that mapping;
+        # "Last Modified Date" is the closest "most-recent activity" sort.
+        "sort": "Last Modified Date",
         "order": "desc",
     }
 
