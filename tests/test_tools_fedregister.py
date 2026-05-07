@@ -8,11 +8,14 @@ from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from unittest.mock import AsyncMock
+from urllib.parse import unquote_plus, urlsplit
 
 import httpx
 import pytest
 
 from research_agent.tools import fedregister
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -49,7 +52,7 @@ _SEARCH_PAYLOAD = {
                 "https://www.federalregister.gov/documents/2023/11/01/"
                 "2023-28147/safe-secure-and-trustworthy-development-and-use-of-ai"
             ),
-            "document_type": "Presidential Document",
+            "type": "Presidential Document",
             "agencies": [
                 {"name": "Executive Office of the President", "raw_name": "EOP"}
             ],
@@ -64,7 +67,7 @@ _SEARCH_PAYLOAD = {
                 "https://www.federalregister.gov/documents/2024/02/15/"
                 "2024-99999/ai-notice-of-inquiry"
             ),
-            "document_type": "Notice",
+            "type": "Notice",
             "agencies": [
                 {"name": "Department of Commerce", "raw_name": "DOC"}
             ],
@@ -91,7 +94,7 @@ _DOC_PAYLOAD = {
     "html_url": _DOC_URL,
     "pdf_url": "https://www.federalregister.gov/d/2023-28147.pdf",
     "public_inspection_pdf_url": "",
-    "document_type": "Presidential Document",
+    "type": "Presidential Document",
     "agencies": [{"name": "Executive Office of the President", "raw_name": "EOP"}],
     "significant": True,
     "body_html": (
@@ -143,6 +146,36 @@ def _params_to_pairs(params) -> list[tuple[str, object]]:
     return list(params)
 
 
+def _query_pairs_from_url(url: str) -> list[tuple[str, str]]:
+    """Parse a URL's query string keeping bracketed keys literal.
+
+    The connector now builds query strings by hand to keep ``conditions[term]``
+    literal — ``urllib.parse.parse_qsl`` handles that fine, but we want the
+    keys preserved verbatim (no decoding), so do the split manually.
+    """
+    query = urlsplit(url).query
+    if not query:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for piece in query.split("&"):
+        if not piece:
+            continue
+        if "=" not in piece:
+            pairs.append((piece, ""))
+            continue
+        key, value = piece.split("=", 1)
+        pairs.append((key, unquote_plus(value)))
+    return pairs
+
+
+def _captured_query_pairs(captured: dict, idx: int = 0) -> list[tuple[str, object]]:
+    """Return query pairs from either captured ``params=`` kwargs or the URL."""
+    params = captured["params"][idx] if captured["params"] else None
+    if params is not None:
+        return _params_to_pairs(params)
+    return list(_query_pairs_from_url(captured["urls"][idx]))
+
+
 # ---------------------------------------------------------------------------
 # search()
 # ---------------------------------------------------------------------------
@@ -169,9 +202,10 @@ async def test_search_builds_correct_query_and_headers(monkeypatch):
     headers = captured["headers"][0]
     assert headers["Accept"] == "application/json"
     assert headers["User-Agent"]
-    assert captured["urls"][0].endswith("/api/v1/documents.json")
+    request_url = captured["urls"][0]
+    assert request_url.startswith("https://www.federalregister.gov/api/v1/documents.json?")
 
-    pairs = _params_to_pairs(captured["params"][0])
+    pairs = _captured_query_pairs(captured)
     keys = [k for k, _ in pairs]
 
     assert ("conditions[term]", "AI executive order") in pairs
@@ -232,7 +266,7 @@ async def test_search_without_since_or_agencies_omits_those_params(monkeypatch):
 
     await fedregister.search("anything")
 
-    pairs = _params_to_pairs(captured["params"][0])
+    pairs = _captured_query_pairs(captured)
     keys = [k for k, _ in pairs]
     assert "conditions[publication_date][gte]" not in keys
     assert "conditions[agencies][]" not in keys
@@ -248,8 +282,55 @@ async def test_search_since_accepts_iso_string(monkeypatch):
 
     await fedregister.search("anything", since="2024-05-01")
 
-    pairs = _params_to_pairs(captured["params"][0])
+    pairs = _captured_query_pairs(captured)
     assert ("conditions[publication_date][gte]", "2024-05-01") in pairs
+
+
+async def test_search_url_keeps_literal_brackets(monkeypatch):
+    """Federal Register's parser rejects ``%5B`` / ``%5D`` — keys must stay literal."""
+    payload = json.dumps({"results": []})
+
+    def _respond(url, params):
+        return 200, payload
+
+    captured = _patch_httpx(monkeypatch, responder=_respond)
+
+    await fedregister.search(
+        "AI executive order",
+        since="2023-01-01",
+        agencies=["executive-office-of-the-president"],
+    )
+
+    request_url = captured["urls"][0]
+    assert "conditions[term]=" in request_url
+    assert "conditions[publication_date][gte]=" in request_url
+    assert "conditions[agencies][]=" in request_url
+    assert "fields[]=" in request_url
+    assert "%5B" not in request_url
+    assert "%5D" not in request_url
+    # The query value (a phrase with spaces) should still be percent-encoded.
+    assert "AI+executive+order" in request_url or "AI%20executive%20order" in request_url
+
+
+async def test_search_against_recorded_fixture(monkeypatch):
+    """Loading a recorded Federal Register response yields parsed SearchResults."""
+    fixture_path = FIXTURES_DIR / "fedregister_search_ai_eo.json"
+    payload_text = fixture_path.read_text(encoding="utf-8")
+
+    def _respond(url, params):
+        return 200, payload_text
+
+    _patch_httpx(monkeypatch, responder=_respond)
+
+    results = await fedregister.search("AI executive order")
+
+    assert len(results) >= 1
+    first = results[0]
+    assert first.source_kind == "fedregister"
+    assert first.title
+    assert first.url.startswith("https://www.federalregister.gov/documents/")
+    assert first.published_at is not None
+    assert first.extras.get("document_number")
 
 
 async def test_search_returns_empty_on_500(monkeypatch):

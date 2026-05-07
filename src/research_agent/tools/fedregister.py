@@ -26,7 +26,7 @@ import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse
 
 import httpx
 import trafilatura
@@ -55,7 +55,7 @@ _SEARCH_FIELDS = (
     "abstract",
     "publication_date",
     "html_url",
-    "document_type",
+    "type",
     "agencies",
     "significant",
 )
@@ -173,9 +173,12 @@ def _build_search_result(hit: dict[str, Any]) -> SearchResult | None:
     snippet = abstract if abstract else str(title)
     published_at = _parse_iso_date(hit.get("publication_date"))
 
+    # The Federal Register API names the document-type field ``type``
+    # (e.g. "Presidential Document", "Notice"); we surface it under the
+    # ``document_type`` extras key for downstream stability.
     extras: dict[str, Any] = {
         "agencies": _agency_names(hit.get("agencies")),
-        "document_type": hit.get("document_type") or "",
+        "document_type": hit.get("type") or "",
         "document_number": hit.get("document_number") or "",
         "significant": bool(hit.get("significant")),
     }
@@ -234,14 +237,20 @@ async def search(
 
     await _rate_limit_gate()
 
-    url = urljoin(_BASE_URL, "documents.json")
+    base = urljoin(_BASE_URL, "documents.json")
+    # Federal Register's server-side parser rejects percent-encoded
+    # brackets — ``conditions%5Bterm%5D=…`` returns HTTP 400 while
+    # ``conditions[term]=…`` returns 200. Build the query string by hand so
+    # the bracketed keys stay literal; values are still percent-encoded.
+    query_parts = [f"{key}={quote_plus(str(value))}" for key, value in params]
+    full_url = f"{base}?{'&'.join(query_parts)}"
     try:
         async with httpx.AsyncClient(
             follow_redirects=True,
             timeout=timeout,
             headers=_headers(),
         ) as client:
-            response = await client.get(url, params=params)
+            response = await client.get(full_url)
     except (httpx.HTTPError, OSError) as exc:
         logger.warning("fedregister search failed for %r: %s", query, exc)
         return []
@@ -386,7 +395,7 @@ async def fetch(url: str, timeout: float = 30.0) -> Source | None:
         return None
 
     publication_date = payload.get("publication_date") or ""
-    document_type = payload.get("document_type") or ""
+    document_type = payload.get("type") or ""
     agency_names = _agency_names(payload.get("agencies"))
     agencies_line = ", ".join(agency_names) if agency_names else "—"
     metadata_line = (
