@@ -1,7 +1,4 @@
 <!-- managed by alpha-loop -->
-Now I have a clear picture. The AGENTS.md is mostly current, but a few things drifted: the `tools/` connector set has grown substantially (public-records, financial-disclosure, courts, GDELT, scholar, etc.), `prompts/` gained `followup_recipes.md` and `paid_unblock_recipes.md`, and the Tech Stack source list should reflect the broader free public-API surface. Producing the updated file now.
-
-<!-- managed by alpha-loop -->
 # Alpha Research
 
 ## Overview
