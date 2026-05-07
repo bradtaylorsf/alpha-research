@@ -212,11 +212,52 @@ def _persist_raw_plan_yaml(job: Job, version: int, raw: str) -> str:
     return rel
 
 
+_PLAN_KEYS = set(Plan.model_fields.keys())
+_SUBGOAL_KEYS = set(Subgoal.model_fields.keys())
+_TASKSPEC_KEYS = set(TaskSpec.model_fields.keys())
+
+
+def _strip_unknown_keys(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop keys not declared on Plan / Subgoal / TaskSpec from a parsed dict.
+
+    The Pydantic models use ``extra="forbid"`` because that's the right
+    contract for code-internal callers (catches typos at module boundaries).
+    But the planner LLM occasionally adds *helpful* extras — e.g. gemma
+    once emitted a ``describe`` key alongside ``description`` on a subgoal.
+    Strict validation killed the whole plan over a single ignored field.
+
+    This helper prunes unknown keys at the LLM trust boundary so models
+    stay strict for internal use while LLM output stays tolerant.
+    """
+    if not isinstance(data, dict):
+        return data
+    pruned: dict[str, Any] = {k: v for k, v in data.items() if k in _PLAN_KEYS}
+
+    sgs = pruned.get("subgoals")
+    if isinstance(sgs, list):
+        pruned["subgoals"] = [
+            {k: v for k, v in sg.items() if k in _SUBGOAL_KEYS}
+            if isinstance(sg, dict) else sg
+            for sg in sgs
+        ]
+    tasks = pruned.get("task_template")
+    if isinstance(tasks, list):
+        pruned["task_template"] = [
+            {k: v for k, v in t.items() if k in _TASKSPEC_KEYS}
+            if isinstance(t, dict) else t
+            for t in tasks
+        ]
+    return pruned
+
+
 def _parse_plan_yaml(raw: str, *, version: int, raw_path: str) -> Plan:
     """Parse + validate a YAML plan; force ``version`` on the result.
 
     ``raw_path`` is included in error messages so the operator can open
-    the on-disk artifact when validation fails.
+    the on-disk artifact when validation fails. Unknown keys emitted by
+    the LLM are silently dropped via :func:`_strip_unknown_keys` so the
+    parser tolerates planner drift without forfeiting strict validation
+    for code-internal callers.
     """
     yaml_text = _extract_yaml(raw)
     try:
@@ -230,6 +271,7 @@ def _parse_plan_yaml(raw: str, *, version: int, raw_path: str) -> Plan:
             f"planner YAML root must be a mapping ({raw_path}); got {type(data).__name__}"
         )
     data["version"] = version
+    data = _strip_unknown_keys(data)
     try:
         return Plan.model_validate(data)
     except ValidationError as e:
