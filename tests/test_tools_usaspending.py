@@ -202,11 +202,11 @@ async def test_search_default_builds_post_body(monkeypatch):
     assert captured["post_urls"][0].endswith("/api/v2/search/spending_by_award/")
     body = captured["post_bodies"][0]
     assert body["filters"]["keywords"] == ["Booz Allen Hamilton"]
-    # No award_type filter on the default call.
-    assert "award_type_codes" not in body["filters"]
+    # Default award_type_codes => contracts bucket (required by the API).
+    assert body["filters"]["award_type_codes"] == ["A", "B", "C", "D"]
     assert body["limit"] == 10
     assert body["page"] == 1
-    assert body["sort"] == "Action Date"
+    assert body["sort"] == "Last Modified Date"
     assert body["order"] == "desc"
     assert isinstance(body["fields"], list) and "Award Amount" in body["fields"]
 
@@ -226,6 +226,58 @@ async def test_search_default_builds_post_body(monkeypatch):
     assert hit.url.startswith("https://www.usaspending.gov/award/")
     assert hit.url.endswith("/")
     assert hit.published_at is not None
+
+
+async def test_search_post_body_includes_time_period_and_award_type_codes(monkeypatch):
+    """USAspending's spending_by_award requires both filters; verify defaults."""
+    from datetime import date as _date
+
+    payload = json.dumps(_SEARCH_PAYLOAD)
+
+    def _post(url, body):
+        return 200, payload
+
+    captured = _patch_httpx(monkeypatch, post_responder=_post)
+
+    await usaspending.search("Booz Allen Hamilton")
+
+    body = captured["post_bodies"][0]
+    filters = body["filters"]
+
+    # time_period: list of one {start_date, end_date} (ISO YYYY-MM-DD), gap ~5 years.
+    tp = filters["time_period"]
+    assert isinstance(tp, list) and len(tp) == 1
+    window = tp[0]
+    assert "start_date" in window and "end_date" in window
+    start = _date.fromisoformat(window["start_date"])
+    end = _date.fromisoformat(window["end_date"])
+    assert end >= start
+    span_days = (end - start).days
+    # Roughly five years (365*5 = 1825); allow +/- a couple days slack.
+    assert 1820 <= span_days <= 1830
+
+    # Default award_type_codes => contracts bucket when no explicit award_type.
+    assert filters["award_type_codes"] == ["A", "B", "C", "D"]
+
+
+async def test_search_logs_422_error_body(monkeypatch, caplog):
+    """On HTTP 422 the response body's `errors` field must be logged at WARN."""
+    error_body = json.dumps(
+        {"errors": ["Missing required field: filters.time_period"]}
+    )
+
+    def _post(url, body):
+        return 422, error_body
+
+    _patch_httpx(monkeypatch, post_responder=_post)
+
+    with caplog.at_level("WARNING"):
+        results = await usaspending.search("anything")
+
+    assert results == []
+    joined = " ".join(r.message for r in caplog.records)
+    assert "422" in joined
+    assert "Missing required field: filters.time_period" in joined
 
 
 async def test_search_award_type_contracts_sets_codes(monkeypatch):
