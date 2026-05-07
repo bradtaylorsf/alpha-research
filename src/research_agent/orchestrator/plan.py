@@ -116,6 +116,94 @@ class Plan(BaseModel):
 
 MAX_PLAN_VERSIONS = 200
 
+MAX_RECENT_RESULTS_FOR_REPLAN = 25
+"""Cap on entries from ``recent_results`` that ``tactical_replan`` ships to the
+local-tier planner. Each entry is also compressed to a small summary dict so a
+long-running goal can't push the prompt past the model's context window —
+issue #176 saw a 524k-token payload at task 96."""
+
+_SUMMARY_REPR_MAX_CHARS = 500
+
+
+def _summarize_recent_result(r: dict[str, Any]) -> dict[str, Any]:
+    """Compress one ``recent_results`` entry into a planner-sized dict.
+
+    The full ``result_json`` per task carries every URL of every search hit,
+    every fetched source's body shape, every emitted claim. Stacking 25 of
+    those at full fidelity already overflows local-tier context windows on
+    long runs; the planner only needs to know *what kind of work ran, what
+    came back at what scale, and the top hits* to decide what to do next.
+    """
+    result = r.get("result")
+    summary: Any
+    status = "ok" if result is not None else "no_result"
+
+    if isinstance(result, dict):
+        hits = result.get("results")
+        if not isinstance(hits, list):
+            hits = result.get("hits") if isinstance(result.get("hits"), list) else None
+        if isinstance(hits, list):
+            top: list[dict[str, Any]] = []
+            for h in hits[:3]:
+                if isinstance(h, dict):
+                    top.append(
+                        {
+                            k: h[k]
+                            for k in ("url", "title")
+                            if k in h and isinstance(h[k], str)
+                        }
+                    )
+            summary = {"count": len(hits), "top": top}
+            if "follow_up_tasks" in result:
+                fu = result.get("follow_up_tasks")
+                summary["follow_up_tasks"] = len(fu) if isinstance(fu, list) else 0
+        elif "source" in result and isinstance(result["source"], dict):
+            src = result["source"]
+            summary = {
+                k: src[k]
+                for k in ("url", "title", "source_kind")
+                if k in src and isinstance(src[k], str)
+            }
+            text = src.get("cleaned_text") or src.get("raw_content") or ""
+            if isinstance(text, str):
+                summary["content_chars"] = len(text)
+            if "source_id" in result:
+                summary["source_id"] = result["source_id"]
+        elif "findings_written" in result or "finding_ids" in result:
+            ids = result.get("finding_ids") or []
+            summary = {
+                "findings_written": result.get(
+                    "findings_written",
+                    len(ids) if isinstance(ids, list) else 0,
+                ),
+                "source_id": result.get("source_id"),
+            }
+        elif "summary" in result and isinstance(result["summary"], str):
+            text = result["summary"]
+            summary = {
+                "summary_chars": len(text),
+                "source_id": result.get("source_id"),
+            }
+        else:
+            text = repr(result)
+            if len(text) > _SUMMARY_REPR_MAX_CHARS:
+                text = text[:_SUMMARY_REPR_MAX_CHARS] + "…"
+            summary = text
+    elif result is None:
+        summary = None
+    else:
+        text = repr(result)
+        if len(text) > _SUMMARY_REPR_MAX_CHARS:
+            text = text[:_SUMMARY_REPR_MAX_CHARS] + "…"
+        summary = text
+
+    return {
+        "task_id": r.get("task_id"),
+        "kind": r.get("kind"),
+        "status": status,
+        "summary": summary,
+    }
+
 
 class PlanVersionCapExceeded(RuntimeError):
     """Raised when a job has hit the §6.3 hard cap of plan versions.
@@ -341,15 +429,38 @@ async def tactical_replan(
     """
     _assert_under_cap(job)
     next_version = plan.version + 1
+
+    # issue #176: bound the payload regardless of caller. recent_results is
+    # truncated to the last MAX_RECENT_RESULTS_FOR_REPLAN entries and each is
+    # replaced by a compact summary; older results are already reflected in
+    # the running plan + findings so dropping them is safe.
+    original_len = len(recent_results)
+    tail = recent_results[-MAX_RECENT_RESULTS_FOR_REPLAN:]
+    summarized = [_summarize_recent_result(r) for r in tail]
+
     payload: dict[str, Any] = {
         "prior_plan": plan.model_dump(),
-        "recent_results": recent_results,
+        "recent_results": summarized,
     }
     if findings is not None:
         payload["findings"] = findings
     if synthesis_md is not None:
         payload["synthesis_md"] = synthesis_md
     context = json.dumps(payload, sort_keys=True, default=str)
+
+    if original_len > 0:
+        emit(
+            job,
+            "WARN" if original_len > MAX_RECENT_RESULTS_FOR_REPLAN else "INFO",
+            "planner",
+            "replan_truncated",
+            {
+                "before": original_len,
+                "after": len(summarized),
+                "compressed": True,
+                "max": MAX_RECENT_RESULTS_FOR_REPLAN,
+            },
+        )
     raw = await _run_planner_for_yaml(
         job, tier="general", router=router, user_message=context
     )
@@ -513,6 +624,7 @@ async def cloud_replan(
 
 __all__ = [
     "MAX_PLAN_VERSIONS",
+    "MAX_RECENT_RESULTS_FOR_REPLAN",
     "Plan",
     "PlanParseError",
     "PlanVersionCapExceeded",
