@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 _DIAGNOSTICS_DIR = Path("data/diagnostics/bbb")
 _PER_HOST_RPS = 0.5
 _HOST = "www.bbb.org"
+# Accept both ``www.bbb.org`` and the bare ``bbb.org`` host so URLs that
+# arrive from search results without the ``www.`` prefix still navigate;
+# bbb.org 301s to www.bbb.org so Playwright will follow the redirect.
+_ACCEPTED_HOSTS = frozenset({_HOST, "bbb.org"})
 _SEARCH_URL = "https://www.bbb.org/search"
 
 # Short per-call timeout for selector reads. Playwright's default 30s
@@ -327,7 +331,7 @@ async def fetch(url: str) -> Source | None:
         return None
     parsed = urlparse(url)
     host = (parsed.netloc or "").lower().split(":", 1)[0]
-    if host != _HOST:
+    if host not in _ACCEPTED_HOSTS:
         return None
 
     try:

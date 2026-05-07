@@ -598,6 +598,65 @@ async def test_fetch_dispatches_to_connector_by_host(monkeypatch, url, module_na
     assert result is None  # connector returned None; dispatch must not fall back
 
 
+@pytest.mark.parametrize(
+    ("url", "module_name"),
+    [
+        # Bare-domain forms — search engines occasionally return URLs without
+        # the canonical ``www.`` prefix. Before the connector host-gates were
+        # widened to accept bare hosts, dispatch routed these to the connector
+        # which silently returned None, dropping the page entirely (regression
+        # vs. the pre-dispatch generic httpx fallback).
+        ("https://congress.gov/bill/118th-congress/h-r/1", "congress"),
+        ("https://fec.gov/data/candidate/P00000001/", "fec"),
+        ("https://bbb.org/us/ca/santa-clara/profile/general-contractor/sbi", "bbb"),
+        ("https://www.lda.gov/filings/public/filing/abcd/", "lda"),
+    ],
+)
+async def test_fetch_dispatches_to_connector_for_bare_domain(
+    monkeypatch, url, module_name
+):
+    """Bare-domain URLs must reach the connector, not be silently dropped.
+
+    The four connectors with stricter internal host-gates than the dispatch
+    table (issue #174 follow-up): congress, fec, bbb, lda. If the connector
+    rejects the bare host, web_fetch returns None and the page is lost — a
+    regression vs. the pre-dispatch generic httpx fallback. Each connector
+    now accepts both ``www.<domain>`` and the bare form.
+    """
+    _disable_robots(monkeypatch)
+    _stub_archive(monkeypatch)
+
+    async def _no_httpx(*args, **kwargs):
+        raise AssertionError(
+            f"web_fetch fell through to httpx for {url}; expected dispatch to {module_name}"
+        )
+
+    async def _no_browser(*args, **kwargs):
+        raise AssertionError(
+            f"web_fetch fell through to playwright for {url}; expected dispatch to {module_name}"
+        )
+
+    monkeypatch.setattr(web_fetch, "_fetch_via_httpx", _no_httpx)
+    monkeypatch.setattr(web_fetch, "_fetch_via_playwright", _no_browser)
+
+    captured: list[str] = []
+
+    async def _fake_connector_fetch(target_url, *args, **kwargs):
+        captured.append(target_url)
+        return None
+
+    import importlib
+
+    module = importlib.import_module(f"research_agent.tools.{module_name}")
+    monkeypatch.setattr(module, "fetch", _fake_connector_fetch)
+
+    result = await web_fetch.fetch(url)
+    assert captured == [url], (
+        f"expected {module_name}.fetch to receive {url}, got {captured}"
+    )
+    assert result is None
+
+
 async def test_fetch_falls_through_to_generic_for_propublica_non_nonprofits(
     monkeypatch,
 ):
