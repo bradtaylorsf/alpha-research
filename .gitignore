@@ -102,7 +102,9 @@ tmp/
 .tmp/
 
 # --- alpha-loop ---
-.alpha-loop/
+# Ignore everything under .alpha-loop/ except committed templates (skills + agent prompts).
+.alpha-loop/*
+!.alpha-loop/templates/
 
 # --- Playwright ---
 .playwright/
