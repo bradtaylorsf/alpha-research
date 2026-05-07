@@ -787,6 +787,13 @@ async def run_daemon(
                 except Exception:
                     pass
 
+            # Re-load the plan after final_synthesis: that pass can fire a
+            # synthesizer that calls update_subgoal_done, writing a new plan
+            # version with done=True flags. Using the stale plan from before
+            # final_synthesis would miss those closures and mis-classify a
+            # clean finish as user_stopped (issue #160).
+            plan = _loop._load_latest_plan(job)
+
             if _loop._should_stop(job):
                 final_status = "stopped"
                 completion_reason = "user_stopped"
