@@ -515,3 +515,121 @@ def test_browser_module_imported_lazily(monkeypatch):
     """
     assert hasattr(web_fetch, "browser")
     assert web_fetch.browser is browser
+
+
+# ---------------------------------------------------------------------------
+# Connector host-dispatch (issue #174)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "module_name"),
+    [
+        ("https://www.congress.gov/bill/118th-congress/h-r/1", "congress"),
+        ("https://www.fec.gov/data/candidate/P00000001/", "fec"),
+        ("https://www.sec.gov/Archives/edgar/data/123/000012345.htm", "edgar"),
+        ("https://www.federalregister.gov/documents/2024/01/01/x", "fedregister"),
+        ("https://www.courtlistener.com/opinion/12345/foo/", "courtlistener"),
+        ("https://lda.senate.gov/filings/public/filing/abcd/", "lda"),
+        ("https://www.usaspending.gov/award/CONT_AWD_X/", "usaspending"),
+        ("https://littlesis.org/entity/123-Peter-Thiel", "littlesis"),
+        (
+            "https://projects.propublica.org/nonprofits/organizations/123456789",
+            "nonprofits",
+        ),
+        (
+            "https://sanctionssearch.ofac.treas.gov/Details.aspx?id=42",
+            "sanctions",
+        ),
+        ("https://powersearch.sos.ca.gov/results.aspx?id=42", "calaccess"),
+        (
+            "https://www.cslb.ca.gov/OnlineServices/CheckLicenseII/LicenseDetail.aspx?LicNum=42",
+            "licensing",
+        ),
+        (
+            "https://bizfileonline.sos.ca.gov/search/business/2741233",
+            "sos",
+        ),
+        ("https://www.bbb.org/us/ca/santa-clara/profile/general-contractor/sbi", "bbb"),
+    ],
+)
+async def test_fetch_dispatches_to_connector_by_host(monkeypatch, url, module_name):
+    """A `site:`-scoped query that lands on a connector domain must reach
+    that connector — not be eaten by the generic httpx + trafilatura path.
+
+    Issue #174: planner-emitted ``site:congress.gov`` etc. only routes to
+    the right connector if the host-dispatch table covers it.
+    """
+    _disable_robots(monkeypatch)
+    _stub_archive(monkeypatch)
+
+    # Make the generic paths blow up — if dispatch is missing, the test fails.
+    async def _no_httpx(*args, **kwargs):
+        raise AssertionError(
+            f"web_fetch fell through to httpx for {url}; expected dispatch to {module_name}"
+        )
+
+    async def _no_browser(*args, **kwargs):
+        raise AssertionError(
+            f"web_fetch fell through to playwright for {url}; expected dispatch to {module_name}"
+        )
+
+    monkeypatch.setattr(web_fetch, "_fetch_via_httpx", _no_httpx)
+    monkeypatch.setattr(web_fetch, "_fetch_via_playwright", _no_browser)
+
+    captured: list[str] = []
+
+    async def _fake_connector_fetch(target_url, *args, **kwargs):
+        captured.append(target_url)
+        return None  # contract: connector decides; None is a valid answer
+
+    # Patch the connector module's fetch so we don't actually hit the network.
+    # The dispatch imports lazily (`from research_agent.tools import <name>`),
+    # so we patch at the package level.
+    import importlib
+
+    module = importlib.import_module(f"research_agent.tools.{module_name}")
+    monkeypatch.setattr(module, "fetch", _fake_connector_fetch)
+
+    result = await web_fetch.fetch(url)
+    assert captured == [url], (
+        f"expected {module_name}.fetch to receive {url}, got {captured}"
+    )
+    assert result is None  # connector returned None; dispatch must not fall back
+
+
+async def test_fetch_falls_through_to_generic_for_propublica_non_nonprofits(
+    monkeypatch,
+):
+    """`projects.propublica.org` hosts multiple ProPublica projects.
+
+    Only the ``/nonprofits/`` path is owned by the nonprofits connector —
+    ``/electionland/``, ``/dollars-for-docs/``, etc. should fall through to
+    the generic httpx path so we don't break those URLs.
+    """
+    _disable_robots(monkeypatch)
+    _stub_archive(monkeypatch)
+
+    from research_agent.tools import nonprofits
+
+    async def _should_not_dispatch(*args, **kwargs):
+        raise AssertionError(
+            "nonprofits.fetch was called for a non-/nonprofits/ ProPublica URL"
+        )
+
+    monkeypatch.setattr(nonprofits, "fetch", _should_not_dispatch)
+
+    httpx_calls: list[str] = []
+
+    async def _fake_httpx(url, timeout, user_agent):
+        httpx_calls.append(url)
+        return 200, ARTICLE_HTML, ARTICLE_HTML.encode("utf-8"), "text/html"
+
+    monkeypatch.setattr(web_fetch, "_fetch_via_httpx", _fake_httpx)
+
+    source = await web_fetch.fetch(
+        "https://projects.propublica.org/electionland/"
+    )
+    assert httpx_calls == ["https://projects.propublica.org/electionland/"]
+    assert source is not None
+    assert source.metadata["fetched_via"] == "httpx"
