@@ -1,0 +1,31 @@
+{
+  "count": 2,
+  "description": "Documents matching 'AI executive order'",
+  "total_pages": 1,
+  "results": [
+    {
+      "document_number": "2023-24283",
+      "title": "Safe, Secure, and Trustworthy Development and Use of Artificial Intelligence",
+      "abstract": "Executive Order 14110 directs federal agencies to manage the risks of AI while seizing its benefits, including new safety and security standards, equity and civil rights protections, and consumer/worker safeguards.",
+      "publication_date": "2023-11-01",
+      "html_url": "https://www.federalregister.gov/documents/2023/11/01/2023-24283/safe-secure-and-trustworthy-development-and-use-of-artificial-intelligence",
+      "type": "Presidential Document",
+      "agencies": [
+        {"name": "Executive Office of the President", "raw_name": "Executive Office of the President"}
+      ],
+      "significant": true
+    },
+    {
+      "document_number": "2025-01122",
+      "title": "Removing Barriers to American Leadership in Artificial Intelligence",
+      "abstract": "Revokes prior AI policy directives and instructs agencies to develop an action plan to sustain U.S. AI leadership.",
+      "publication_date": "2025-01-23",
+      "html_url": "https://www.federalregister.gov/documents/2025/01/23/2025-01122/removing-barriers-to-american-leadership-in-artificial-intelligence",
+      "type": "Presidential Document",
+      "agencies": [
+        {"name": "Executive Office of the President", "raw_name": "Executive Office of the President"}
+      ],
+      "significant": true
+    }
+  ]
+}

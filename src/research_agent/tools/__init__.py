@@ -195,7 +195,10 @@ def _smoke_fedregister(query: str) -> str:
     async def _run() -> str:
         results = await fedregister.search(query, max_results=5)
         if not results:
-            return f"fedregister search returned no results for {query!r}"
+            return (
+                f"fedregister search returned 0 results for {query!r}"
+                " (valid query, no matching documents)"
+            )
         lines: list[str] = []
         for hit in results:
             agencies = ", ".join(hit.extras.get("agencies") or []) or "?"
