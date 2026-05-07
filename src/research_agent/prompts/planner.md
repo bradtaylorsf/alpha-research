@@ -34,8 +34,10 @@ the schema below.
 - `task_template`: ordered list of tasks the loop will run. Each task:
   - `kind`: one of these EXACT strings (no others allowed):
     `web_search`, `news_search`, `reddit_search`, `arxiv_search`,
-    `local_corpus_query`.
-    Do **not** emit any other kind. `web_fetch`, `extract_findings`,
+    `local_corpus_query`. **One narrow exception: `web_fetch` is allowed
+    only as the cornerstone-document fetch — see the "Cornerstone-document
+    pattern" section below.**
+    Do **not** emit any other kind. `extract_findings`,
     `summarize_source`, `synthesize`, and `critique` are valid in the
     schema but MUST NOT appear in your plan — the loop creates them
     automatically.
@@ -46,6 +48,11 @@ the schema below.
   - `depends_on`: list of zero-based indices into `task_template` that must
     finish first. Empty list `[]` for tasks with no dependencies.
 - `expected_iterations`: integer estimate (e.g. `1`, `2`).
+- `cornerstone_url` (optional): the canonical URL of the primary document
+  the investigation is anchored on, when the goal names one. Set this
+  whenever you also emit a cornerstone `web_fetch` task — see the
+  **Cornerstone-document pattern** section below. Omit for normal
+  search-driven plans.
 
 ### Task pipeline guidance — important
 
@@ -154,6 +161,105 @@ domain.
   bio).
 - `local_corpus_query` is for searching the operator's own pre-indexed
   documents. Only emit it when the goal mentions a corpus.
+
+### Cornerstone-document pattern — when the goal names a specific document
+
+Some goals are anchored to **a specific document, report, filing, or
+opinion** — e.g. *"Project 2025 implementation tracker"* (the 920-page
+*Mandate for Leadership* PDF), *"track Apple's 2024 cybersecurity
+disclosures"* (a specific 10-K), *"Sotomayor's dissent in <Case>"* (a
+specific court opinion), *"summarize Senate Bill 1047"* (a named bill),
+*"map every recommendation in the Mueller Report"* (a named report).
+
+Common cornerstone sources include: SEC 10-K / 10-Q / 8-K filings,
+court opinions and dockets, congressional bills, FOIA-released document
+dumps, leaked archive sets, and any **named** policy report or playbook.
+
+When you recognize this shape, do all three:
+
+1. **Emit a `web_fetch` task as task index 0** (`priority: 1`,
+   `depends_on: []`) whose payload is
+   `{ url: "<canonical URL>", sub_question: "<what to extract>" }`. This
+   is the **only** circumstance under which the planner emits
+   `web_fetch` — every other plan delegates fetch creation to the loop.
+   The cornerstone fetch bypasses the search-expansion pipeline, so
+   `expand_top_k` does not apply to it.
+2. **Set top-level `cornerstone_url`** to the same URL. The orchestrator
+   uses it to (a) route the cornerstone source's `extract_findings`
+   through a structured-index prompt that emits one finding per
+   proposal/section/heading rather than 2–6 high-level claims, and
+   (b) lift the per-source findings cap so a long document doesn't get
+   truncated to a chapter's worth of output.
+3. **Drive the rest of the plan outward from the document.** Emit a
+   broad set of follow-on `web_search` tasks (and `site:`-scoped
+   queries) that map the document's sections — agencies, departments,
+   chapters, named proposals — onto the wider public record. The
+   loop's `tactical_replan` will then convert high-confidence cornerstone
+   findings into per-proposal sub-questions on the next replan.
+
+If the goal does **not** name a specific document, do not invent a
+cornerstone — leave `cornerstone_url` unset and emit only search tasks.
+
+#### Worked cornerstone example
+
+Goal: *"Project 2025 implementation tracker — what's actually being
+implemented?"* The cornerstone is Heritage's published PDF; the rest of
+the plan fans out by department.
+
+```yaml
+version: 1
+objective: "Index every proposal in Project 2025's Mandate for Leadership and track implementation status."
+scope_class: broad
+cornerstone_url: "https://static.heritage.org/project2025/2025_MandateForLeadership_FULL.pdf"
+subgoals:
+  - id: 1
+    description: "Index every concrete proposal in the Mandate by department/section."
+    done: false
+  - id: 2
+    description: "Track which Mandate proposals have surfaced in actual federal action since January 2025."
+    done: false
+  - id: 3
+    description: "Identify cross-cutting themes (Schedule F, agency restructures) and capture primary-source coverage."
+    done: false
+expected_iterations: 3
+task_template:
+  - kind: web_fetch
+    payload:
+      url: "https://static.heritage.org/project2025/2025_MandateForLeadership_FULL.pdf"
+      sub_question: "What concrete proposals does the Mandate make, organized by department/section?"
+    priority: 1
+    depends_on: []
+  - kind: web_search
+    payload:
+      query: "Project 2025 DOJ implementation"
+      sub_question: "What DOJ-related Project 2025 proposals are being implemented?"
+    priority: 0
+    depends_on: []
+  - kind: web_search
+    payload:
+      query: "Project 2025 State Department implementation"
+      sub_question: "What State Department Project 2025 proposals are surfacing in policy?"
+    priority: 0
+    depends_on: []
+  - kind: web_search
+    payload:
+      query: "site:federalregister.gov \"Schedule F\""
+      sub_question: "Federal Register actions matching the Mandate's Schedule F proposal."
+    priority: 0
+    depends_on: []
+  - kind: web_search
+    payload:
+      query: "site:congress.gov \"Project 2025\""
+      sub_question: "Bills, hearings, or member statements referencing Project 2025."
+    priority: 0
+    depends_on: []
+```
+
+The loop will fetch the PDF, route the resulting `extract_findings`
+through `researcher_cornerstone.md` (uncapped, structured-index), and
+let the search tasks fan out in parallel. On `tactical_replan`, the
+planner can convert each high-confidence cornerstone finding into a
+`sub_question` for a per-proposal follow-up search.
 
 ## Concrete example
 
@@ -290,7 +396,10 @@ or by sub-policy is `broad` or `comprehensive`.
 
 - Output ONLY the fenced YAML block. No prose, no preamble, no postscript.
 - Every `kind` MUST be one of: `web_search`, `news_search`, `reddit_search`,
-  `arxiv_search`, `local_corpus_query`. NO others.
+  `arxiv_search`, `local_corpus_query`. The single exception is
+  `web_fetch`, allowed only as the cornerstone-document fetch when
+  `cornerstone_url` is also set — see the **Cornerstone-document
+  pattern** section.
 - Every payload MUST include a `sub_question` describing what the
   downstream extract should look for.
 - Always include a top-level `scope_class` field. Size `task_template`

@@ -107,6 +107,13 @@ class Plan(BaseModel):
     task_template: list[TaskSpec]
     expected_iterations: int = Field(ge=1)
     scope_class: ScopeClass | None = None
+    cornerstone_url: str | None = None
+    """When the goal names a specific document (PDF, court opinion, SEC
+    filing, named report), the planner declares it here and emits a
+    ``web_fetch`` for it as task 0. Extraction against this URL switches to
+    the structured-index ``researcher_cornerstone`` prompt and bypasses the
+    per-source findings cap so a 920-page policy document yields one finding
+    per proposal — not the article-sized 2–6."""
 
     def is_complete(self) -> bool:
         if not self.subgoals:
