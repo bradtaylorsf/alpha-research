@@ -17,6 +17,7 @@ from research_agent.llm.router import Router, load_models_config
 from research_agent.orchestrator import plan as plan_module
 from research_agent.orchestrator.plan import (
     MAX_PLAN_VERSIONS,
+    MAX_RECENT_RESULTS_FOR_REPLAN,
     Plan,
     PlanVersionCapExceeded,
     ScopeClass,
@@ -450,11 +451,15 @@ def test_tactical_replan_increments_version_and_uses_general_tier(
 
     # Spy captured the tier on the second call.
     assert [c[0] for c in calls] == ["frontier", "general"]
-    # And the tactical run input embedded the prior plan + recent results.
+    # And the tactical run input embedded the prior plan + summarized
+    # recent results (issue #176: full result_json no longer ships through).
     args = calls[1][2]
     assert args, "tactical_replan should pass run-input to router.call"
     payload = json.loads(args[0])
-    assert payload["recent_results"] == recent_results
+    sent = payload["recent_results"]
+    assert len(sent) == 1
+    assert sent[0]["task_id"] == 7
+    assert sent[0]["kind"] == "web_search"
     assert payload["prior_plan"]["version"] == 1
 
 
@@ -570,6 +575,152 @@ def test_plan_created_event_payload_includes_scope_class_when_unset(
     payload = json.loads(row["payload_json"])
     assert "scope_class" in payload
     assert payload["scope_class"] is None
+
+
+# ---------------------------------------------------------------------------
+# tactical_replan payload bounding — issue #176
+# ---------------------------------------------------------------------------
+
+
+def _make_recent_results(n: int) -> list[dict[str, Any]]:
+    """Build ``n`` synthetic completed-task entries shaped like loop output."""
+    return [
+        {
+            "task_id": i,
+            "kind": "web_search",
+            "payload": {"q": f"query-{i}"},
+            "result": {
+                "results": [
+                    {"url": f"https://example.com/{i}/{j}", "title": f"hit-{i}-{j}"}
+                    for j in range(5)
+                ]
+            },
+        }
+        for i in range(1, n + 1)
+    ]
+
+
+def test_tactical_replan_truncates_recent_results_to_max(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    router, calls = router_with_spy
+    _StubAgent.next_plan = _sample_plan()
+    v1 = asyncio.run(initial_plan(job, router=router))
+
+    _StubAgent.next_plan = _sample_plan(version=2)
+    recent_results = _make_recent_results(100)
+    asyncio.run(tactical_replan(job, v1, recent_results, router=router))
+
+    args = calls[1][2]
+    payload = json.loads(args[0])
+    sent = payload["recent_results"]
+    assert len(sent) == MAX_RECENT_RESULTS_FOR_REPLAN == 25
+    # The tail — last 25 entries — must be what we sent (verified by task_id).
+    assert [r["task_id"] for r in sent] == list(range(76, 101))
+
+
+def test_tactical_replan_emits_replan_truncated_event(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    router, _calls = router_with_spy
+    _StubAgent.next_plan = _sample_plan()
+    v1 = asyncio.run(initial_plan(job, router=router))
+
+    _StubAgent.next_plan = _sample_plan(version=2)
+    recent_results = _make_recent_results(100)
+    asyncio.run(tactical_replan(job, v1, recent_results, router=router))
+
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT level, payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'replan_truncated'"
+            " ORDER BY id ASC",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0]["level"] == "WARN"
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["before"] == 100
+    assert payload["after"] == 25
+    assert payload["compressed"] is True
+
+
+def test_tactical_replan_compresses_result_payloads(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    """A heavy ``result`` (1000 search hits) must collapse into a small summary."""
+    router, calls = router_with_spy
+    _StubAgent.next_plan = _sample_plan()
+    v1 = asyncio.run(initial_plan(job, router=router))
+
+    heavy_hits = [
+        {"url": f"https://example.com/r/{j}", "title": f"hit-{j}"}
+        for j in range(1000)
+    ]
+    recent_results = [
+        {
+            "task_id": 42,
+            "kind": "web_search",
+            "payload": {"q": "huge"},
+            "result": {"results": heavy_hits, "follow_up_tasks": []},
+        }
+    ]
+
+    _StubAgent.next_plan = _sample_plan(version=2)
+    asyncio.run(tactical_replan(job, v1, recent_results, router=router))
+
+    args = calls[1][2]
+    payload = json.loads(args[0])
+    sent = payload["recent_results"]
+    assert len(sent) == 1
+    entry = sent[0]
+    # No raw `result` key — must be replaced by `summary`.
+    assert "result" not in entry
+    assert "summary" in entry
+    assert entry["task_id"] == 42
+    assert entry["kind"] == "web_search"
+    assert entry["status"] == "ok"
+    assert entry["summary"]["count"] == 1000
+    # Top hits cap at 3 to keep the prompt small.
+    assert len(entry["summary"]["top"]) == 3
+    # Serialized payload should be tiny relative to the raw 1000-hit shape.
+    raw_bytes = len(json.dumps(recent_results[0]))
+    sent_bytes = len(json.dumps(entry))
+    assert sent_bytes < raw_bytes / 10
+
+
+def test_tactical_replan_does_not_emit_truncated_when_recent_empty(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    """Empty recent_results: skip the event so the log isn't noisy on cold starts."""
+    router, _calls = router_with_spy
+    _StubAgent.next_plan = _sample_plan()
+    v1 = asyncio.run(initial_plan(job, router=router))
+
+    _StubAgent.next_plan = _sample_plan(version=2)
+    asyncio.run(tactical_replan(job, v1, [], router=router))
+
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM events"
+            " WHERE job_id = ? AND kind = 'replan_truncated'",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["c"] == 0
 
 
 def test_persisted_plan_round_trips_via_db(
