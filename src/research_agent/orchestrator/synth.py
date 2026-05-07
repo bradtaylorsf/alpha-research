@@ -253,6 +253,7 @@ def _build_context(
 ) -> str:
     payload: dict[str, Any] = {
         "goal": goal,
+        "scope_class": str(plan.scope_class) if plan.scope_class else None,
         "subgoals": [
             {"id": sg.id, "description": sg.description, "done": sg.done}
             for sg in plan.subgoals
