@@ -468,13 +468,19 @@ def _smoke_littlesis(query: str) -> str:
 def _smoke_opencorporates(query: str) -> str:
     """Smoke wrapper: OpenCorporates company search returning the top-5 hits.
 
-    Per AC: ``research _smoke-tool opencorporates "SBI Builders"`` should
-    surface the California LLC entry alongside its registered agent. Each
-    line shows the company number, name, jurisdiction, status, agent name,
-    and permalink so an operator can eyeball whether the public API is
-    reachable on the anonymous tier.
+    OpenCorporates removed anonymous v0.4 access (returns HTTP 401), so the
+    smoke verb skips cleanly when ``OPENCORPORATES_API_KEY`` is unset. With
+    a key, ``research _smoke-tool opencorporates "SBI Builders"`` should
+    surface the California LLC entry alongside its registered agent.
     """
+    from research_agent import config
     from research_agent.tools import opencorporates
+
+    if not (config.get("OPENCORPORATES_API_KEY") or "").strip():
+        return (
+            "opencorporates: would need OPENCORPORATES_API_KEY;"
+            " live test skipped"
+        )
 
     async def _run() -> str:
         results = await opencorporates.search(query, max_results=5)
