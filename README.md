@@ -27,7 +27,15 @@ this repo:
 
 ## Install
 
-Requires Python 3.12+.
+### Prerequisites
+
+- Python 3.12+
+- Playwright browsers (installed via `playwright install chromium` below)
+- `tesseract` (optional but recommended) — enables the PDF OCR escalation
+  layer for scanned FOIA responses and image-PDF court filings. Without
+  it, those documents silently return degraded text.
+  - macOS: `brew install tesseract`
+  - Debian/Ubuntu: `apt install tesseract-ocr`
 
 ```bash
 # editable install with dev extras

@@ -123,6 +123,12 @@ Not connectors yet, but worth knowing about for specific investigations:
    skipped" and exits 0. The post-epic verification surfaces all the
    skipped ones in one place.
 
+Note: not everything the agent depends on is an API key. `tesseract` is
+a system prerequisite (not an env var) required for the PDF OCR
+escalation layer — install it via `brew install tesseract` (macOS) or
+`apt install tesseract-ocr` (Debian/Ubuntu). `research doctor` surfaces
+its absence as a `skip` with an install hint.
+
 ## Privacy note
 
 Keys live in `.env` and `.env.local`, both of which are gitignored. If

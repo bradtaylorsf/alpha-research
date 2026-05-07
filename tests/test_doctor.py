@@ -214,6 +214,49 @@ def test_render_table_does_not_print_raw_secret(capsys, monkeypatch, tmp_path):
     assert "abcdef" not in captured.out
 
 
+def test_check_tesseract_ok_when_binary_returns_version(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda _: "/opt/homebrew/bin/tesseract")
+
+    class _Completed:
+        returncode = 0
+        stdout = b"tesseract 5.3.4\n leptonica-1.84.1\n"
+        stderr = b""
+
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **kw: _Completed())
+    result = doctor.check_tesseract()
+    assert result.status == "ok"
+    assert result.required is False
+    assert "tesseract 5.3.4" in result.detail
+
+
+def test_check_tesseract_skip_when_binary_missing(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda _: None)
+    result = doctor.check_tesseract()
+    assert result.status == "skip"
+    assert result.required is False
+    assert "brew install tesseract" in result.detail
+
+
+def test_check_tesseract_skip_when_subprocess_raises(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda _: "/opt/homebrew/bin/tesseract")
+
+    def _raise(*_a, **_kw):
+        raise FileNotFoundError("vanished between which and run")
+
+    monkeypatch.setattr(doctor.subprocess, "run", _raise)
+    result = doctor.check_tesseract()
+    assert result.status == "skip"
+    assert result.required is False
+    assert "brew install tesseract" in result.detail
+
+
+def test_run_all_checks_includes_tesseract(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.yaml").write_text("tiers: {}\n", encoding="utf-8")
+    results = doctor.run_all_checks([], repo_root=tmp_path)
+    assert any(r.name == "tesseract" for r in results)
+
+
 def test_check_result_dataclass_shape():
     from dataclasses import FrozenInstanceError
 

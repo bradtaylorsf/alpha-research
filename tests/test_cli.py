@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -208,8 +208,8 @@ def test_start_skip_intake_creates_job(isolated_jobs_repo: Path, monkeypatch):
     assert "(daemon pid 12345)" in result.stdout
     assert "Tail logs with: research logs " in result.stdout
 
-    # Folder + sidecars exist.
-    today = time.strftime("%Y-%m-%d")
+    # Folder + sidecars exist. Use UTC to match Job.create's date source.
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     job_id = f"{today}-investigate-widgets"
     job_root = isolated_jobs_repo / "jobs" / job_id
     assert (job_root / "job.json").exists()
@@ -264,7 +264,7 @@ def test_start_runs_intake_when_not_skipped(isolated_jobs_repo: Path, monkeypatc
     assert "Started job" in result.stdout
     assert "(daemon pid 99999)" in result.stdout
 
-    today = time.strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     job_id = f"{today}-investigate-widgets"
     conn = db.connect(isolated_jobs_repo / "data" / "index.sqlite")
     try:
