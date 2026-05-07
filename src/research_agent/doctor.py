@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
@@ -221,6 +223,37 @@ def check_models_yaml(path: Path) -> CheckResult:
     return CheckResult(name, "ok", required=True, detail=f"parses ({path})")
 
 
+_TESSERACT_MISSING_HINT = (
+    "missing — scanned-PDF OCR will be unavailable. brew install tesseract"
+)
+
+
+def check_tesseract() -> CheckResult:
+    """Detect the ``tesseract`` binary used by the PDF OCR escalation layer.
+
+    Optional: scanned PDFs degrade silently without it, so we surface a
+    `skip` with an install hint instead of failing the run.
+    """
+    name = "tesseract"
+    binary = shutil.which("tesseract")
+    if binary is None:
+        return CheckResult(name, "skip", required=False, detail=_TESSERACT_MISSING_HINT)
+    try:
+        completed = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return CheckResult(name, "skip", required=False, detail=_TESSERACT_MISSING_HINT)
+    if completed.returncode != 0:
+        return CheckResult(name, "skip", required=False, detail=_TESSERACT_MISSING_HINT)
+    output = (completed.stdout or b"") + (completed.stderr or b"")
+    first_line = output.decode("utf-8", errors="replace").splitlines()[0].strip() if output else ""
+    return CheckResult(name, "ok", required=False, detail=first_line or "available")
+
+
 def run_all_checks(
     loaded_env_files: list[Path],
     *,
@@ -237,6 +270,7 @@ def run_all_checks(
     results.append(check_writable_dirs(root))
     results.append(check_sqlite_wal())
     results.append(check_models_yaml(root / "config" / "models.yaml"))
+    results.append(check_tesseract())
     results.append(check_serpapi_cost_note())
     return results
 
