@@ -37,7 +37,12 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
     EnvKey(
         name="RESEARCH_USER_AGENT",
         required=False,
-        description="Override default User-Agent sent by httpx and Playwright.",
+        description=(
+            "Override default User-Agent sent by httpx and Playwright."
+            " Required for SEC EDGAR (must include a contact email);"
+            " optional for everything else. The EDGAR smoke verb"
+            " gracefully skips when unset so unrelated runs aren't blocked."
+        ),
         default="research-agent/0.1 (+local; contact unset)",
     ),
     EnvKey(
