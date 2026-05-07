@@ -16,6 +16,7 @@ from research_agent.llm.budgets import BudgetTracker
 from research_agent.llm.router import Router, load_models_config
 from research_agent.orchestrator import plan as plan_module
 from research_agent.orchestrator.plan import (
+    MAX_FINDINGS_FOR_REPLAN,
     MAX_PLAN_VERSIONS,
     MAX_RECENT_RESULTS_FOR_REPLAN,
     Plan,
@@ -716,6 +717,282 @@ def test_tactical_replan_does_not_emit_truncated_when_recent_empty(
         row = conn.execute(
             "SELECT COUNT(*) AS c FROM events"
             " WHERE job_id = ? AND kind = 'replan_truncated'",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["c"] == 0
+
+
+# ---------------------------------------------------------------------------
+# tactical_replan findings drill-down — issue #179
+# ---------------------------------------------------------------------------
+
+
+def _make_findings(
+    n: int,
+    *,
+    claim_template: str = "Finding {i} body text",
+    starting_id: int = 1,
+    source_ids_per_finding: int = 1,
+) -> list[dict[str, Any]]:
+    """Build ``n`` synthetic finding rows shaped like ``_load_all_findings``."""
+    out: list[dict[str, Any]] = []
+    for offset in range(n):
+        i = starting_id + offset
+        out.append(
+            {
+                "id": i,
+                "claim": claim_template.format(i=i),
+                "confidence": 0.7,
+                "source_ids": [
+                    f"src-{i}-{j}" for j in range(source_ids_per_finding)
+                ],
+                "tags": ["topic-a"],
+            }
+        )
+    return out
+
+
+def test_tactical_replan_includes_findings_in_payload(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    """Issue #179: ``tactical_replan`` must ship ``findings`` in the planner payload.
+
+    Without findings in the payload, the planner has no way to drill into
+    named claims and just re-emits umbrella queries.
+    """
+    router, calls = router_with_spy
+    _StubAgent.next_plan = _sample_plan()
+    v1 = asyncio.run(initial_plan(job, router=router))
+
+    findings = _make_findings(
+        5,
+        claim_template="Schedule F implementation note {i}",
+    )
+    _StubAgent.next_plan = _sample_plan(version=2)
+    asyncio.run(
+        tactical_replan(job, v1, [], router=router, findings=findings),
+    )
+
+    args = calls[1][2]
+    payload = json.loads(args[0])
+    assert "findings" in payload
+    sent = payload["findings"]
+    assert len(sent) == 5
+    for entry in sent:
+        assert "id" in entry
+        assert "claim" in entry
+        assert "tags" in entry
+        assert "source_id" in entry
+    assert sent[0]["claim"] == "Schedule F implementation note 1"
+
+
+def test_tactical_replan_drills_into_named_findings(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    """End-to-end wiring: a stub planner drilling into 5 named subjects must surface
+    at least 3 of those names verbatim in the resulting plan's task queries.
+
+    This exercises the orchestrator wiring (findings reach the planner; the
+    planner's tasks land in the persisted plan). The actual prompt-driven
+    drill-down behavior is exercised at runtime where a real LLM reads the
+    drill-down rule in ``planner.md``.
+    """
+    router, _calls = router_with_spy
+    _StubAgent.next_plan = _sample_plan()
+    v1 = asyncio.run(initial_plan(job, router=router))
+
+    named_subjects = [
+        "Schedule F",
+        "WOTUS rule",
+        "mifepristone reversal",
+        "IRS workforce",
+        "FDA Title X",
+    ]
+    findings: list[dict[str, Any]] = []
+    fid = 1
+    for subject in named_subjects:
+        for variant_idx in range(3):
+            findings.append(
+                {
+                    "id": fid,
+                    "claim": (
+                        f"{subject} update {variant_idx}: implementation status "
+                        "is partially supported by recent reporting."
+                    ),
+                    "confidence": 0.6,
+                    "source_ids": [f"src-{fid}"],
+                    "tags": [subject],
+                }
+            )
+            fid += 1
+    assert len(findings) == 15
+
+    drilled_plan = Plan(
+        version=2,
+        objective="Drill into named findings.",
+        scope_class="broad",
+        subgoals=[
+            Subgoal(id=1, description="Drill into named claims from prior findings."),
+        ],
+        task_template=[
+            TaskSpec(
+                kind="web_search",
+                payload={
+                    "query": "Schedule F implementation timeline OPM guidance",
+                    "sub_question": "What is the Schedule F rollout timeline?",
+                },
+            ),
+            TaskSpec(
+                kind="web_search",
+                payload={
+                    "query": "site:federalregister.gov WOTUS rule comment period",
+                    "sub_question": "Comment-period status of the WOTUS rule.",
+                },
+            ),
+            TaskSpec(
+                kind="news_search",
+                payload={
+                    "query": "mifepristone reversal court ruling",
+                    "sub_question": "Recent court filings on the mifepristone reversal.",
+                },
+            ),
+            TaskSpec(
+                kind="web_search",
+                payload={
+                    "query": "IRS workforce downsizing 2026",
+                    "sub_question": "IRS staffing cuts and downsizing actions.",
+                },
+            ),
+        ],
+        expected_iterations=2,
+    )
+    _StubAgent.next_plan = drilled_plan
+
+    v2 = asyncio.run(
+        tactical_replan(job, v1, [], router=router, findings=findings),
+    )
+
+    queries = [
+        str(t.payload.get("query", "")) for t in v2.task_template
+    ]
+    sub_questions = [
+        str(t.payload.get("sub_question", "")) for t in v2.task_template
+    ]
+    haystack = " || ".join(queries + sub_questions).lower()
+
+    matched = [s for s in named_subjects if s.lower() in haystack]
+    assert len(matched) >= 3, (
+        f"expected at least 3 named subjects to appear verbatim in v2 task "
+        f"queries/sub_questions; got {matched} from {named_subjects}"
+    )
+
+
+def test_tactical_replan_truncates_findings_to_max(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    """200 findings → payload caps at MAX_FINDINGS_FOR_REPLAN, event emitted."""
+    router, calls = router_with_spy
+    _StubAgent.next_plan = _sample_plan()
+    v1 = asyncio.run(initial_plan(job, router=router))
+
+    findings = _make_findings(200)
+    _StubAgent.next_plan = _sample_plan(version=2)
+    asyncio.run(
+        tactical_replan(job, v1, [], router=router, findings=findings),
+    )
+
+    args = calls[1][2]
+    payload = json.loads(args[0])
+    sent = payload["findings"]
+    assert len(sent) == MAX_FINDINGS_FOR_REPLAN == 60
+    # Highest-ID findings (most recent) survive, re-ordered ascending.
+    sent_ids = [e["id"] for e in sent]
+    assert sent_ids == sorted(sent_ids)
+    assert sent_ids[0] == 200 - MAX_FINDINGS_FOR_REPLAN + 1  # 141
+    assert sent_ids[-1] == 200
+
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT level, payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'findings_truncated'"
+            " ORDER BY id ASC",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0]["level"] == "WARN"
+    event_payload = json.loads(rows[0]["payload_json"])
+    assert event_payload["before"] == 200
+    assert event_payload["after"] == MAX_FINDINGS_FOR_REPLAN
+    assert event_payload["compressed"] is True
+
+
+def test_tactical_replan_compresses_finding_source_ids(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    """A finding with 50 source_ids ships as a single ``source_id``, not a list."""
+    router, calls = router_with_spy
+    _StubAgent.next_plan = _sample_plan()
+    v1 = asyncio.run(initial_plan(job, router=router))
+
+    findings = [
+        {
+            "id": 7,
+            "claim": "Schedule F restructures civil service.",
+            "confidence": 0.9,
+            "source_ids": [f"src-{j}" for j in range(50)],
+            "tags": ["civil-service"],
+        }
+    ]
+    _StubAgent.next_plan = _sample_plan(version=2)
+    asyncio.run(
+        tactical_replan(job, v1, [], router=router, findings=findings),
+    )
+
+    args = calls[1][2]
+    payload = json.loads(args[0])
+    sent = payload["findings"]
+    assert len(sent) == 1
+    entry = sent[0]
+    assert "source_ids" not in entry
+    assert "source_id" in entry
+    assert entry["source_id"] == "src-0"
+    assert isinstance(entry["source_id"], str)
+
+
+def test_tactical_replan_does_not_emit_findings_truncated_when_under_cap(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    """Under-cap findings: no truncation event, payload carries them all."""
+    router, _calls = router_with_spy
+    _StubAgent.next_plan = _sample_plan()
+    v1 = asyncio.run(initial_plan(job, router=router))
+
+    findings = _make_findings(MAX_FINDINGS_FOR_REPLAN)  # exactly at the cap
+    _StubAgent.next_plan = _sample_plan(version=2)
+    asyncio.run(
+        tactical_replan(job, v1, [], router=router, findings=findings),
+    )
+
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM events"
+            " WHERE job_id = ? AND kind = 'findings_truncated'",
             (job.id,),
         ).fetchone()
     finally:

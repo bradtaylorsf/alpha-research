@@ -47,6 +47,7 @@ EventKind = Literal[
     "drain_replan",
     "replan_triggered",
     "replan_truncated",
+    "findings_truncated",
     "llm_call",
     "lmstudio_degraded",
     "lmstudio_recovered",
