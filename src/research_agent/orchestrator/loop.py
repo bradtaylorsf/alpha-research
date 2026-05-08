@@ -208,7 +208,7 @@ def _make_connector_fetch_handler(module_name: str) -> Handler:
             source = await mod.fetch(url)
         except MissingCredentialError as exc:
             raise FatalError(f"{module_name}_fetch: {exc}") from exc
-        return _persist_fetched_source(job, source)
+        return _persist_fetched_source(job, source, payload=payload)
 
     return _handler
 
@@ -270,7 +270,7 @@ def default_handlers(router: Any) -> dict[str, Handler]:
 
         payload = task["payload"]
         source = await web_fetch.fetch(payload["url"])
-        result = _persist_fetched_source(job, source)
+        result = _persist_fetched_source(job, source, payload=payload)
 
         source_id = result.get("source_id")
         if isinstance(source_id, int):
@@ -279,7 +279,12 @@ def default_handlers(router: Any) -> dict[str, Handler]:
                 kind="extract_findings",
                 payload={"source_id": source_id, "sub_question": sub_question},
             )
-            result["follow_up_tasks"] = [follow_up.model_dump()]
+            # Issue #193: ``_persist_fetched_source`` may have already added
+            # a bill-text fan-out follow-up (when web_fetch host-dispatched
+            # to congress.fetch). Merge rather than overwrite so the bill
+            # body still gets fetched alongside the extract on this index.
+            existing = result.get("follow_up_tasks") or []
+            result["follow_up_tasks"] = [*existing, follow_up.model_dump()]
         return result
 
     async def _arxiv_search(job: Job, task: dict[str, Any]) -> dict[str, Any]:
@@ -720,7 +725,11 @@ def _expand_search_to_fetches(
     }
 
 
-def _persist_fetched_source(job: Job, source: Any) -> dict[str, Any]:
+def _persist_fetched_source(
+    job: Job,
+    source: Any,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Write the fetched ``Source`` to disk + the sources table.
 
     Returns a result dict the loop persists into ``tasks.result_json``:
@@ -733,6 +742,13 @@ def _persist_fetched_source(job: Job, source: Any) -> dict[str, Any]:
     blocked fetch, parse failure) so the loop marks the task ``failed``
     rather than silently storing ``source_id=None`` that downstream
     ``extract_findings`` tasks then trip on.
+
+    Issue #193: when the persisted source's metadata carries a
+    ``bill_text_url`` (set by ``congress._fetch_bill``), fan out a
+    ``web_fetch`` follow-up for the actual bill body so the agent reads
+    the substance of the legislation, not just the metadata index card.
+    The follow-up is suppressed if the bill text URL has already been
+    fetched for this job (deduped via the cross-job ``sources.url`` row).
     """
     if source is None:
         raise FatalError("web_fetch returned None — URL unreachable, blocked, or empty body")
@@ -768,7 +784,68 @@ def _persist_fetched_source(job: Job, source: Any) -> dict[str, Any]:
         archive_url=source_dict.get("archive_url"),
         fetched_at=fetched_epoch,
     )
-    return {"source": source_dict, "source_id": source_id}
+    result: dict[str, Any] = {"source": source_dict, "source_id": source_id}
+
+    bill_text_followup = _build_bill_text_followup(job, source, payload)
+    if bill_text_followup is not None:
+        result["follow_up_tasks"] = [bill_text_followup.model_dump()]
+
+    return result
+
+
+def _build_bill_text_followup(
+    job: Job,
+    source: Any,
+    payload: dict[str, Any] | None,
+) -> TaskSpec | None:
+    """Emit a ``web_fetch`` follow-up for the bill text URL if appropriate.
+
+    Returns ``None`` when the source has no ``bill_text_url`` metadata, when
+    the URL has already been fetched for this job (anti-runaway guard against
+    tactical_replan re-fetching the same bill), or when the metadata is
+    malformed. The follow-up's ``sub_question`` inherits from the originating
+    task payload so downstream ``extract_findings`` keeps research context.
+    """
+    metadata = getattr(source, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    bill_text_url = metadata.get("bill_text_url")
+    if not isinstance(bill_text_url, str) or not bill_text_url.strip():
+        return None
+    bill_text_url = bill_text_url.strip()
+
+    # Dedup against any prior fetch of this same URL within the job. Checking
+    # ``sources`` (not ``job_sources``) is fine because cross-job dedup means
+    # any prior write surfaces the existing row. We still scope by job through
+    # the join so a sibling job's fetch doesn't suppress this one.
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM sources s
+            JOIN job_sources js ON js.source_id = s.id
+            WHERE s.url = ? AND js.job_id = ?
+            LIMIT 1
+            """,
+            (bill_text_url, job.id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is not None:
+        return None
+
+    sub_question: str
+    if payload and isinstance(payload.get("sub_question"), str) and payload["sub_question"].strip():
+        sub_question = payload["sub_question"].strip()
+    else:
+        title = getattr(source, "title", None) or metadata.get("bill_text_format") or "this bill"
+        sub_question = f"What does the bill text say about: {title}"
+
+    return TaskSpec(
+        kind="web_fetch",
+        payload={"url": bill_text_url, "sub_question": sub_question},
+    )
 
 
 def _load_source_text(job: Job, source_id: int) -> tuple[str, dict[str, Any]] | None:

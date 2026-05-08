@@ -665,6 +665,214 @@ async def test_connector_fetch_handler_missing_url_raises_fatal(
         await handler(job, {"kind": "congress_fetch", "payload": {}})
 
 
+# ---------------------------------------------------------------------------
+# Issue #193: bill-text fan-out via _persist_fetched_source
+# ---------------------------------------------------------------------------
+
+
+def _make_congress_source(
+    *,
+    url: str = "https://www.congress.gov/bill/117th-congress/house-bill/5376",
+    title: str = "Inflation Reduction Act of 2022",
+    bill_text_url: str | None = (
+        "https://www.congress.gov/117/bills/hr5376/BILLS-117hr5376enr.pdf"
+    ),
+    bill_text_format: str | None = "PDF",
+) -> Any:
+    from datetime import UTC, datetime
+
+    from research_agent.tools.models import Source
+
+    metadata: dict[str, Any] = {
+        "congress": 117,
+        "bill_type": "hr",
+        "bill_number": "5376",
+    }
+    if bill_text_url is not None:
+        metadata["bill_text_url"] = bill_text_url
+    if bill_text_format is not None:
+        metadata["bill_text_format"] = bill_text_format
+
+    return Source(
+        url=url,
+        title=title,
+        cleaned_text=f"# {title}\n\nMetadata roll-up.",
+        fetched_at=datetime.now(tz=UTC),
+        source_kind="congress",
+        metadata=metadata,
+    )
+
+
+def test_persist_fetched_source_emits_bill_text_followup(job: Job) -> None:
+    """A congress source with ``bill_text_url`` in metadata fans out a
+    ``web_fetch`` follow-up pointing at the bill body — not at the metadata
+    URL — and inherits ``sub_question`` from the originating task payload.
+    """
+    from research_agent.orchestrator.loop import _persist_fetched_source
+
+    bill_text_url = "https://www.congress.gov/117/bills/hr5376/BILLS-117hr5376enr.pdf"
+    source = _make_congress_source(bill_text_url=bill_text_url)
+
+    payload = {
+        "url": "https://www.congress.gov/bill/117th-congress/house-bill/5376",
+        "sub_question": "How does HR 5376 fund climate provisions?",
+    }
+    result = _persist_fetched_source(job, source, payload=payload)
+
+    assert isinstance(result, dict)
+    assert "follow_up_tasks" in result
+    follow_ups = result["follow_up_tasks"]
+    assert len(follow_ups) == 1
+    fu = follow_ups[0]
+    assert fu["kind"] == "web_fetch"
+    assert fu["payload"]["url"] == bill_text_url
+    # Critically: the follow-up's URL must be the bill text, not the metadata
+    # source URL — that's the bug #193 fixes.
+    assert fu["payload"]["url"] != source.url
+    assert fu["payload"]["sub_question"] == "How does HR 5376 fund climate provisions?"
+
+
+def test_persist_fetched_source_no_followup_when_bill_text_url_absent(
+    job: Job,
+) -> None:
+    """When the metadata has no ``bill_text_url`` (e.g. newly-introduced bill
+    with no published text yet), no follow-up is emitted and no log noise.
+    """
+    from research_agent.orchestrator.loop import _persist_fetched_source
+
+    source = _make_congress_source(bill_text_url=None, bill_text_format=None)
+    result = _persist_fetched_source(job, source, payload={"sub_question": "anything"})
+
+    assert "follow_up_tasks" not in result
+
+
+def test_persist_fetched_source_dedups_already_fetched_bill_text(
+    job: Job,
+) -> None:
+    """Anti-runaway: if the bill text URL has already been fetched for this
+    job, ``_persist_fetched_source`` must not re-emit a follow-up. Otherwise
+    tactical_replan can cycle the same bill repeatedly.
+    """
+    from research_agent.orchestrator.loop import _persist_fetched_source
+    from research_agent.storage.sources import write_source
+
+    bill_text_url = "https://www.congress.gov/117/bills/hr5376/BILLS-117hr5376enr.pdf"
+
+    # Pre-seed: the bill text has already been fetched for this job.
+    write_source(
+        job,
+        url=bill_text_url,
+        title="HR 5376 — Bill Text",
+        raw_content="Section 1. Findings. Section 2. ...",
+        kind="pdf",
+    )
+
+    source = _make_congress_source(bill_text_url=bill_text_url)
+    result = _persist_fetched_source(job, source, payload={"sub_question": "again?"})
+
+    assert "follow_up_tasks" not in result
+
+
+def test_persist_fetched_source_falls_back_sub_question_from_title(
+    job: Job,
+) -> None:
+    """When no payload sub_question is supplied, the follow-up's sub_question
+    is derived from the bill title so downstream extraction still has context.
+    """
+    from research_agent.orchestrator.loop import _persist_fetched_source
+
+    source = _make_congress_source(title="Inflation Reduction Act of 2022")
+    # Pass an empty payload (no sub_question key).
+    result = _persist_fetched_source(job, source, payload={})
+
+    follow_ups = result.get("follow_up_tasks") or []
+    assert len(follow_ups) == 1
+    sub_q = follow_ups[0]["payload"]["sub_question"]
+    assert "Inflation Reduction Act of 2022" in sub_q
+
+
+@pytest.mark.asyncio
+async def test_congress_fetch_handler_emits_bill_text_followup(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end through the handler: the ``congress_fetch`` handler returns
+    a ``follow_up_tasks`` list whose only entry is a ``web_fetch`` for the
+    bill text URL, with the originating task's ``sub_question`` propagated.
+    """
+    from research_agent.tools import congress as congress_mod
+
+    bill_text_url = "https://www.congress.gov/117/bills/hr5376/BILLS-117hr5376enr.pdf"
+    metadata_url = "https://www.congress.gov/bill/117th-congress/house-bill/5376"
+    expected_source = _make_congress_source(
+        url=metadata_url, bill_text_url=bill_text_url
+    )
+
+    async def fake_fetch(url: str) -> Any:
+        assert url == metadata_url
+        return expected_source
+
+    monkeypatch.setattr(congress_mod, "fetch", fake_fetch)
+
+    handler = default_handlers(router=None)["congress_fetch"]
+    out = await handler(
+        job,
+        {
+            "kind": "congress_fetch",
+            "payload": {
+                "url": metadata_url,
+                "sub_question": "What does HR 5376 do for energy?",
+            },
+        },
+    )
+
+    assert isinstance(out, dict)
+    assert "source_id" in out
+    follow_ups = out.get("follow_up_tasks") or []
+    assert len(follow_ups) == 1
+    fu = follow_ups[0]
+    assert fu["kind"] == "web_fetch"
+    assert fu["payload"]["url"] == bill_text_url
+    assert fu["payload"]["sub_question"] == "What does HR 5376 do for energy?"
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_handler_merges_bill_text_and_extract_followups(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #193 + the existing extract-findings fan-out interact correctly:
+    when ``web_fetch`` host-dispatches to ``congress.fetch`` and the source has
+    ``bill_text_url``, the resulting follow_up_tasks must contain BOTH the
+    bill-text web_fetch and the extract_findings task on the metadata source.
+    """
+    from research_agent.tools import web_fetch as web_fetch_mod
+
+    bill_text_url = "https://www.congress.gov/117/bills/hr5376/BILLS-117hr5376enr.pdf"
+    metadata_url = "https://www.congress.gov/bill/117th-congress/house-bill/5376"
+
+    async def fake_fetch(url: str) -> Any:
+        return _make_congress_source(url=url, bill_text_url=bill_text_url)
+
+    monkeypatch.setattr(web_fetch_mod, "fetch", fake_fetch)
+
+    handler = default_handlers(router=None)["web_fetch"]
+    out = await handler(
+        job,
+        {
+            "kind": "web_fetch",
+            "payload": {
+                "url": metadata_url,
+                "sub_question": "energy provisions?",
+            },
+        },
+    )
+
+    follow_ups = out.get("follow_up_tasks") or []
+    kinds = sorted(f["kind"] for f in follow_ups)
+    assert kinds == ["extract_findings", "web_fetch"]
+    bill_followup = next(f for f in follow_ups if f["kind"] == "web_fetch")
+    assert bill_followup["payload"]["url"] == bill_text_url
+
+
 @pytest.mark.asyncio
 async def test_connector_search_handler_drops_kwargs_connector_does_not_accept(
     job: Job, monkeypatch: pytest.MonkeyPatch
