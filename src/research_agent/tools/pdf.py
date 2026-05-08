@@ -656,11 +656,395 @@ def extract_sync(
     return _extract_sync(path, max_pages, max_chars, str(path), job)
 
 
+# ---------------------------------------------------------------------------
+# Section walk (issue #206) — structural splitting for cornerstone PDFs
+# ---------------------------------------------------------------------------
+
+# Heading-detection regexes for the fallback path when the PDF outline is
+# missing or sparse. Patterns are deliberately conservative — false positives
+# here turn body paragraphs into pseudo-section breaks. ``Section`` requires a
+# trailing digit + period to avoid matching ordinary mid-sentence prose.
+_HEADING_REGEXES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^#{1,3}\s+(?P<title>.+)$"),
+    re.compile(r"^(?P<title>Chapter\s+\d+\b.*)$", re.IGNORECASE),
+    re.compile(r"^(?P<title>Section\s+\d+\b.*)$", re.IGNORECASE),
+    re.compile(r"^(?P<title>Part\s+[IVX]+\b.*)$"),
+    re.compile(r"^(?P<title>[IVX]{1,5}\.\s+.+)$"),
+)
+
+# Sliding-window fallback for unstructured PDFs (Stage 5). Smaller than
+# DEFAULT_MAX_CHARS so each window fits comfortably and overlap preserves
+# claims that straddle a boundary.
+_WINDOW_CHARS = 150_000
+_WINDOW_OVERLAP_CHARS = 10_000
+
+_MIN_STRUCTURED_SECTIONS = 3
+
+
+def extract_sections_sync(
+    path_or_url: str | Path,
+    *,
+    max_pages: int = DEFAULT_MAX_PAGES,
+    max_chars_per_section: int = DEFAULT_MAX_CHARS,
+    job: Job | None = None,
+    doc_title: str | None = None,
+) -> list[dict[str, object]]:
+    """Return a structural section-walk of a PDF (issue #206).
+
+    Each section is ``{"breadcrumb", "text", "page_start", "page_end",
+    "structured"}``. Sections are derived from (in order of preference):
+
+    1. The pypdf outline (bookmarks → page numbers via
+       ``reader.get_destination_page_number``).
+    2. Heading regex matches on the per-page text when the outline is
+       missing or yields fewer than :data:`_MIN_STRUCTURED_SECTIONS`.
+    3. A sliding 150k-char window with 10k overlap when neither of the
+       above produces enough sections — flagged with ``structured=False``
+       so the caller can dedupe by claim-text Jaccard similarity.
+
+    Each section's body is capped at ``max_chars_per_section``. Sections
+    that exceed the cap are themselves split into the sliding-window
+    representation so a 600-page chapter doesn't get truncated.
+    """
+    raw = str(path_or_url)
+    cleanup_temp: Path | None = None
+    if _looks_like_url(raw):
+        try:
+            data = asyncio.run(fetch_pdf_bytes(raw))
+        except (httpx.HTTPError, OSError) as exc:
+            logger.warning("pdf fetch failed for %s: %s", raw, exc)
+            return []
+        path = _write_temp_pdf(data)
+        cleanup_temp = path
+    else:
+        path = Path(raw)
+        if not path.exists():
+            logger.warning("pdf path does not exist: %s", path)
+            return []
+    try:
+        return _build_sections(
+            path,
+            max_pages=max_pages,
+            max_chars_per_section=max_chars_per_section,
+            doc_title=doc_title or path.stem,
+        )
+    finally:
+        if cleanup_temp is not None:
+            try:
+                cleanup_temp.unlink()
+            except OSError:
+                pass
+
+
+async def extract_sections(
+    path_or_url: str | Path,
+    *,
+    max_pages: int = DEFAULT_MAX_PAGES,
+    max_chars_per_section: int = DEFAULT_MAX_CHARS,
+    job: Job | None = None,
+    doc_title: str | None = None,
+) -> list[dict[str, object]]:
+    """Async wrapper around :func:`extract_sections_sync` for use inside the loop.
+
+    Mirrors :func:`extract`: I/O happens in a thread executor so a 920-page
+    PDF doesn't stall the event loop while pypdf walks pages.
+    """
+    raw = str(path_or_url)
+    cleanup_temp: Path | None = None
+    if _looks_like_url(raw):
+        try:
+            data = await fetch_pdf_bytes(raw)
+        except (httpx.HTTPError, OSError) as exc:
+            logger.warning("pdf fetch failed for %s: %s", raw, exc)
+            return []
+        path = _write_temp_pdf(data)
+        cleanup_temp = path
+    else:
+        path = Path(raw)
+        if not path.exists():
+            logger.warning("pdf path does not exist: %s", path)
+            return []
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            None,
+            _build_sections,
+            path,
+            max_pages,
+            max_chars_per_section,
+            doc_title or path.stem,
+        )
+    finally:
+        if cleanup_temp is not None:
+            try:
+                cleanup_temp.unlink()
+            except OSError:
+                pass
+
+
+def _build_sections(
+    path: Path,
+    max_pages: int,
+    max_chars_per_section: int,
+    doc_title: str,
+) -> list[dict[str, object]]:
+    """Synchronous core of the section walk — runs pypdf + section assembly."""
+    import pypdf  # lazy
+
+    try:
+        reader = pypdf.PdfReader(str(path))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pypdf open failed for %s during section walk: %s", path, exc)
+        return []
+
+    total_pages = len(reader.pages)
+    page_slice = min(total_pages, max_pages)
+    page_texts: list[str] = []
+    for idx in range(page_slice):
+        try:
+            text = reader.pages[idx].extract_text() or ""
+        except Exception:  # noqa: BLE001
+            text = ""
+        page_texts.append(text)
+
+    outline_anchors = _outline_to_anchors(reader, page_slice)
+    sections: list[dict[str, object]] = []
+    if len(outline_anchors) >= _MIN_STRUCTURED_SECTIONS:
+        sections = _slice_by_anchors(
+            page_texts, outline_anchors, doc_title=doc_title
+        )
+    else:
+        regex_anchors = _heading_anchors_from_pages(page_texts)
+        if len(regex_anchors) >= _MIN_STRUCTURED_SECTIONS:
+            sections = _slice_by_anchors(
+                page_texts, regex_anchors, doc_title=doc_title
+            )
+
+    if len(sections) >= _MIN_STRUCTURED_SECTIONS:
+        return _split_oversized_sections(sections, max_chars_per_section)
+
+    # Stage 5: sliding-window fallback over the whole document.
+    return _windows_for_unstructured(page_texts, doc_title=doc_title)
+
+
+def _outline_to_anchors(reader: object, page_slice: int) -> list[tuple[int, list[str]]]:
+    """Walk the pypdf outline; return ``(page_index, breadcrumb_path)`` anchors.
+
+    The outline is a nested list of ``Destination`` objects; nested lists
+    represent depth. We resolve each destination to its 0-based page index
+    via ``reader.get_destination_page_number`` (the public pypdf API for
+    this) and carry the parent titles as breadcrumb context.
+    """
+    try:
+        outline = getattr(reader, "outline", None)
+    except Exception:  # noqa: BLE001
+        return []
+    if not outline:
+        return []
+
+    resolver = getattr(reader, "get_destination_page_number", None)
+    anchors: list[tuple[int, list[str]]] = []
+
+    def _walk(items: object, parents: list[str]) -> None:
+        if not isinstance(items, list):
+            return
+        current_parents = list(parents)
+        last_title: str | None = None
+        for item in items:
+            if isinstance(item, list):
+                # Nested list deepens the breadcrumb under the most recent sibling.
+                child_parents = (
+                    current_parents + [last_title] if last_title else current_parents
+                )
+                _walk(item, child_parents)
+                continue
+            title = getattr(item, "title", None)
+            if not isinstance(title, str) or not title.strip():
+                continue
+            title = title.strip()
+            last_title = title
+            if resolver is None:
+                continue
+            try:
+                page_idx = resolver(item)
+            except Exception:  # noqa: BLE001 — destination may be malformed
+                continue
+            if not isinstance(page_idx, int):
+                continue
+            if page_idx < 0 or page_idx >= page_slice:
+                continue
+            anchors.append((page_idx, current_parents + [title]))
+
+    _walk(outline, [])
+    anchors.sort(key=lambda a: a[0])
+    return anchors
+
+
+def _heading_anchors_from_pages(
+    page_texts: list[str],
+) -> list[tuple[int, list[str]]]:
+    """Regex-based heading detection over per-page text. Page-level granularity."""
+    anchors: list[tuple[int, list[str]]] = []
+    for idx, text in enumerate(page_texts):
+        if not text:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or len(stripped) > 200:
+                continue
+            for pattern in _HEADING_REGEXES:
+                m = pattern.match(stripped)
+                if m:
+                    title = m.group("title").strip()
+                    if title:
+                        anchors.append((idx, [title]))
+                    break
+    return anchors
+
+
+def _slice_by_anchors(
+    page_texts: list[str],
+    anchors: list[tuple[int, list[str]]],
+    *,
+    doc_title: str,
+) -> list[dict[str, object]]:
+    """Slice ``page_texts`` between consecutive anchor pages into sections."""
+    if not anchors:
+        return []
+
+    # Ensure anchors are in page order; tolerate duplicates on the same page.
+    sorted_anchors = sorted(anchors, key=lambda a: a[0])
+    sections: list[dict[str, object]] = []
+    for i, (page_idx, breadcrumb_path) in enumerate(sorted_anchors):
+        page_start = page_idx
+        page_end = (
+            sorted_anchors[i + 1][0] - 1
+            if i + 1 < len(sorted_anchors)
+            else len(page_texts) - 1
+        )
+        if page_end < page_start:
+            page_end = page_start
+        body = "\n\n".join(
+            page_texts[p].strip()
+            for p in range(page_start, page_end + 1)
+            if page_texts[p].strip()
+        )
+        if not body:
+            continue
+        breadcrumb = " > ".join([doc_title, *breadcrumb_path])
+        breadcrumb = (
+            f"{breadcrumb} (pages {page_start + 1}-{page_end + 1})"
+        )
+        sections.append(
+            {
+                "breadcrumb": breadcrumb,
+                "text": body,
+                "page_start": page_start + 1,
+                "page_end": page_end + 1,
+                "structured": True,
+            }
+        )
+    return sections
+
+
+def _split_oversized_sections(
+    sections: list[dict[str, object]],
+    max_chars_per_section: int,
+) -> list[dict[str, object]]:
+    """Replace any section whose body exceeds ``max_chars_per_section`` with windows.
+
+    Issue #206: a section larger than the per-section cap falls back to the
+    sliding-window representation so the cornerstone-extract prompt still
+    sees the whole body across multiple LLM calls.
+    """
+    if max_chars_per_section <= 0:
+        return sections
+    out: list[dict[str, object]] = []
+    for section in sections:
+        text = section["text"]
+        if not isinstance(text, str) or len(text) <= max_chars_per_section:
+            out.append(section)
+            continue
+        page_start = int(section.get("page_start", 0) or 0)
+        page_end = int(section.get("page_end", page_start) or page_start)
+        breadcrumb = str(section.get("breadcrumb", ""))
+        for window_idx, (start, end, window_text) in enumerate(
+            _slide_windows(text), start=1
+        ):
+            window_breadcrumb = (
+                f"{breadcrumb} > window {window_idx} (chars {start}-{end})"
+            )
+            out.append(
+                {
+                    "breadcrumb": window_breadcrumb,
+                    "text": window_text,
+                    "page_start": page_start,
+                    "page_end": page_end,
+                    "structured": False,
+                }
+            )
+    return out
+
+
+def _windows_for_unstructured(
+    page_texts: list[str],
+    *,
+    doc_title: str,
+) -> list[dict[str, object]]:
+    """Fallback Stage-5 sliding-window split when no structure is detectable."""
+    body = "\n\n".join(p for p in page_texts if p)
+    if not body.strip():
+        return []
+    page_start = 1
+    page_end = len(page_texts)
+    sections: list[dict[str, object]] = []
+    for idx, (start, end, window_text) in enumerate(
+        _slide_windows(body), start=1
+    ):
+        sections.append(
+            {
+                "breadcrumb": (
+                    f"{doc_title} > window {idx} (chars {start}-{end})"
+                ),
+                "text": window_text,
+                "page_start": page_start,
+                "page_end": page_end,
+                "structured": False,
+            }
+        )
+    return sections
+
+
+def _slide_windows(
+    text: str,
+    *,
+    window: int = _WINDOW_CHARS,
+    overlap: int = _WINDOW_OVERLAP_CHARS,
+) -> list[tuple[int, int, str]]:
+    """Yield ``(char_start, char_end, window_text)`` slices over ``text``."""
+    if window <= 0 or overlap < 0 or overlap >= window:
+        raise ValueError("window must be > 0 and 0 <= overlap < window")
+    n = len(text)
+    if n == 0:
+        return []
+    step = window - overlap
+    out: list[tuple[int, int, str]] = []
+    start = 0
+    while start < n:
+        end = min(start + window, n)
+        out.append((start, end, text[start:end]))
+        if end >= n:
+            break
+        start += step
+    return out
+
+
 __all__ = [
     "DEFAULT_MAX_CHARS",
     "DEFAULT_MAX_PAGES",
     "extract",
     "extract_from_bytes",
+    "extract_sections",
+    "extract_sections_sync",
     "extract_sync",
     "fetch_pdf_bytes",
 ]

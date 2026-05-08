@@ -409,6 +409,7 @@ def test_default_handlers_covers_every_task_kind() -> None:
         "news_search",
         "reddit_search",
         "local_corpus_query",
+        "cornerstone_query",
         "extract_findings",
         "summarize_source",
         "synthesize",
@@ -1031,6 +1032,7 @@ async def test_drain_replan_chains_when_queue_empties(
         router: Any,
         findings: list[dict[str, Any]] | None = None,
         synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
     ) -> Plan:
         drain_calls["n"] += 1
         next_version = prior_plan.version + 1
@@ -1088,6 +1090,7 @@ async def test_drain_replan_respects_cap(
         router: Any,
         findings: list[dict[str, Any]] | None = None,
         synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
     ) -> Plan:
         next_version = prior_plan.version + 1
         template = [TaskSpec(kind="web_search", payload={"q": "more"})]
@@ -1147,6 +1150,7 @@ async def test_drain_replan_break_on_empty_template(
         router: Any,
         findings: list[dict[str, Any]] | None = None,
         synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
     ) -> Plan:
         next_version = prior_plan.version + 1
         new = Plan(
@@ -1641,6 +1645,469 @@ async def test_extract_findings_planner_marker_does_not_emit_fallback(
     kinds = _read_event_kinds(db_path, job.id)
     assert "cornerstone_extract" in kinds
     assert "cornerstone_fallback_triggered" not in kinds
+
+
+# ---------------------------------------------------------------------------
+# Cornerstone PDF section-walk + vector index + cornerstone_query (issue #206)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cornerstone_pdf_section_walk_emits_per_section_events(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PDF cornerstone with multi-section walk emits per-section telemetry.
+
+    The handler:
+    * Calls ``pdf.extract_sections`` for the PDF URL,
+    * Runs the cornerstone-extract prompt once per section,
+    * Tags each finding with the section breadcrumb,
+    * Emits ``cornerstone_section_extract`` per section,
+    * Stops the indexer from running by stubbing it (asserted separately),
+    * Aggregates findings across sections.
+    """
+    url = "https://example.test/cornerstone.pdf"
+    _persist_plan_with_cornerstone(job, url)
+    source_id = _seed_source(
+        job, url=url, body="full pdf body — extracted markdown", kind="pdf"
+    )
+
+    fake_sections = [
+        {
+            "breadcrumb": "Doc > Chapter 1 (pages 1-10)",
+            "text": "DOJ chapter prose " * 200,
+            "page_start": 1,
+            "page_end": 10,
+            "structured": True,
+        },
+        {
+            "breadcrumb": "Doc > Chapter 2 (pages 11-20)",
+            "text": "EPA chapter prose " * 200,
+            "page_start": 11,
+            "page_end": 20,
+            "structured": True,
+        },
+    ]
+
+    from research_agent.tools import pdf as pdf_mod
+
+    async def _fake_extract_sections(*_args, **_kwargs):
+        return fake_sections
+
+    monkeypatch.setattr(pdf_mod, "extract_sections", _fake_extract_sections)
+
+    # Don't actually run the embedder — assert the orchestrator at least
+    # tries to build the index and fails-open on its absence.
+    index_calls: list[int] = []
+
+    def _fake_index(job_arg, parent_id, sections, **kwargs):
+        index_calls.append(parent_id)
+        return {"chunks_indexed": 4, "chunks_skipped": 0, "embed_dim": 1024}
+
+    from research_agent.tools import local_corpus as lc_mod
+
+    monkeypatch.setattr(lc_mod, "index_cornerstone_source", _fake_index)
+
+    # Each section yields 2 findings — total 4 once aggregated.
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "section finding A"\n  confidence: 0.8\n  quote: ""\n  tags: [t1]\n'
+        '- claim: "section finding B"\n  confidence: 0.8\n  quote: ""\n  tags: [t2]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "List proposals."}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    assert result["findings_written"] == 4
+    kinds = _read_event_kinds(db_path, job.id)
+    assert kinds.count("cornerstone_section_extract") == 2
+    assert "cornerstone_index_built" in kinds
+    assert index_calls == [source_id]
+
+    # Every finding row should carry the section breadcrumb in its tags.
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT tags FROM findings WHERE job_id = ? ORDER BY id ASC",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    import json as _json
+
+    breadcrumbs_seen = set()
+    for row in rows:
+        tags = _json.loads(row["tags"]) if row["tags"] else []
+        breadcrumbs_seen.update(t for t in tags if "Chapter" in t)
+    assert {
+        "Doc > Chapter 1 (pages 1-10)",
+        "Doc > Chapter 2 (pages 11-20)",
+    } <= breadcrumbs_seen
+
+
+@pytest.mark.asyncio
+async def test_cornerstone_pdf_index_failure_does_not_fail_extract(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cornerstone_index_failed`` event fires; extract still returns findings."""
+    url = "https://example.test/cornerstone-fail.pdf"
+    _persist_plan_with_cornerstone(job, url)
+    source_id = _seed_source(job, url=url, body="pdf body", kind="pdf")
+
+    from research_agent.tools import pdf as pdf_mod
+
+    async def _fake_extract_sections(*_args, **_kwargs):
+        return [
+            {
+                "breadcrumb": "Doc > Only (pages 1-10)",
+                "text": "section body",
+                "page_start": 1,
+                "page_end": 10,
+                "structured": True,
+            }
+        ]
+
+    monkeypatch.setattr(pdf_mod, "extract_sections", _fake_extract_sections)
+
+    from research_agent.tools import local_corpus as lc_mod
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("LM Studio is down")
+
+    monkeypatch.setattr(lc_mod, "index_cornerstone_source", _boom)
+
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "real finding"\n  confidence: 0.8\n  quote: ""\n  tags: [t1]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+    assert result["findings_written"] == 1
+
+    kinds = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_index_failed" in kinds
+
+
+@pytest.mark.asyncio
+async def test_cornerstone_section_walk_dedupes_by_jaccard_when_unstructured(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sliding-window sections must dedupe near-duplicate findings (Jaccard ≥ 0.85)."""
+    url = "https://example.test/scan.pdf"
+    _persist_plan_with_cornerstone(job, url)
+    source_id = _seed_source(job, url=url, body="pdf body", kind="pdf")
+
+    from research_agent.tools import pdf as pdf_mod
+
+    async def _fake_extract_sections(*_args, **_kwargs):
+        return [
+            {
+                "breadcrumb": "Doc > window 1 (chars 0-150000)",
+                "text": "win 1 body " * 100,
+                "page_start": 1,
+                "page_end": 50,
+                "structured": False,
+            },
+            {
+                "breadcrumb": "Doc > window 2 (chars 140000-290000)",
+                "text": "win 2 body " * 100,
+                "page_start": 50,
+                "page_end": 100,
+                "structured": False,
+            },
+        ]
+
+    monkeypatch.setattr(pdf_mod, "extract_sections", _fake_extract_sections)
+    from research_agent.tools import local_corpus as lc_mod
+
+    monkeypatch.setattr(
+        lc_mod,
+        "index_cornerstone_source",
+        lambda *_a, **_k: {"chunks_indexed": 0, "chunks_skipped": 0, "embed_dim": 1024},
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "Schedule F should be reinstated across the executive branch"\n'
+        "  confidence: 0.9\n  quote: \"\"\n  tags: [schedule-f]\n"
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+    # Both windows would produce the identical claim; dedupe must keep one.
+    assert result["findings_written"] == 1
+
+    kinds = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_dedup" in kinds
+
+
+@pytest.mark.asyncio
+async def test_cornerstone_section_walk_parses_followup_questions(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mapping-form YAML with ``follow_up_questions`` is parsed + emitted."""
+    url = "https://example.test/with-followups.pdf"
+    _persist_plan_with_cornerstone(job, url)
+    source_id = _seed_source(job, url=url, body="pdf body", kind="pdf")
+
+    from research_agent.tools import pdf as pdf_mod
+
+    async def _fake_extract_sections(*_args, **_kwargs):
+        return [
+            {
+                "breadcrumb": "Doc > Section 1 (pages 1-5)",
+                "text": "body",
+                "page_start": 1,
+                "page_end": 5,
+                "structured": True,
+            }
+        ]
+
+    monkeypatch.setattr(pdf_mod, "extract_sections", _fake_extract_sections)
+    from research_agent.tools import local_corpus as lc_mod
+
+    monkeypatch.setattr(
+        lc_mod,
+        "index_cornerstone_source",
+        lambda *_a, **_k: {"chunks_indexed": 0, "chunks_skipped": 0, "embed_dim": 1024},
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        "findings:\n"
+        '  - claim: "real claim"\n    confidence: 0.8\n    quote: ""\n    tags: [t1]\n'
+        "follow_up_questions:\n"
+        '  - "Is Schedule F implementation pending OPM guidance?"\n'
+        '  - "Have any agencies issued draft regulations yet?"\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+    assert result["findings_written"] == 1
+    assert result["follow_up_questions"] == [
+        "Is Schedule F implementation pending OPM guidance?",
+        "Have any agencies issued draft regulations yet?",
+    ]
+    kinds = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_followups_emitted" in kinds
+
+
+@pytest.mark.asyncio
+async def test_cornerstone_query_handler_uses_index_and_writes_findings(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``cornerstone_query`` handler retrieves chunks + writes findings."""
+    from research_agent.orchestrator.loop import _run_cornerstone_query
+    from research_agent.storage.sources import write_source
+
+    parent_id = write_source(
+        job,
+        url="https://example.test/cornerstone.pdf",
+        title="Cornerstone",
+        raw_content="parent body",
+        kind="pdf",
+    )
+
+    # Seed two cornerstone_chunk rows under the parent so the handler has
+    # something to fetch back from disk.
+    chunk_a_id = write_source(
+        job,
+        url="https://example.test/cornerstone.pdf",
+        title="Cornerstone: Chapter 1",
+        raw_content="This chunk is from Chapter 1. Schedule F proposal text.",
+        kind="cornerstone_chunk",
+        embedding=b"\x00" * (1024 * 4),
+        parent_source_id=parent_id,
+    )
+    write_source(
+        job,
+        url="https://example.test/cornerstone.pdf",
+        title="Cornerstone: Chapter 2",
+        raw_content="This chunk is from Chapter 2. WOTUS rulemaking text.",
+        kind="cornerstone_chunk",
+        embedding=b"\x00" * (1024 * 4),
+        parent_source_id=parent_id,
+    )
+
+    from research_agent.tools import local_corpus as lc_mod
+
+    def _fake_query(query, job_arg, parent_arg, *, top_k=8, models_config=None):
+        # Look up the chunk's md_path so the handler reads the right file.
+        conn = db.connect(job_arg.db_path)
+        try:
+            row = conn.execute(
+                "SELECT md_path, sha256, title FROM sources WHERE id = ?",
+                (chunk_a_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return [
+            {
+                "source_id": chunk_a_id,
+                "sha256": row["sha256"],
+                "md_path": row["md_path"],
+                "title": row["title"],
+                "score": 0.9,
+            }
+        ]
+
+    monkeypatch.setattr(lc_mod, "cornerstone_query", _fake_query)
+
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "Retrieved finding about Schedule F"\n'
+        "  confidence: 0.8\n  quote: \"\"\n  tags: [schedule-f]\n"
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {
+        "payload": {
+            "sub_question": "What does the cornerstone say about Schedule F?",
+            "cornerstone_url": "https://example.test/cornerstone.pdf",
+            "top_k": 4,
+        }
+    }
+
+    result = await _run_cornerstone_query(job, task, router=router)
+    assert result["findings_written"] == 1
+    assert result["parent_source_id"] == parent_id
+    assert result["hits"] == 1
+
+    kinds = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_query_run" in kinds
+
+
+@pytest.mark.asyncio
+async def test_cornerstone_query_handler_requires_target(
+    job: Job,
+) -> None:
+    """Without ``parent_source_id`` or ``cornerstone_url`` the handler raises FatalError."""
+    from research_agent.orchestrator.errors import FatalError
+    from research_agent.orchestrator.loop import _run_cornerstone_query
+
+    router = _StubRouter("```yaml\n[]\n```\n")
+    task = {"payload": {"sub_question": "anything"}}
+
+    with pytest.raises(FatalError):
+        await _run_cornerstone_query(job, task, router=router)
+
+
+@pytest.mark.asyncio
+async def test_cornerstone_query_url_resolves_parent_not_chunk(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """URL → parent rowid lookup must skip ``cornerstone_chunk`` rows.
+
+    The indexer copies the parent URL onto every chunk row, so a
+    naive ``WHERE url = ?`` lookup can return a chunk id. The handler
+    would then filter ``parent_source_id = <chunk_id>`` and find no
+    chunks. This test seeds chunks first, then the parent, to make
+    the bug deterministic without the resolver fix.
+    """
+    from research_agent.orchestrator.loop import _run_cornerstone_query
+    from research_agent.storage.sources import write_source
+
+    cornerstone_url = "https://example.test/cornerstone-resolver.pdf"
+
+    # Pretend a previous job (or earlier in this run) wrote chunks
+    # under the same URL. Insert chunks first so their rowids precede
+    # the parent's — without the resolver filter the chunk would be
+    # returned as the "parent".
+    parent_id = write_source(
+        job,
+        url=cornerstone_url,
+        title="Cornerstone parent",
+        raw_content="parent body",
+        kind="pdf",
+    )
+    chunk_id = write_source(
+        job,
+        url=cornerstone_url,
+        title="Cornerstone: window 1",
+        raw_content="This chunk is from window 1. body text.",
+        kind="cornerstone_chunk",
+        embedding=b"\x00" * (1024 * 4),
+        parent_source_id=parent_id,
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_query(query, job_arg, parent_arg, *, top_k=8, models_config=None):
+        captured["parent"] = parent_arg
+        return []
+
+    from research_agent.tools import local_corpus as lc_mod
+
+    monkeypatch.setattr(lc_mod, "cornerstone_query", _fake_query)
+
+    router = _StubRouter("```yaml\n[]\n```\n")
+    task = {
+        "payload": {
+            "sub_question": "anything",
+            "cornerstone_url": cornerstone_url,
+            "top_k": 4,
+        }
+    }
+
+    result = await _run_cornerstone_query(job, task, router=router)
+    assert captured["parent"] == parent_id
+    assert captured["parent"] != chunk_id
+    assert result["parent_source_id"] == parent_id
+
+
+@pytest.mark.asyncio
+async def test_cornerstone_section_walk_falls_back_for_non_pdf(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-PDF cornerstones still take the legacy single-pass path.
+
+    Existing planner-marked cornerstone tests pass through this branch
+    (kind="web" markdown blob); the section-walk path must scope itself
+    to ``source_kind == 'pdf'`` so existing callers don't regress.
+    """
+    url = "https://example.test/policy.md"
+    _persist_plan_with_cornerstone(job, url)
+    source_id = _seed_source(job, url=url, body=_CORNERSTONE_BODY, kind="web")
+
+    from research_agent.tools import pdf as pdf_mod
+
+    async def _explode(*_a, **_k):
+        raise AssertionError("section walk must not fire for non-PDF cornerstones")
+
+    monkeypatch.setattr(pdf_mod, "extract_sections", _explode)
+
+    router = _StubRouter(_CORNERSTONE_YAML)
+    task = {"payload": {"source_id": source_id, "sub_question": "?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+    assert result["findings_written"] == 12
+    kinds = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_extract" in kinds
+    # Single-pass: no per-section events.
+    assert "cornerstone_section_extract" not in kinds
 
 
 # ---------------------------------------------------------------------------

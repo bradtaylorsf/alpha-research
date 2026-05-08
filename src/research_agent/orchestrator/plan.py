@@ -55,6 +55,7 @@ TaskKind = Literal[
     "news_search",
     "reddit_search",
     "local_corpus_query",
+    "cornerstone_query",
     "extract_findings",
     "summarize_source",
     "synthesize",
@@ -564,6 +565,7 @@ async def tactical_replan(
     router: Router,
     findings: list[dict[str, Any]] | None = None,
     synthesis_md: str | None = None,
+    follow_up_questions: list[str] | None = None,
 ) -> Plan:
     """Run a small in-loop replan on the local ``general`` tier.
 
@@ -617,6 +619,14 @@ async def tactical_replan(
         payload["findings"] = [_summarize_finding(f) for f in tail_findings]
     if synthesis_md is not None:
         payload["synthesis_md"] = synthesis_md
+    if follow_up_questions:
+        # Issue #206: cornerstone-section extraction surfaces questions
+        # the document raises but does not fully answer. Surfacing them
+        # to the planner lets ``tactical_replan`` route them through
+        # ``cornerstone_query`` (or a focused web search) on the next
+        # iteration instead of waiting for them to be re-derived from
+        # findings tags.
+        payload["follow_up_questions"] = list(follow_up_questions)
     context = json.dumps(payload, sort_keys=True, default=str)
 
     if original_len > 0:
