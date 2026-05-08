@@ -772,7 +772,7 @@ def _load_source_text(job: Job, source_id: int) -> tuple[str, dict[str, Any]] | 
     conn = db.connect(job.db_path)
     try:
         row = conn.execute(
-            "SELECT id, url, title, md_path, archive_url FROM sources WHERE id = ?",
+            "SELECT id, url, title, md_path, archive_url, kind FROM sources WHERE id = ?",
             (source_id,),
         ).fetchone()
     finally:
@@ -788,6 +788,7 @@ def _load_source_text(job: Job, source_id: int) -> tuple[str, dict[str, Any]] | 
         "url": row["url"],
         "title": row["title"],
         "archive_url": row["archive_url"],
+        "source_kind": row["kind"],
     }
     return text, meta
 
@@ -840,25 +841,43 @@ def _normalize_url_for_compare(url: str | None) -> str | None:
     return urlunsplit((parts.scheme.lower(), netloc, path, parts.query, ""))
 
 
-def _is_cornerstone_source(job: Job, meta: dict[str, Any], text: str) -> bool:
-    """True when this source is the plan's declared cornerstone document.
+def _is_cornerstone_source(
+    job: Job, meta: dict[str, Any], text: str
+) -> tuple[bool, bool]:
+    """Return ``(is_cornerstone, via_size_fallback)`` for this source.
 
     Primary signal: the latest persisted plan's ``cornerstone_url`` matches
-    the source's URL (after light normalization). Fallback: the source's
-    body exceeds :data:`_CORNERSTONE_FALLBACK_MIN_CHARS`, which catches
-    runs whose plans pre-date #177 — better to over-trigger here than to
-    cap a 920-page document at 8 findings because the planner forgot to
-    set the marker.
+    the source's URL (after light normalization).
+
+    Fallback (issue #189): a source whose ``source_kind == "pdf"`` and whose
+    body exceeds :data:`_CORNERSTONE_FALLBACK_MIN_CHARS` is treated as the
+    cornerstone even when no planner marker matches. The PDF gate exists
+    because long-form HTML (Wikipedia full-text articles, archive.org
+    transcripts, scraped book chapters) can also exceed 200k chars without
+    being investigation cornerstones, and routing them through the
+    structured-index prompt with the 500-finding ceiling causes the exact
+    report-padding regression #177 was meant to prevent. PDFs of this size
+    are nearly always the kind of monograph/filing the cornerstone path is
+    calibrated for, so the fallback only fires for them.
+
+    The second return value is ``True`` only when the size-fallback path
+    fires (i.e. the planner did not mark the source); the call site uses
+    this to emit a ``cornerstone_fallback_triggered`` event so operators
+    can see the fallback was responsible for the lifted cap.
     """
     plan = _load_latest_plan(job)
     if plan is not None and plan.cornerstone_url:
         norm_plan = _normalize_url_for_compare(plan.cornerstone_url)
         norm_src = _normalize_url_for_compare(meta.get("url"))
         if norm_plan and norm_src and norm_plan == norm_src:
-            return True
-    if isinstance(text, str) and len(text) >= _CORNERSTONE_FALLBACK_MIN_CHARS:
-        return True
-    return False
+            return True, False
+    if (
+        meta.get("source_kind") == "pdf"
+        and isinstance(text, str)
+        and len(text) >= _CORNERSTONE_FALLBACK_MIN_CHARS
+    ):
+        return True, True
+    return False, False
 
 
 _YAML_FENCE_RE = re.compile(r"```(?:yaml|yml)?\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
@@ -923,11 +942,24 @@ async def _run_extract_findings(
 
     sub_question = payload.get("sub_question") or job.goal
 
-    is_cornerstone = _is_cornerstone_source(job, meta, text)
+    is_cornerstone, via_size_fallback = _is_cornerstone_source(job, meta, text)
     if is_cornerstone:
         prompt_name = "researcher_cornerstone"
         text_limit = _CORNERSTONE_EXTRACT_TEXT_LIMIT
         findings_limit = _CORNERSTONE_FINDINGS_PER_SOURCE_LIMIT
+        if via_size_fallback:
+            emit(
+                job,
+                "WARN",
+                "loop",
+                "cornerstone_fallback_triggered",
+                {
+                    "source_id": source_id,
+                    "url": meta.get("url"),
+                    "source_kind": meta.get("source_kind"),
+                    "cleaned_chars": len(text),
+                },
+            )
         emit(
             job,
             "INFO",
