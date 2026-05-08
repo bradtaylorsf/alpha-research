@@ -10,15 +10,15 @@ Repo for an **autonomous overnight investigative research agent** that runs on a
 - CLI: **Typer** (commands) + **Rich** (live progress) + **Questionary** (interactive intake); entry point `research = "research_agent.cli:app"`
 - Storage: **SQLite** (WAL mode) at `data/index.sqlite` for the cross-job index/queue/checkpoints/events; **markdown + JSON sidecars** for per-job content
 - Model providers: **LM Studio** at `http://localhost:1234/v1` (local, MLX) and **OpenRouter** at `https://openrouter.ai/api/v1` (cloud synthesis)
-- Sources (in-tree connectors, all free / public): **Playwright**-driven web search and per-source recipes (`tools/browser.py`); `httpx` + `trafilatura` + `readability-lxml` (`web_fetch`); `arxiv` + `feedparser` (`arxiv_tool`, `news`); `waybackpy` (`archive`); local PDFs/notes via `pypdf` + `unstructured` (`local_corpus`, `pdf`, `ocr`); GitHub via the operator's `gh` CLI; plus public-records and disclosure connectors (EDGAR, FEC, USASpending, FedRegister, Congress, CourtListener, GDELT, Scholar, OpenCorporates, Sanctions, LDA, SoS, BBB, Nonprofits, LittleSis, CalAccess, Licensing, LinkedIn-via-browser, Reddit-via-browser, YouTube, audio)
-- Package manager: **uv** (lockfile committed; `.venv/`, ruff/mypy caches gitignored). `uv sync` installs the `dev` group automatically; tests run via `uv run pytest` (wrapped by `scripts/test.sh` for alpha-loop preflight tolerance)
+- Sources (in-tree connectors, all free / public): **Playwright**-driven web search and per-source recipes (`tools/browser.py`); `httpx` + `trafilatura` + `readability-lxml` (`web_fetch`); `arxiv` + `feedparser` (`arxiv_tool`, `news`); `waybackpy` (`archive`); local PDFs/notes via `pypdf` + `pdfplumber` + `unstructured` (`local_corpus`, `pdf`, `ocr`); audio via `pywhispercpp` / `mlx-whisper` (`audio`); GitHub via the operator's `gh` CLI; plus public-records and disclosure connectors (EDGAR, FEC, USASpending, FedRegister, Congress, CourtListener, GDELT, Scholar, OpenCorporates, Sanctions, LDA, SoS, BBB, Nonprofits, LittleSis, CalAccess, Licensing, LinkedIn-via-browser, Reddit-via-browser, YouTube)
+- Package manager: **uv** (lockfile committed; `.venv/`, ruff/mypy caches gitignored). `uv sync` installs the `dev` group automatically (PEP 735); tests run via `uv run pytest` (wrapped by `scripts/test.sh` for alpha-loop preflight tolerance)
 
 ## Directory Structure
 - `ai-agent-investigation-playbook.md` — investigative patterns (the "what to do" library)
 - `ai-agent-research-setup.md` — strategic architecture and agent roster
 - `research-agent-implementation-guide.md` — **the v1 build spec; treat as source of truth for code structure and decisions**
 - `CLAUDE.md` — how alpha-loop drives planning/build/PR flow in this repo
-- `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` — public-facing docs (the repo is open-source)
+- `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` — public-facing docs (the repo is open-source)
 - `.alpha-loop.yaml` — loop config (repo, label, base branch, test/dev/setup commands)
 - `pyproject.toml`, `uv.lock` — Python project + locked deps
 - `src/research_agent/`
@@ -29,7 +29,7 @@ Repo for an **autonomous overnight investigative research agent** that runs on a
   - `storage/` — `db.py`, `jobs.py`, `markdown.py`, `sources.py`, `tasks.py`, `search.py`, `export.py`, `disk_cap.py`
   - `observability/events.py` — JSONL + SQLite event mirror
   - `ui/render.py` — Rich live-progress rendering (TUI/web UI deferred)
-  - `prompts/` — agent-persona templates as markdown (`planner.md`, `researcher.md`, `critic.md`, `synthesizer.md`, `intake_followup.md`, `followup_recipes.md`, `paid_unblock_recipes.md`); loaded via `prompts/loader.py`, packaged via `[tool.setuptools.package-data]`
+  - `prompts/` — agent-persona templates as markdown (`planner.md`, `researcher.md`, `researcher_cornerstone.md`, `critic.md`, `synthesizer.md`, `intake_followup.md`, `followup_recipes.md`, `paid_unblock_recipes.md`); loaded via `prompts/loader.py`, packaged via `[tool.setuptools.package-data]`
 - `config/` — `default.yaml`, `models.yaml` (tier→model routing), `models.local.yaml` (local override), `sources.yaml`
 - `tests/` — mirrors `src/research_agent/` layout; `tests/fixtures/`, `tests/integration/`
 - `docs/API_KEYS.md` — operator setup notes for model/data provider keys
