@@ -239,6 +239,102 @@ def _load_latest_critique(job: Job) -> str | None:
     return md_path.read_text(encoding="utf-8")
 
 
+_DEPARTMENT_ALIASES: list[tuple[str, list[str]]] = [
+    ("DOJ", ["DOJ", "Department of Justice", "Justice Department", "Justice"]),
+    (
+        "HHS",
+        [
+            "HHS",
+            "Department of Health and Human Services",
+            "Health and Human Services",
+            "Department of Health",
+            "Health Department",
+            "FDA",
+            "Food and Drug Administration",
+        ],
+    ),
+    (
+        "DOD",
+        ["DOD", "Department of Defense", "Defense Department", "Pentagon", "Defense"],
+    ),
+    ("DHS", ["DHS", "Department of Homeland Security", "Homeland Security"]),
+    (
+        "Education",
+        ["Department of Education", "Education Department"],
+    ),
+    (
+        "Commerce",
+        ["Department of Commerce", "Commerce Department", "NOAA"],
+    ),
+    (
+        "Treasury",
+        ["Department of the Treasury", "Treasury Department", "Treasury"],
+    ),
+    ("State", ["Department of State", "State Department"]),
+    (
+        "USDA",
+        ["USDA", "Department of Agriculture", "Agriculture Department"],
+    ),
+    ("EPA", ["EPA", "Environmental Protection Agency"]),
+    (
+        "VA",
+        ["Department of Veterans Affairs", "Veterans Affairs", "Veterans"],
+    ),
+    ("HUD", ["HUD", "Housing and Urban Development"]),
+    (
+        "Labor",
+        ["Department of Labor", "Labor Department", "DOL"],
+    ),
+    (
+        "Interior",
+        ["Department of the Interior", "Interior Department"],
+    ),
+    ("OPM", ["OPM", "Office of Personnel Management", "Personnel"]),
+]
+
+
+_DEPARTMENT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (
+        canonical,
+        re.compile(
+            r"\b(?:" + "|".join(re.escape(a) for a in aliases) + r")\b",
+            re.IGNORECASE,
+        ),
+    )
+    for canonical, aliases in _DEPARTMENT_ALIASES
+]
+
+
+def _compute_department_coverage(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Scan finding ``claim`` text for federal department mentions.
+
+    Returns a list of ``{"department": <canonical>, "count": <n>}`` ranked
+    high→low by count (canonical name as a stable tiebreaker). Each finding
+    contributes at most one increment per department even if multiple
+    aliases for that department appear in its claim text. The result feeds
+    the synthesizer prompt as a structural hint so it can enumerate the
+    Departmental Policy Tracker by data rather than by template.
+    """
+    counts: dict[str, int] = {}
+    for f in findings:
+        claim = f.get("claim", "")
+        if not isinstance(claim, str) or not claim:
+            continue
+        seen_in_finding: set[str] = set()
+        for canonical, pattern in _DEPARTMENT_PATTERNS:
+            if canonical in seen_in_finding:
+                continue
+            if pattern.search(claim):
+                seen_in_finding.add(canonical)
+        for c in seen_in_finding:
+            counts[c] = counts.get(c, 0) + 1
+
+    return sorted(
+        [{"department": d, "count": c} for d, c in counts.items()],
+        key=lambda item: (-int(item["count"]), str(item["department"])),
+    )
+
+
 def _build_context(
     *,
     goal: str,
@@ -263,6 +359,7 @@ def _build_context(
         "critique": critique,
         "followup_recipes": followup_recipes,
         "paid_unblock_recipes": paid_unblock_recipes,
+        "department_coverage": _compute_department_coverage(findings),
     }
     if final:
         payload["final"] = True
