@@ -36,6 +36,7 @@ import httpx
 import trafilatura
 
 from research_agent import config
+from research_agent.tools._errors import MissingCredentialError
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ def _resolve_token() -> str:
     """
     token = config.get("COURTLISTENER_API_TOKEN") or ""
     if not token.strip():
-        raise RuntimeError(
+        raise MissingCredentialError(
             "CourtListener requires an API token. Sign up at "
             "https://www.courtlistener.com/help/api/rest/ and set "
             "COURTLISTENER_API_TOKEN in your .env."

@@ -35,6 +35,7 @@ import httpx
 import trafilatura
 
 from research_agent import config
+from research_agent.tools._errors import MissingCredentialError
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,7 @@ def _resolve_user_agent() -> str:
     """
     ua = config.get("RESEARCH_USER_AGENT") or ""
     if "@" not in ua:
-        raise RuntimeError(
+        raise MissingCredentialError(
             "SEC EDGAR requires a contact email in the User-Agent. "
             "Set RESEARCH_USER_AGENT in your .env to e.g. "
             '"research-agent your-name@example.com".'
