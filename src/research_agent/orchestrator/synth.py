@@ -31,6 +31,7 @@ import json
 import logging
 import re
 import sqlite3
+from datetime import UTC, datetime
 from importlib.resources import files
 from typing import TYPE_CHECKING, Any
 
@@ -75,9 +76,7 @@ def _load_followup_recipes() -> str:
     if _FOLLOWUP_RECIPES is not None:
         return _FOLLOWUP_RECIPES
     try:
-        body = (files("research_agent.prompts") / "followup_recipes.md").read_text(
-            encoding="utf-8"
-        )
+        body = (files("research_agent.prompts") / "followup_recipes.md").read_text(encoding="utf-8")
     except (FileNotFoundError, OSError) as exc:
         if not _FOLLOWUP_RECIPES_WARN_LOGGED:
             logger.warning("synth: followup_recipes.md unavailable: %s", exc)
@@ -107,6 +106,7 @@ def _load_paid_unblock_recipes() -> str:
         body = ""
     _PAID_UNBLOCK_RECIPES = body
     return body
+
 
 _BUDGET_STUB_REPORT = (
     "# Report (truncated)\n\n"
@@ -255,8 +255,7 @@ def _build_context(
         "goal": goal,
         "scope_class": str(plan.scope_class) if plan.scope_class else None,
         "subgoals": [
-            {"id": sg.id, "description": sg.description, "done": sg.done}
-            for sg in plan.subgoals
+            {"id": sg.id, "description": sg.description, "done": sg.done} for sg in plan.subgoals
         ],
         "findings": findings,
         "sources": {str(k): v for k, v in sources.items()},
@@ -270,9 +269,7 @@ def _build_context(
     return json.dumps(payload, sort_keys=True, default=str)
 
 
-_SUBGOAL_STATUS_FENCE_RE = re.compile(
-    r"```[ \t]*json[ \t]*\n(.*?)\n```\s*$", re.DOTALL
-)
+_SUBGOAL_STATUS_FENCE_RE = re.compile(r"```[ \t]*json[ \t]*\n(.*?)\n```\s*$", re.DOTALL)
 
 
 def _extract_subgoal_status(
@@ -343,6 +340,106 @@ def _apply_subgoal_status(
     from research_agent.orchestrator import plan as _plan_mod
 
     _plan_mod.update_subgoal_done(job, status_map)
+
+
+_CITATION_RE = re.compile(r"\[(\d+(?:,\s*\d+)*)\]")
+_SOURCES_HEADING_RE = re.compile(r"^##\s+Sources\s*$", re.MULTILINE)
+_NUMBERED_LINE_RE = re.compile(r"^(\d+)\.\s", re.MULTILINE)
+
+
+def _format_source_line(sid: int, src: dict[str, Any]) -> str:
+    """Render the canonical synthesizer Sources-section line shape (issue #207)."""
+    url = src.get("url") or "(no url)"
+    title = src.get("title") or "(untitled)"
+    fetched_at = src.get("fetched_at")
+    if fetched_at is None:
+        date_str = "unknown"
+    else:
+        date_str = datetime.fromtimestamp(int(fetched_at), tz=UTC).strftime("%Y-%m-%d")
+    return f'{sid}. {url} — "{title}" (retrieved {date_str})'
+
+
+def _reconcile_sources(
+    job: Job,
+    md: str,
+    sources_by_id: dict[int, dict[str, Any]],
+) -> str:
+    """Append inline-cited source IDs that the model dropped from ``## Sources``.
+
+    Issue #207: synthesizer often emits a curated Sources list that is a
+    strict subset of the IDs cited inline. Parse every ``[N]`` (and grouped
+    ``[N, M]``) citation in the body, parse the IDs the model enumerated
+    under the trailing ``## Sources`` heading, and append any missing ones
+    using the canonical row shape so a reader can resolve every cited ID.
+
+    Emits a ``source_list_reconciled`` INFO event whenever any inline-cited
+    ID was missing from the enumerated section, recording both the IDs we
+    appended (``added``) and any IDs we couldn't resolve against
+    ``sources_by_id`` (``unresolved``).
+    """
+    headings = list(_SOURCES_HEADING_RE.finditer(md))
+    if headings:
+        last = headings[-1]
+        body_text = md[: last.start()]
+        sources_text = md[last.start() :]
+    else:
+        body_text = md
+        sources_text = ""
+
+    cited_in_body: list[int] = []
+    seen: set[int] = set()
+    for match in _CITATION_RE.finditer(body_text):
+        for token in match.group(1).split(","):
+            try:
+                sid = int(token.strip())
+            except ValueError:
+                continue
+            if sid not in seen:
+                seen.add(sid)
+                cited_in_body.append(sid)
+
+    enumerated: set[int] = set()
+    for match in _NUMBERED_LINE_RE.finditer(sources_text):
+        try:
+            enumerated.add(int(match.group(1)))
+        except ValueError:
+            continue
+
+    missing = [sid for sid in cited_in_body if sid not in enumerated]
+    if not missing:
+        return md
+
+    added: list[int] = []
+    unresolved: list[int] = []
+    new_lines: list[str] = []
+    for sid in missing:
+        src = sources_by_id.get(sid)
+        if src is None:
+            unresolved.append(sid)
+            continue
+        added.append(sid)
+        new_lines.append(_format_source_line(sid, src))
+
+    emit(
+        job,
+        "INFO",
+        "synth",
+        "source_list_reconciled",
+        {
+            "added": added,
+            "unresolved": unresolved,
+            "already_listed": len(enumerated),
+            "cited_total": len(cited_in_body),
+        },
+    )
+
+    if not new_lines:
+        return md
+
+    suffix = "\n".join(new_lines) + "\n"
+    if md.endswith("\n"):
+        return md + suffix
+    return md + "\n" + suffix
 
 
 async def _run_synth(
@@ -436,6 +533,7 @@ async def _do_synthesis(
     model_name = _model_name_for(router, used_tier)
 
     stripped_md, status_map = _extract_subgoal_status(job, content)
+    stripped_md = _reconcile_sources(job, stripped_md, sources)
 
     version = write_synthesis(job, stripped_md, model=model_name, cost_usd=cost_val)
     synth_md = (job.root / f"synthesis/{version:04d}.md").read_text(encoding="utf-8")
@@ -749,6 +847,7 @@ async def final_synthesis_after_cap(
     model_name = _model_name_for(router, fallback_tier)
 
     stripped_md, status_map = _extract_subgoal_status(job, content)
+    stripped_md = _reconcile_sources(job, stripped_md, sources)
 
     version = write_synthesis(job, stripped_md, model=model_name, cost_usd=cost_val)
     synth_md = (job.root / f"synthesis/{version:04d}.md").read_text(encoding="utf-8")
