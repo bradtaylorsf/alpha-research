@@ -51,4 +51,4 @@ Each `SearchResult` carries `url`, `title`, `snippet`, `published_at` (introduce
 
 ## Auth
 
-Shared `DATA_GOV_API_KEY` (also used by `fec`). Loud failure if unset.
+Shared `DATA_GOV_API_KEY` (also used by `fec`). When unset, the connector logs a warning and falls back to `DEMO_KEY` (≈40 req/hr per IP — fine for `_smoke-tool`, will rate-limit any real workload). Sign up at https://api.data.gov/signup/ for the 5,000 req/hr authenticated tier.
