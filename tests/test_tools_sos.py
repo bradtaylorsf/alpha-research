@@ -30,6 +30,8 @@ class _FakeLocator:
         raise_on_locator: bool = False,
         raise_on_all: bool = False,
         raise_on_wait_for: bool = False,
+        detach_fill_attempts: int = 0,
+        detach_click_attempts: int = 0,
     ) -> None:
         self._text = text
         self._attrs = attrs or {}
@@ -40,6 +42,12 @@ class _FakeLocator:
         self._raise_on_locator = raise_on_locator
         self._raise_on_all = raise_on_all
         self._raise_on_wait_for = raise_on_wait_for
+        # Number of remaining ``fill``/``click`` calls that should raise a
+        # Playwright-style "element was detached from the DOM" error before
+        # succeeding. ``-1`` means "always fail" so we can drive the evaluate
+        # fallback path without a finite countdown.
+        self._detach_fill_attempts = detach_fill_attempts
+        self._detach_click_attempts = detach_click_attempts
         self.fill_calls: list[str] = []
         self.click_calls: int = 0
         self.wait_for_calls: int = 0
@@ -61,11 +69,23 @@ class _FakeLocator:
 
     async def fill(self, value: str) -> None:
         self.fill_calls.append(value)
+        if self._detach_fill_attempts != 0:
+            if self._detach_fill_attempts > 0:
+                self._detach_fill_attempts -= 1
+            raise RuntimeError(
+                "Locator.fill: element was detached from the DOM, retrying"
+            )
         if self._on_fill is not None:
             self._on_fill(value)
 
     async def click(self) -> None:
         self.click_calls += 1
+        if self._detach_click_attempts != 0:
+            if self._detach_click_attempts > 0:
+                self._detach_click_attempts -= 1
+            raise RuntimeError(
+                "Locator.click: element is not attached to the DOM"
+            )
         if self._on_click is not None:
             self._on_click()
 
@@ -86,6 +106,7 @@ class _FakePage:
         self.closed = False
         self.screenshots: list[str] = []
         self.locator_calls: list[str] = []
+        self.load_state_calls: list[str] = []
 
     def locator(self, selector: str) -> _FakeLocator:
         self.locator_calls.append(selector)
@@ -96,6 +117,16 @@ class _FakePage:
 
     async def screenshot(self, *, path: str) -> None:
         self.screenshots.append(path)
+
+    async def wait_for_load_state(
+        self, state: str = "load", *, timeout: int = 0  # noqa: ARG002
+    ) -> None:
+        self.load_state_calls.append(state)
+
+    async def evaluate(self, script: str, arg: Any = None) -> Any:  # noqa: ARG002
+        # Default evaluate is a no-op; tests that exercise the fallback path
+        # monkeypatch this with an AsyncMock so they can assert the call.
+        return True
 
 
 class _FakeContext:
@@ -383,6 +414,122 @@ async def test_search_respects_max_results(monkeypatch):
 
     results = await sos.search("anything", state="CA", max_results=3)
     assert len(results) == 3
+
+
+async def test_search_recovers_when_input_detaches_between_query_and_fill(
+    monkeypatch,
+):
+    """Regression for issue #191: bizfileonline re-renders the React tree
+    between locator query and fill, detaching the handle. ``_fill_with_retry``
+    should re-resolve and succeed without a diagnostic-screenshot bail-out.
+    """
+    recipe = sos._STATE_RECIPES["CA"]
+    rows = [
+        _build_row(
+            name="SBI BUILDERS, LLC",
+            entity_number="201234567890",
+            entity_type="Limited Liability Company",
+            status="Active",
+            formed="2012-03-15",
+            registered_agent="Jane Q Agent",
+        ),
+    ]
+    flaky_input = _FakeLocator(detach_fill_attempts=2)  # fail twice, then succeed
+    page = _FakePage(
+        {
+            recipe["query_input"]: flaky_input,
+            recipe["submit_button"]: _FakeLocator(),
+            recipe["row_selector"]: _FakeLocator(items=rows),
+        }
+    )
+    _stub_browser(monkeypatch, page)
+
+    results = await sos.search("SBI Builders", state="CA")
+
+    assert len(results) == 1
+    assert results[0].title == "SBI BUILDERS, LLC"
+    # Fake recorded three fill attempts: two raised "detached", the third won.
+    assert len(flaky_input.fill_calls) == 3
+    assert flaky_input.fill_calls == ["SBI Builders"] * 3
+    # No diagnostic screenshot — the connector recovered cleanly.
+    assert page.screenshots == []
+
+
+async def test_search_falls_back_to_evaluate_when_fill_keeps_detaching(
+    monkeypatch,
+):
+    """If every retry loses the race, ``_fill_with_retry`` must fall back to
+    ``page.evaluate`` setting ``.value`` and dispatching native input/change
+    events — the documented escape hatch for SPA forms.
+    """
+    recipe = sos._STATE_RECIPES["CA"]
+    rows = [
+        _build_row(
+            name="SBI BUILDERS, LLC",
+            entity_number="201234567890",
+            entity_type="Limited Liability Company",
+            status="Active",
+            formed="2012-03-15",
+            registered_agent="Jane Q Agent",
+        ),
+    ]
+    always_detach_input = _FakeLocator(detach_fill_attempts=-1)  # always fails
+    page = _FakePage(
+        {
+            recipe["query_input"]: always_detach_input,
+            recipe["submit_button"]: _FakeLocator(),
+            recipe["row_selector"]: _FakeLocator(items=rows),
+        }
+    )
+    eval_mock = AsyncMock(return_value=True)
+    page.evaluate = eval_mock
+    _stub_browser(monkeypatch, page)
+
+    results = await sos.search("SBI Builders", state="CA")
+
+    assert eval_mock.called, "expected evaluate fallback after retries exhausted"
+    # First positional call was the fill fallback (script + [selector, value]).
+    fill_call = eval_mock.call_args_list[0]
+    script, arg = fill_call.args
+    assert "dispatchEvent" in script
+    assert "input" in script and "change" in script
+    assert arg == [recipe["query_input"], "SBI Builders"]
+    # Three locator-fill attempts before the evaluate fallback fired.
+    assert len(always_detach_input.fill_calls) == 3
+    # Search still produced rows because the evaluate path landed the value.
+    assert len(results) == 1
+    assert results[0].title == "SBI BUILDERS, LLC"
+
+
+async def test_search_recovers_when_submit_button_detaches(monkeypatch):
+    """Submit click is wrapped in the same retry helper — a detached click
+    handle on the first attempt should not abort the search.
+    """
+    recipe = sos._STATE_RECIPES["CA"]
+    rows = [
+        _build_row(
+            name="SBI BUILDERS, LLC",
+            entity_number="201234567890",
+            entity_type="Limited Liability Company",
+            status="Active",
+            formed="2012-03-15",
+        ),
+    ]
+    flaky_button = _FakeLocator(detach_click_attempts=1)  # fails once, then succeeds
+    page = _FakePage(
+        {
+            recipe["query_input"]: _FakeLocator(),
+            recipe["submit_button"]: flaky_button,
+            recipe["row_selector"]: _FakeLocator(items=rows),
+        }
+    )
+    _stub_browser(monkeypatch, page)
+
+    results = await sos.search("SBI Builders", state="CA")
+
+    assert len(results) == 1
+    assert flaky_button.click_calls == 2
+    assert page.screenshots == []
 
 
 async def test_search_returns_empty_when_rows_never_render(
