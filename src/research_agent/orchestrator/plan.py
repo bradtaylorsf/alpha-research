@@ -512,11 +512,14 @@ async def tactical_replan(
     next_version = plan.version + 1
 
     # issue #176: bound the payload regardless of caller. recent_results is
-    # truncated to the last MAX_RECENT_RESULTS_FOR_REPLAN entries and each is
+    # truncated to the newest MAX_RECENT_RESULTS_FOR_REPLAN entries and each is
     # replaced by a compact summary; older results are already reflected in
     # the running plan + findings so dropping them is safe.
+    # Contract (issue #188): ``recent_results`` arrives newest-first (DESC) per
+    # ``_load_recent_task_results`` (loop.py ORDER BY id DESC), so a head slice
+    # keeps the newest entries.
     original_len = len(recent_results)
-    tail = recent_results[-MAX_RECENT_RESULTS_FOR_REPLAN:]
+    tail = recent_results[:MAX_RECENT_RESULTS_FOR_REPLAN]
     summarized = [_summarize_recent_result(r) for r in tail]
 
     payload: dict[str, Any] = {
