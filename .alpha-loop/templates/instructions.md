@@ -25,12 +25,12 @@ Repo for an **autonomous overnight investigative research agent** that runs on a
   - `cli.py`, `daemon.py`, `intake.py`, `doctor.py`, `config.py`, `__main__.py` — top-level CLI surface and process entry points
   - `orchestrator/` — `loop.py`, `plan.py`, `synth.py`, `critique.py`, `checkpoint.py`, `errors.py`
   - `llm/` — `router.py` (tier→provider), `budgets.py` (cost cap), `cache.py`, `smoke.py`
-  - `tools/` — `browser.py`, `web_search.py`, `web_fetch.py`, plus per-source connectors (`news`, `reddit`, `arxiv_tool`, `archive`, `local_corpus`, `models`, `pdf`, `ocr`, `audio`, `youtube`, `linkedin`, `scholar`, `gdelt`, and the public-records/disclosure family: `edgar`, `fec`, `usaspending`, `fedregister`, `congress`, `courtlistener`, `opencorporates`, `sanctions`, `lda`, `sos`, `bbb`, `nonprofits`, `littlesis`, `calaccess`, `licensing`)
+  - `tools/` — `browser.py`, `web_search.py`, `web_fetch.py`, plus per-source connectors (`news`, `reddit`, `arxiv_tool`, `archive`, `local_corpus`, `models`, `pdf`, `ocr`, `audio`, `youtube`, `linkedin`, `scholar`, `gdelt`, and the public-records/disclosure family: `edgar`, `fec`, `usaspending`, `fedregister`, `congress`, `courtlistener`, `opencorporates`, `sanctions`, `lda`, `sos`, `bbb`, `nonprofits`, `littlesis`, `calaccess`, `licensing`); shared error helpers in `_errors.py`
   - `storage/` — `db.py`, `jobs.py`, `markdown.py`, `sources.py`, `tasks.py`, `search.py`, `export.py`, `disk_cap.py`
   - `observability/events.py` — JSONL + SQLite event mirror
   - `ui/render.py` — Rich live-progress rendering (TUI/web UI deferred)
   - `prompts/` — agent-persona templates as markdown (`planner.md`, `researcher.md`, `researcher_cornerstone.md`, `critic.md`, `synthesizer.md`, `intake_followup.md`, `followup_recipes.md`, `paid_unblock_recipes.md`); loaded via `prompts/loader.py`, packaged via `[tool.setuptools.package-data]`
-- `config/` — `default.yaml`, `models.yaml` (tier→model routing), `models.local.yaml` (local override), `sources.yaml`
+- `config/` — `default.yaml`, `models.yaml` (tier→model routing), `models.local.yaml` (local override), `sources.yaml`, `url_blocklist.yaml`
 - `tests/` — mirrors `src/research_agent/` layout; `tests/fixtures/`, `tests/integration/`
 - `docs/API_KEYS.md` — operator setup notes for model/data provider keys
 - `scripts/test.sh` — tolerant `uv run pytest` wrapper used by alpha-loop preflight
