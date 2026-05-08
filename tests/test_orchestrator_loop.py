@@ -1081,6 +1081,11 @@ async def test_drain_replan_respects_cap(
     _seed_tasks(job, ["web_search"])
 
     monkeypatch.setattr("research_agent.orchestrator.loop.MAX_DRAIN_REPLANS", 3)
+    # Issue #209 added a finding-floor extension that would otherwise
+    # keep this loop running past the cap when subgoals are unanswered.
+    # Disable the extension here so the test continues to verify the
+    # raw cap-hit path.
+    monkeypatch.setattr("research_agent.orchestrator.loop._FINDING_FLOOR_FALLBACK", 0)
 
     async def fake_tactical_replan(
         job_arg: Job,
@@ -1181,6 +1186,268 @@ async def test_drain_replan_break_on_empty_template(
 
 def test_max_drain_replans_default_is_ten() -> None:
     assert MAX_DRAIN_REPLANS == 10
+
+
+# ---------------------------------------------------------------------------
+# Scope-aware drain-replan cap (issue #209)
+# ---------------------------------------------------------------------------
+
+
+def _scoped_plan(job: Job, scope: ScopeClass | None) -> Plan:
+    p = Plan(
+        version=1,
+        objective="Investigate the target",
+        subgoals=[Subgoal(id=1, description="Gather", done=False)],
+        task_template=[TaskSpec(kind="web_search", payload={"q": "seed"})],
+        expected_iterations=3,
+        scope_class=scope,
+    )
+    write_plan(job, p.model_dump())
+    return p
+
+
+def _drain_replan_cap_hit_payload(db_path: Path, job_id: str) -> dict[str, Any] | None:
+    import json as _json
+
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM events WHERE job_id = ? AND kind = 'warning'",
+            (job_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    for r in rows:
+        payload = _json.loads(r["payload_json"])
+        if payload.get("drain_replan_cap_hit") is True:
+            return payload
+    return None
+
+
+def _make_constant_replan(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_tactical_replan(
+        job_arg: Job,
+        prior_plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
+    ) -> Plan:
+        next_version = prior_plan.version + 1
+        template = [TaskSpec(kind="web_search", payload={"q": "more"})]
+        new = Plan(
+            version=next_version,
+            objective=prior_plan.objective,
+            subgoals=prior_plan.subgoals,
+            task_template=template,
+            expected_iterations=prior_plan.expected_iterations,
+            scope_class=prior_plan.scope_class,
+        )
+        write_plan(job_arg, new.model_dump())
+        enqueue(job_arg, list(template), next_version)
+        return new
+
+    monkeypatch.setattr(plan_module, "tactical_replan", fake_tactical_replan)
+
+
+@pytest.mark.asyncio
+async def test_drain_replan_cap_scales_with_scope_broad(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``broad`` plan must get a higher cap than the medium default."""
+    plan = _scoped_plan(job, "broad")
+    _seed_tasks(job, ["web_search"])
+
+    # Override the broad cap to a tiny value so the test runs fast — we
+    # only care that ``_resolve_drain_cap`` reads the broad row at all.
+    monkeypatch.setitem(
+        __import__(
+            "research_agent.orchestrator.loop", fromlist=["_MAX_DRAIN_REPLANS_BY_SCOPE"]
+        )._MAX_DRAIN_REPLANS_BY_SCOPE,
+        "broad",
+        4,
+    )
+    monkeypatch.setattr("research_agent.orchestrator.loop._FINDING_FLOOR_FALLBACK", 0)
+    monkeypatch.setitem(
+        __import__(
+            "research_agent.orchestrator.loop", fromlist=["_FINDING_FLOOR_BY_SCOPE"]
+        )._FINDING_FLOOR_BY_SCOPE,
+        "broad",
+        0,
+    )
+    _make_constant_replan(monkeypatch)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["drain_replans"] == 4
+    payload = _drain_replan_cap_hit_payload(db_path, job.id)
+    assert payload is not None
+    assert payload["cap"] == 4
+    assert payload["scope_class"] == "broad"
+    assert payload["drain_replans"] == 4
+
+
+@pytest.mark.asyncio
+async def test_drain_replan_cap_scales_with_scope_narrow(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``narrow`` plan caps replans at the narrow row of the map."""
+    plan = _scoped_plan(job, "narrow")
+    _seed_tasks(job, ["web_search"])
+
+    monkeypatch.setattr("research_agent.orchestrator.loop._FINDING_FLOOR_FALLBACK", 0)
+    monkeypatch.setitem(
+        __import__(
+            "research_agent.orchestrator.loop", fromlist=["_FINDING_FLOOR_BY_SCOPE"]
+        )._FINDING_FLOOR_BY_SCOPE,
+        "narrow",
+        0,
+    )
+    _make_constant_replan(monkeypatch)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["drain_replans"] == 5
+    payload = _drain_replan_cap_hit_payload(db_path, job.id)
+    assert payload is not None
+    assert payload["cap"] == 5
+    assert payload["scope_class"] == "narrow"
+
+
+@pytest.mark.asyncio
+async def test_drain_replan_cap_default_for_no_scope(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plan with ``scope_class=None`` uses the live ``MAX_DRAIN_REPLANS``."""
+    _seed_tasks(job, ["web_search"])
+
+    monkeypatch.setattr("research_agent.orchestrator.loop.MAX_DRAIN_REPLANS", 2)
+    monkeypatch.setattr("research_agent.orchestrator.loop._FINDING_FLOOR_FALLBACK", 0)
+    _make_constant_replan(monkeypatch)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["drain_replans"] == 2
+    payload = _drain_replan_cap_hit_payload(db_path, job.id)
+    assert payload is not None
+    assert payload["cap"] == 2
+    assert payload["scope_class"] is None
+
+
+@pytest.mark.asyncio
+async def test_cap_diagnostic_event_emitted_on_cap_hit(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the cap fires the loop emits a structured ``cap_diagnostic`` event."""
+    _seed_tasks(job, ["web_search"])
+
+    monkeypatch.setattr("research_agent.orchestrator.loop.MAX_DRAIN_REPLANS", 2)
+    monkeypatch.setattr("research_agent.orchestrator.loop._FINDING_FLOOR_FALLBACK", 0)
+    _make_constant_replan(monkeypatch)
+
+    await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    import json as _json
+
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM events WHERE job_id = ? AND kind = 'cap_diagnostic'",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    payload = _json.loads(rows[0]["payload_json"])
+    assert "under_served_subgoals" in payload
+    assert "unexercised_connectors" in payload
+    assert "next_plausible_searches" in payload
+    assert payload["cap"] == 2
+    # The seeded plan's only subgoal stayed open, so it should appear.
+    assert any(sg["id"] == 1 for sg in payload["under_served_subgoals"])
+
+
+@pytest.mark.asyncio
+async def test_finding_floor_extends_cap_when_subgoals_under_served(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the cap fires but no subgoal is closed, allow ``cap + floor`` replans."""
+    plan = _scoped_plan(job, "medium")
+    _seed_tasks(job, ["web_search"])
+
+    # Tiny cap and small floor for a fast test. Without the floor
+    # extension the loop would stop at drain_replans=2; with it, the loop
+    # is allowed up to 2+2=4 replans before terminating.
+    monkeypatch.setitem(
+        __import__(
+            "research_agent.orchestrator.loop", fromlist=["_MAX_DRAIN_REPLANS_BY_SCOPE"]
+        )._MAX_DRAIN_REPLANS_BY_SCOPE,
+        "medium",
+        2,
+    )
+    monkeypatch.setitem(
+        __import__(
+            "research_agent.orchestrator.loop", fromlist=["_FINDING_FLOOR_BY_SCOPE"]
+        )._FINDING_FLOOR_BY_SCOPE,
+        "medium",
+        2,
+    )
+    _make_constant_replan(monkeypatch)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["drain_replans"] == 4
+    events = _read_event_kinds(db_path, job.id)
+    assert events.count("drain_replan_floor_extension") >= 1
+    payload = _drain_replan_cap_hit_payload(db_path, job.id)
+    assert payload is not None
+    assert payload["cap"] == 2
+    assert payload["drain_replans"] == 4
 
 
 # ---------------------------------------------------------------------------

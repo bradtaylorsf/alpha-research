@@ -45,6 +45,8 @@ EventKind = Literal[
     "critique_done",
     "critique_written",
     "drain_replan",
+    "drain_replan_floor_extension",
+    "cap_diagnostic",
     "replan_triggered",
     "replan_truncated",
     "findings_truncated",
