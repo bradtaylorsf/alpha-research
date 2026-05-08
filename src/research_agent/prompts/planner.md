@@ -34,10 +34,16 @@ the schema below.
 - `task_template`: ordered list of tasks the loop will run. Each task:
   - `kind`: one of these EXACT strings (no others allowed):
     `web_search`, `news_search`, `reddit_search`, `arxiv_search`,
-    `local_corpus_query`. **One narrow exception: `web_fetch` is allowed
-    only as the cornerstone-document fetch — see the "Cornerstone-document
-    pattern" section below.**
-    Do **not** emit any other kind. `extract_findings`,
+    `local_corpus_query`, plus the **direct connector kinds**:
+    `congress_search`, `fec_search`, `edgar_search`,
+    `courtlistener_search`, `fedregister_search`, `lda_search`,
+    `usaspending_search`, `gdelt_search`, `littlesis_search`,
+    `nonprofits_search`, `opencorporates_search`, `sanctions_search`,
+    `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`,
+    `scholar_search`, `linkedin_search`. **One narrow exception:
+    `web_fetch` is allowed only as the cornerstone-document fetch — see
+    the "Cornerstone-document pattern" section below.**
+    Do **not** emit any other kind. `*_fetch`, `extract_findings`,
     `summarize_source`, `synthesize`, and `critique` are valid in the
     schema but MUST NOT appear in your plan — the loop creates them
     automatically.
@@ -58,8 +64,9 @@ the schema below.
 
 You only plan the **search** layer. For each sub-question, emit one or
 more search tasks (`web_search`, `news_search`, `reddit_search`,
-`arxiv_search`, or `local_corpus_query`) with a `sub_question` field in
-the payload. The loop will then:
+`arxiv_search`, `local_corpus_query`, or one of the **direct connector
+kinds** below) with a `sub_question` field in the payload. The loop will
+then:
 
 1. Run your search → get real URLs
 2. Automatically enqueue `web_fetch` for the top hits
@@ -67,8 +74,8 @@ the payload. The loop will then:
    real source rowid + your `sub_question`
 4. Synthesis and critique fire on their own cadence
 
-You do NOT enqueue `web_fetch`, `extract_findings`, `summarize_source`,
-`synthesize`, or `critique`. Trust the loop.
+You do NOT enqueue `web_fetch`, `*_fetch`, `extract_findings`,
+`summarize_source`, `synthesize`, or `critique`. Trust the loop.
 
 ### Query-writing rules — critical
 
@@ -108,35 +115,78 @@ classification, and disciplinary history — before generic web hits.
 The `licensing` connector takes over from there once the URL is in
 hand; the planner only needs to seed the discovery query.
 
-### Connector routing — use `site:` operators to reach authoritative APIs
+### Connector routing — prefer direct connector kinds over `site:`-scoped web search
 
-`web_fetch` host-dispatches the domains below to dedicated connector
-modules — a `site:<domain>` query is the path to the API. Plain
-`web_search` queries hit Brave's general index and miss these
-authoritative sources entirely; many of them are not even crawlable
-without the right URL shape. **Mix `site:`-scoped queries into broad /
-comprehensive plans whenever a subgoal asks about federal records,
-lobbying, campaign finance, court filings, nonprofits, sanctions, or
-licensing** — those signals only show up when the planner names the
-domain.
+For every authoritative source below there are now **two ways** to reach
+it: a direct connector kind that calls the source's structured API, and
+a `site:`-scoped `web_search` fallback that goes through Brave +
+trafilatura. **Prefer the direct connector kind whenever the subject
+matches its domain** — one round trip, structured JSON in (sponsor,
+latest action, vote results, filing metadata, …), no HTML extraction
+loss. `web_search` with a `site:` operator is the documented fallback
+when no direct kind covers the case (or the connector's API key isn't
+configured in this environment).
 
-| Domain | What's there | Example query |
+> Example: prefer `congress_search` with `query: "Inflation Reduction
+> Act"` over `web_search` with `query: "site:congress.gov Inflation
+> Reduction Act"`. The Congress.gov API returns structured sponsor /
+> action / vote JSON in a single round trip; the `site:`-scoped path
+> needs Brave → fetch → trafilatura, drops fields, and may miss recent
+> records that aren't in Brave's index yet.
+
+#### Direct connector kinds
+
+Each kind dispatches to a dedicated `tools/<name>.py` module. Payload
+shape is `{ query: "…", sub_question: "…" }`; a few connectors take
+optional `kind`, `state`, `since`, or `max_results` knobs (noted
+below). The loop turns top hits into `web_fetch` follow-ups exactly as
+it does for `web_search`.
+
+| Kind | What it covers | Optional payload knobs | Example query |
+|---|---|---|---|
+| `congress_search` | Bills, members, committees, hearings, congressional record (Congress.gov v3 API) | `kind: bill\|member\|committee\|hearing\|congressional-record` | `"Inflation Reduction Act"` |
+| `fec_search` | Candidates, committees, schedule A/E filings (OpenFEC) | `kind: candidates\|committees\|schedules/schedule_a\|schedules/schedule_e` | `"Trump 2024" committee` |
+| `edgar_search` | SEC filings (10-K, 10-Q, 8-K, Form 4) — requires `RESEARCH_USER_AGENT` w/ contact email | `form_type: 10-K\|8-K\|...` | `"Cisco" cybersecurity` |
+| `courtlistener_search` | Federal & state court opinions, dockets (RECAP), oral arguments — requires `COURTLISTENER_API_TOKEN` | `kind: opinions\|dockets\|oral_arguments` | `"Schedule F" appellate` |
+| `fedregister_search` | Federal Register rules, proposed rules, agency notices since 1994 (no auth) | `since: YYYY-MM-DD`, `agencies: [...]` | `"Schedule F"` |
+| `lda_search` | Senate Lobbying Disclosure Act filings (registrants, contributions) | `kind: filings\|registrants\|contributions` | `"Heritage Foundation"` |
+| `usaspending_search` | Federal contracts, grants, loans (award-level detail, no auth) | `award_type: contracts\|grants\|loans` | `"Heritage Foundation" contract` |
+| `gdelt_search` | GDELT — Global news event aggregator, no `site:` operator (no auth) | `since: YYYY-MM-DD`, `language: english` | `Project 2025 mainstream coverage` |
+| `littlesis_search` | Power-mapping database — entities, donations, board seats, family ties (lead, not evidence) | `kind: entities\|relationships` | `"Peter Thiel"` |
+| `nonprofits_search` | ProPublica Nonprofit Explorer (Form 990 filings, no auth) | — | `"Heritage Foundation"` |
+| `opencorporates_search` | Global company registry — requires `OPENCORPORATES_API_KEY` | `jurisdiction: us_ca\|gb\|...` | `"Acme Holdings"` |
+| `sanctions_search` | OFAC SDN + UK sanctions lists (local index, no auth) | — | `"Wagner Group"` |
+| `bbb_search` | Better Business Bureau profiles + ratings (Playwright, no auth) | — | `"SBI Builders"` |
+| `licensing_search` | State contractor / licensing-board lookups (Playwright; CA wired, others stubs) | `state: CA\|TX\|FL\|NY` | `"SBI Builders"` |
+| `sos_search` | State Secretary-of-State business entity filings (Playwright; CA wired, others stubs) | `state: CA\|DE\|NV\|...` | `"Acme Corp"` |
+| `calaccess_search` | California Cal-Access campaign finance (Playwright) | `kind: contributions\|independent_expenditures` | `"Newsom"` |
+| `scholar_search` | Google Scholar via SerpAPI — requires `SERPAPI_KEY` | `kind: case_law\|articles` | `"Section 230" appellate` |
+| `linkedin_search` | LinkedIn person/company lookup via Proxycurl or Lix — requires broker key | `kind: person\|company` | `"Sundar Pichai"` |
+
+#### `site:`-scoped fallback (when a direct kind doesn't apply)
+
+If no direct kind matches the subject, or you know the connector's API
+key isn't configured in this environment, fall back to `web_search`
+with a `site:` operator targeting the authoritative domain. The
+`web_fetch` host-dispatcher will still route those URLs to the right
+connector module on the fetch side.
+
+| Domain | Direct kind | Example fallback query |
 |---|---|---|
-| `site:sec.gov` | SEC EDGAR filings (10-K, 10-Q, 8-K, Form 4 insider trades) | `site:sec.gov "Cisco" 8-K cybersecurity` |
-| `site:courtlistener.com` | Federal & state court opinions, dockets (RECAP), oral arguments | `site:courtlistener.com "Schedule F" appellate` |
-| `site:federalregister.gov` | Federal Register rules, proposed rules, agency notices since 1994 | `site:federalregister.gov "Schedule F"` |
-| `site:projects.propublica.org/nonprofits` | ProPublica Nonprofit Explorer (Form 990 filings) | `site:projects.propublica.org/nonprofits "Heritage Foundation"` |
-| `site:fec.gov` | FEC candidate / committee filings, contributions, expenditures | `site:fec.gov "Trump 2024" committee` |
-| `site:congress.gov` | Bills, members, committees, hearings, congressional record | `site:congress.gov "Project 2025"` |
-| `site:lda.senate.gov` | Senate Lobbying Disclosure Act filings (legacy host; `lda.gov` also routes) | `site:lda.senate.gov "Heritage Foundation"` |
-| `site:usaspending.gov` | Federal contracts, grants, loans (award-level detail) | `site:usaspending.gov "Heritage Foundation" contract` |
-| GDELT | Global news event aggregator — **no `site:` operator**; emit a plain `web_search` query and the GDELT connector indexes from there | `Project 2025 mainstream coverage` |
-| `site:littlesis.org` | Power-mapping database — entities, donations, board seats, family ties (lead, not evidence) | `site:littlesis.org "Peter Thiel"` |
-| `site:treasury.gov sanctions` | OFAC sanctions list (SDN, sectoral, country programs) | `site:treasury.gov sanctions "Wagner Group"` |
-| `site:powersearch.sos.ca.gov` | California Cal-Access campaign finance (donors, committees, IEs) | `site:powersearch.sos.ca.gov "Newsom"` |
-| `site:cslb.ca.gov` | California Contractors State License Board profiles, disciplinary history | `site:cslb.ca.gov "SBI Builders"` |
-| `site:bizfileonline.sos.ca.gov` | California Secretary of State business entity filings | `site:bizfileonline.sos.ca.gov "Acme Corp"` |
-| `site:bbb.org` | Better Business Bureau profiles, ratings, complaint counts | `site:bbb.org "SBI Builders"` |
+| `site:sec.gov` | `edgar_search` | `site:sec.gov "Cisco" 8-K cybersecurity` |
+| `site:courtlistener.com` | `courtlistener_search` | `site:courtlistener.com "Schedule F" appellate` |
+| `site:federalregister.gov` | `fedregister_search` | `site:federalregister.gov "Schedule F"` |
+| `site:projects.propublica.org/nonprofits` | `nonprofits_search` | `site:projects.propublica.org/nonprofits "Heritage Foundation"` |
+| `site:fec.gov` | `fec_search` | `site:fec.gov "Trump 2024" committee` |
+| `site:congress.gov` | `congress_search` | `site:congress.gov "Project 2025"` |
+| `site:lda.senate.gov` | `lda_search` | `site:lda.senate.gov "Heritage Foundation"` |
+| `site:usaspending.gov` | `usaspending_search` | `site:usaspending.gov "Heritage Foundation" contract` |
+| `site:littlesis.org` | `littlesis_search` | `site:littlesis.org "Peter Thiel"` |
+| `site:treasury.gov sanctions` | `sanctions_search` | `site:treasury.gov sanctions "Wagner Group"` |
+| `site:powersearch.sos.ca.gov` | `calaccess_search` | `site:powersearch.sos.ca.gov "Newsom"` |
+| `site:cslb.ca.gov` | `licensing_search` (state: CA) | `site:cslb.ca.gov "SBI Builders"` |
+| `site:bizfileonline.sos.ca.gov` | `sos_search` (state: CA) | `site:bizfileonline.sos.ca.gov "Acme Corp"` |
+| `site:bbb.org` | `bbb_search` | `site:bbb.org "SBI Builders"` |
 
 ### Payload shapes
 
@@ -145,6 +195,7 @@ domain.
 - `reddit_search`: `{ query: "…", sub_question: "…" }`
 - `arxiv_search`: `{ query: "…", sub_question: "…", max_results: 10 }`
 - `local_corpus_query`: `{ query: "…", sub_question: "…", top_k: 10 }`
+- direct connector kinds (`congress_search`, `fec_search`, `edgar_search`, `courtlistener_search`, `fedregister_search`, `lda_search`, `usaspending_search`, `gdelt_search`, `littlesis_search`, `nonprofits_search`, `opencorporates_search`, `sanctions_search`, `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`, `scholar_search`, `linkedin_search`): `{ query: "…", sub_question: "…" }` plus the optional knobs noted in the **Direct connector kinds** table above (e.g. `kind`, `state`, `since`, `max_results`).
 
 ### When to use each search
 
@@ -280,13 +331,13 @@ so you can convert high-confidence claims into per-proposal follow-ups.
 2. **For each named subject, emit one or more focused search tasks.** The
    `sub_question` MUST mention the specific name verbatim (e.g.
    `"What is the comment-period status of the WOTUS rulemaking?"`, not
-   `"What EPA rules are pending?"`). Prefer `site:`-scoped queries against
-   the connector roster from the **Connector routing** section above:
-   `site:federalregister.gov`, `site:courtlistener.com`,
-   `site:congress.gov`, `site:sec.gov`,
-   `site:projects.propublica.org/nonprofits`, `site:fec.gov`,
-   `site:lda.senate.gov`, `site:usaspending.gov` — when the subject's
-   shape matches the connector.
+   `"What EPA rules are pending?"`). Prefer the **direct connector kind**
+   when one matches the subject's shape (e.g. `fedregister_search`,
+   `courtlistener_search`, `congress_search`, `edgar_search`,
+   `nonprofits_search`, `fec_search`, `lda_search`, `usaspending_search`,
+   `littlesis_search`, `sanctions_search`) — one round trip, structured
+   JSON. Fall back to `site:`-scoped `web_search` only when no direct
+   kind covers the case.
 3. **Forbidden in replans:** generic umbrella queries that retread v1's
    territory. If the findings already name `WOTUS rulemaking` and
    `Schedule F`, do **NOT** emit `Project 2025 EPA` or `Project 2025
@@ -491,7 +542,13 @@ or by sub-policy is `broad` or `comprehensive`.
 
 - Output ONLY the fenced YAML block. No prose, no preamble, no postscript.
 - Every `kind` MUST be one of: `web_search`, `news_search`, `reddit_search`,
-  `arxiv_search`, `local_corpus_query`. The single exception is
+  `arxiv_search`, `local_corpus_query`, or one of the direct connector
+  kinds (`congress_search`, `fec_search`, `edgar_search`,
+  `courtlistener_search`, `fedregister_search`, `lda_search`,
+  `usaspending_search`, `gdelt_search`, `littlesis_search`,
+  `nonprofits_search`, `opencorporates_search`, `sanctions_search`,
+  `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`,
+  `scholar_search`, `linkedin_search`). The single exception is
   `web_fetch`, allowed only as the cornerstone-document fetch when
   `cornerstone_url` is also set — see the **Cornerstone-document
   pattern** section.

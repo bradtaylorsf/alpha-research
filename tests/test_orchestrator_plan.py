@@ -42,6 +42,28 @@ ALL_SCOPE_CLASSES: tuple[str, ...] = get_args(ScopeClass)
 # ---------------------------------------------------------------------------
 
 
+CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
+    "congress",
+    "fec",
+    "edgar",
+    "courtlistener",
+    "fedregister",
+    "lda",
+    "usaspending",
+    "gdelt",
+    "littlesis",
+    "nonprofits",
+    "opencorporates",
+    "sanctions",
+    "bbb",
+    "licensing",
+    "sos",
+    "calaccess",
+    "scholar",
+    "linkedin",
+)
+
+
 def test_task_kind_covers_expected_set() -> None:
     expected = {
         "web_search",
@@ -58,7 +80,22 @@ def test_task_kind_covers_expected_set() -> None:
         "synthesize",
         "critique",
     }
+    for prefix in CONNECTOR_KIND_PREFIXES:
+        expected.add(f"{prefix}_search")
+        expected.add(f"{prefix}_fetch")
     assert set(ALL_TASK_KINDS) == expected
+
+
+@pytest.mark.parametrize("prefix", CONNECTOR_KIND_PREFIXES)
+def test_task_spec_accepts_connector_search_kind(prefix: str) -> None:
+    spec = TaskSpec(kind=f"{prefix}_search")  # type: ignore[arg-type]
+    assert spec.kind == f"{prefix}_search"
+
+
+@pytest.mark.parametrize("prefix", CONNECTOR_KIND_PREFIXES)
+def test_task_spec_accepts_connector_fetch_kind(prefix: str) -> None:
+    spec = TaskSpec(kind=f"{prefix}_fetch")  # type: ignore[arg-type]
+    assert spec.kind == f"{prefix}_fetch"
 
 
 @pytest.mark.parametrize("kind", ALL_TASK_KINDS)

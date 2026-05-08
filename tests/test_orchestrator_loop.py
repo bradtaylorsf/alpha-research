@@ -368,6 +368,33 @@ def test_module_constants_match_spec() -> None:
     assert RETRY_MAX_ATTEMPTS == 5
 
 
+CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
+    "congress",
+    "fec",
+    "edgar",
+    "courtlistener",
+    "fedregister",
+    "lda",
+    "usaspending",
+    "gdelt",
+    "littlesis",
+    "nonprofits",
+    "opencorporates",
+    "sanctions",
+    "bbb",
+    "licensing",
+    "sos",
+    "calaccess",
+    "scholar",
+    "linkedin",
+)
+
+# Connector module name → ``source_kind`` Literal value. Most connectors
+# match by name; ``edgar`` is the SEC connector so its source_kind is "sec".
+_CONNECTOR_SOURCE_KIND: dict[str, str] = {p: p for p in CONNECTOR_KIND_PREFIXES}
+_CONNECTOR_SOURCE_KIND["edgar"] = "sec"
+
+
 def test_default_handlers_covers_every_task_kind() -> None:
     handlers = default_handlers(router=None)
     expected = {
@@ -385,6 +412,9 @@ def test_default_handlers_covers_every_task_kind() -> None:
         "synthesize",
         "critique",
     }
+    for prefix in CONNECTOR_KIND_PREFIXES:
+        expected.add(f"{prefix}_search")
+        expected.add(f"{prefix}_fetch")
     assert set(handlers.keys()) == expected
 
 
@@ -407,6 +437,208 @@ async def test_default_not_implemented_handler_raises_fatal(
     rows = _read_task_rows(db_path, job.id)
     assert rows[0]["status"] == STATUS_FAILED
     assert "not implemented" in (rows[0]["error"] or "")
+
+
+# ---------------------------------------------------------------------------
+# Issue #175: connector-specific kinds dispatch to tools.<name>.search()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", CONNECTOR_KIND_PREFIXES)
+async def test_connector_search_handler_dispatches_to_module(
+    job: Job, monkeypatch: pytest.MonkeyPatch, prefix: str
+) -> None:
+    """Each ``<prefix>_search`` handler must call ``tools.<prefix>.search`` and
+    expand top hits into ``web_fetch`` follow-ups via the standard helper.
+    """
+    import importlib
+
+    mod = importlib.import_module(f"research_agent.tools.{prefix}")
+    captured: dict[str, Any] = {}
+
+    sk = _CONNECTOR_SOURCE_KIND[prefix]
+
+    async def fake_search(query: str, **kwargs: Any) -> list[SearchResult]:
+        captured["query"] = query
+        captured["kwargs"] = kwargs
+        return [
+            SearchResult(
+                url=f"https://{prefix}.example/1",
+                title="Hit 1",
+                snippet="…",
+                source_kind=sk,  # type: ignore[arg-type]
+            ),
+            SearchResult(
+                url=f"https://{prefix}.example/2",
+                title="Hit 2",
+                snippet="…",
+                source_kind=sk,  # type: ignore[arg-type]
+            ),
+        ]
+
+    monkeypatch.setattr(mod, "search", fake_search)
+
+    handlers = default_handlers(router=None)
+    handler = handlers[f"{prefix}_search"]
+    out = await handler(
+        job,
+        {"kind": f"{prefix}_search", "payload": {"query": "needle", "kind": "x"}},
+    )
+
+    assert captured["query"] == "needle"
+    # ``kind`` is in the passthrough allowlist so it reaches the connector.
+    assert captured["kwargs"].get("kind") == "x"
+    assert isinstance(out, dict)
+    assert "results" in out
+    assert "follow_up_tasks" in out
+    assert len(out["results"]) == 2
+    follow_kinds = {f["kind"] for f in out["follow_up_tasks"]}
+    assert follow_kinds == {"web_fetch"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", CONNECTOR_KIND_PREFIXES)
+async def test_connector_fetch_handler_dispatches_to_module(
+    job: Job, monkeypatch: pytest.MonkeyPatch, prefix: str
+) -> None:
+    """Each ``<prefix>_fetch`` handler must call ``tools.<prefix>.fetch`` and
+    persist the returned :class:`Source` via the shared helper.
+    """
+    import importlib
+    from datetime import datetime, timezone
+
+    from research_agent.tools.models import Source
+
+    mod = importlib.import_module(f"research_agent.tools.{prefix}")
+    captured: dict[str, Any] = {}
+
+    sk = _CONNECTOR_SOURCE_KIND[prefix]
+
+    async def fake_fetch(url: str) -> Source:
+        captured["url"] = url
+        return Source(
+            url=url,
+            title="t",
+            cleaned_text="hello world",
+            fetched_at=datetime.now(tz=timezone.utc),
+            source_kind=sk,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(mod, "fetch", fake_fetch)
+
+    handlers = default_handlers(router=None)
+    handler = handlers[f"{prefix}_fetch"]
+    out = await handler(
+        job,
+        {
+            "kind": f"{prefix}_fetch",
+            "payload": {"url": f"https://{prefix}.example/abc"},
+        },
+    )
+
+    assert captured["url"] == f"https://{prefix}.example/abc"
+    assert isinstance(out, dict)
+    assert "source_id" in out
+    assert isinstance(out["source_id"], int)
+
+
+@pytest.mark.asyncio
+async def test_connector_search_handler_wraps_runtime_error_as_fatal(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a connector raises ``RuntimeError`` (its missing-credential path),
+    the handler must convert it to :class:`FatalError` so the loop marks the
+    task failed cleanly down the documented path rather than relying on the
+    daemon's catch-all guard.
+    """
+    from research_agent.tools import linkedin
+
+    async def fake_search(query: str, **kwargs: Any) -> list[SearchResult]:
+        raise RuntimeError(
+            "linkedin requires LINKEDIN_DATA_API_KEY (or LIX_API_KEY for lix broker)"
+        )
+
+    monkeypatch.setattr(linkedin, "search", fake_search)
+
+    handler = default_handlers(router=None)["linkedin_search"]
+    with pytest.raises(FatalError, match="LINKEDIN_DATA_API_KEY"):
+        await handler(
+            job, {"kind": "linkedin_search", "payload": {"query": "Sundar Pichai"}}
+        )
+
+
+@pytest.mark.asyncio
+async def test_connector_fetch_handler_wraps_runtime_error_as_fatal(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``<prefix>_fetch`` mirrors the search-side FatalError wrapping."""
+    from research_agent.tools import courtlistener
+
+    async def fake_fetch(url: str) -> Any:
+        raise RuntimeError("courtlistener requires COURTLISTENER_API_TOKEN")
+
+    monkeypatch.setattr(courtlistener, "fetch", fake_fetch)
+
+    handler = default_handlers(router=None)["courtlistener_fetch"]
+    with pytest.raises(FatalError, match="COURTLISTENER_API_TOKEN"):
+        await handler(
+            job,
+            {
+                "kind": "courtlistener_fetch",
+                "payload": {"url": "https://www.courtlistener.com/opinion/123/"},
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_connector_search_handler_drops_kwargs_connector_does_not_accept(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Planner drift: a passthrough kwarg the target connector doesn't accept
+    must be dropped, not raised as a TypeError that bypasses the documented
+    FatalError path. ``edgar.search`` takes ``form_type`` (not ``kind``); a
+    plan that emits ``kind`` for ``edgar_search`` must still produce a clean
+    call rather than crashing.
+    """
+    from research_agent.tools import edgar
+
+    captured: dict[str, Any] = {}
+
+    async def fake_search(
+        query: str,
+        *,
+        form_type: Any = None,
+        max_results: int = 20,
+        timeout: float = 15.0,
+    ) -> list[SearchResult]:
+        captured["query"] = query
+        captured["form_type"] = form_type
+        captured["max_results"] = max_results
+        return []
+
+    monkeypatch.setattr(edgar, "search", fake_search)
+
+    handler = default_handlers(router=None)["edgar_search"]
+    out = await handler(
+        job,
+        {
+            "kind": "edgar_search",
+            "payload": {
+                "query": "cybersecurity",
+                "kind": "should-be-dropped",  # edgar takes form_type, not kind
+                "form_type": "8-K",
+                "max_results": 5,
+            },
+        },
+    )
+    assert captured == {
+        "query": "cybersecurity",
+        "form_type": "8-K",
+        "max_results": 5,
+    }
+    assert isinstance(out, dict)
+    assert out["results"] == []
 
 
 @pytest.mark.asyncio

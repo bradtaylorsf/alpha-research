@@ -58,6 +58,47 @@ TaskKind = Literal[
     "summarize_source",
     "synthesize",
     "critique",
+    # Issue #175: connector-specific kinds dispatch directly to each
+    # tool's structured-API call (one round trip, JSON in / claims out)
+    # instead of routing through Brave + trafilatura. Each *_search emits
+    # ``web_fetch`` follow-ups via ``_expand_search_to_fetches``; each
+    # *_fetch persists a single source like ``arxiv_fetch``.
+    "congress_search",
+    "congress_fetch",
+    "fec_search",
+    "fec_fetch",
+    "edgar_search",
+    "edgar_fetch",
+    "courtlistener_search",
+    "courtlistener_fetch",
+    "fedregister_search",
+    "fedregister_fetch",
+    "lda_search",
+    "lda_fetch",
+    "usaspending_search",
+    "usaspending_fetch",
+    "gdelt_search",
+    "gdelt_fetch",
+    "littlesis_search",
+    "littlesis_fetch",
+    "nonprofits_search",
+    "nonprofits_fetch",
+    "opencorporates_search",
+    "opencorporates_fetch",
+    "sanctions_search",
+    "sanctions_fetch",
+    "bbb_search",
+    "bbb_fetch",
+    "licensing_search",
+    "licensing_fetch",
+    "sos_search",
+    "sos_fetch",
+    "calaccess_search",
+    "calaccess_fetch",
+    "scholar_search",
+    "scholar_fetch",
+    "linkedin_search",
+    "linkedin_fetch",
 ]
 
 ScopeClass = Literal["narrow", "medium", "broad", "comprehensive"]
