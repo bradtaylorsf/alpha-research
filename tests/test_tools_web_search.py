@@ -219,6 +219,61 @@ def test_tool_registry_has_web_search():
     assert callable(TOOL_REGISTRY["web_search"])
 
 
+def test_smoke_web_search_invokes_auto_engine_only(monkeypatch):
+    """Issue #192: smoke must mirror the orchestrator (engine='auto'), not
+    hand-roll separate ddg/google scrapes."""
+    from research_agent.tools import TOOL_REGISTRY
+
+    calls: list[dict] = []
+
+    async def _fake_search(query, max_results=10, engine="auto"):
+        calls.append({"query": query, "max_results": max_results, "engine": engine})
+        return []
+
+    monkeypatch.setattr(web_search, "search", _fake_search)
+    # No Brave key → label should say ddg-fallback when results are empty.
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+
+    output = TOOL_REGISTRY["web_search"]("project 2025")
+
+    assert len(calls) == 1, "smoke must call web_search.search exactly once"
+    assert calls[0]["engine"] == "auto"
+    assert calls[0]["query"] == "project 2025"
+    # When auto resolves to ddg with zero hits, the header flags the fallback
+    # and selector drift so operators can tell it apart from a Brave miss.
+    assert "engine=ddg" in output
+    assert "selector drift" in output
+
+
+def test_smoke_web_search_brave_path_labels_engine(monkeypatch):
+    """With BRAVE_SEARCH_API_KEY set, auto routes to Brave and the smoke
+    output labels the path so operators can see which engine ran."""
+    from research_agent.tools import TOOL_REGISTRY
+    from research_agent.tools.models import SearchResult
+
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+
+    fake_hit = SearchResult(
+        url="https://example.com/p2025",
+        title="Project 2025 implementation",
+        snippet="Heritage Foundation policy blueprint",
+        source_kind="web",
+        extras={"source_engine": "brave"},
+    )
+
+    async def _fake_brave(query, max_results):
+        return [fake_hit]
+
+    monkeypatch.setattr(web_search, "_search_brave", _fake_brave)
+
+    output = TOOL_REGISTRY["web_search"]("project 2025")
+
+    assert "engine=brave" in output
+    assert "returned 1 hits" in output
+    assert "https://example.com/p2025" in output
+    assert "Project 2025 implementation" in output
+
+
 def test_serp_rate_buckets_set_to_one_per_two_seconds():
     """Every ``search()`` call applies the 0.5 rps SERP rate (1 query/2s)."""
     browser.reset_for_tests()

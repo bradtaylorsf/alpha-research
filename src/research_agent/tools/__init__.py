@@ -8,18 +8,45 @@ from collections.abc import Callable
 from research_agent.tools.models import SearchResult, Source, SourceKind
 
 
-def _smoke_web_search(query: str) -> list[SearchResult]:
-    """Smoke wrapper: run DDG then Google, return top-5 hits from each combined.
+def _smoke_web_search(query: str) -> str:
+    """Smoke wrapper: exercise the runtime ``engine="auto"`` path.
 
-    The CLI smoke verb calls this synchronously and prints ``repr`` of the
-    return value, so the output shows results from both engines per AC #14.
+    Mirrors what the orchestrator actually does: a single
+    ``web_search.search(query, engine="auto")`` call. With
+    ``BRAVE_SEARCH_API_KEY`` set, ``auto`` resolves to the Brave Search API;
+    without the key, it falls back to DDG-Playwright (which is subject to
+    selector drift and may legitimately return zero hits even when the
+    runtime is healthy). The output line marks which engine actually ran so
+    operators can tell apart a Brave miss from a Playwright fallback miss
+    without re-running.
     """
     from research_agent.tools import web_search
 
-    async def _run() -> list[SearchResult]:
-        ddg = await web_search.search(query, max_results=5, engine="ddg")
-        google = await web_search.search(query, max_results=5, engine="google")
-        return ddg + google
+    async def _run() -> str:
+        results = await web_search.search(query, max_results=10, engine="auto")
+        if results:
+            engine_used = str(results[0].extras.get("source_engine") or "?")
+        else:
+            engine_used = "brave" if web_search._brave_api_key() else "ddg"
+
+        if engine_used == "brave":
+            header = f"engine=brave: returned {len(results)} hits"
+        elif engine_used == "ddg":
+            suffix = " (selector drift?)" if not results else ""
+            header = (
+                f"engine=ddg (Playwright fallback, subject to selector drift):"
+                f" returned {len(results)} hits{suffix}"
+            )
+        else:
+            header = f"engine={engine_used}: returned {len(results)} hits"
+
+        lines: list[str] = [header]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(f"- {hit.title}\n  {hit.url}\n  {snippet}")
+        return "\n".join(lines)
 
     return asyncio.run(_run())
 
