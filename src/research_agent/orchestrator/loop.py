@@ -1477,7 +1477,7 @@ async def _run_extract_findings(
             router=router,
         )
 
-    return await _run_single_extract(
+    regular_result = await _run_single_extract(
         job,
         source_id=source_id,
         meta=meta,
@@ -1489,6 +1489,11 @@ async def _run_extract_findings(
         text_limit=_EXTRACT_TEXT_LIMIT,
         findings_limit=_FINDINGS_PER_SOURCE_LIMIT,
     )
+    # ``_written_findings`` is an internal handoff for the cornerstone walk
+    # and ``cornerstone_query`` aggregators; never persist it into the regular
+    # extract task's ``result_json``.
+    regular_result.pop("_written_findings", None)
+    return regular_result
 
 
 async def _run_single_extract(
@@ -2102,7 +2107,10 @@ def _resolve_cornerstone_parent_id(job: Job, url: str) -> int | None:
 
     Uses :func:`_normalize_url_for_compare` so the same forgiving match
     that drives ``_is_cornerstone_source`` resolves the retrieval target
-    too.
+    too. Excludes ``cornerstone_chunk`` rows, since the indexer copies
+    the parent URL onto every chunk — without this filter, the resolver
+    can return a chunk id and ``cornerstone_query`` would then filter
+    chunks by that chunk id and find nothing.
     """
     target_norm = _normalize_url_for_compare(url)
     if target_norm is None:
@@ -2112,7 +2120,8 @@ def _resolve_cornerstone_parent_id(job: Job, url: str) -> int | None:
         rows = conn.execute(
             "SELECT s.id, s.url FROM sources s"
             " JOIN job_sources js ON js.source_id = s.id"
-            " WHERE js.job_id = ? AND s.url IS NOT NULL",
+            " WHERE js.job_id = ? AND s.url IS NOT NULL"
+            " AND (s.kind IS NULL OR s.kind != 'cornerstone_chunk')",
             (job.id,),
         ).fetchall()
     finally:

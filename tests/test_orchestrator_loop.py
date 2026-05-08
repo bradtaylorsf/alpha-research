@@ -2012,6 +2012,71 @@ async def test_cornerstone_query_handler_requires_target(
 
 
 @pytest.mark.asyncio
+async def test_cornerstone_query_url_resolves_parent_not_chunk(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """URL → parent rowid lookup must skip ``cornerstone_chunk`` rows.
+
+    The indexer copies the parent URL onto every chunk row, so a
+    naive ``WHERE url = ?`` lookup can return a chunk id. The handler
+    would then filter ``parent_source_id = <chunk_id>`` and find no
+    chunks. This test seeds chunks first, then the parent, to make
+    the bug deterministic without the resolver fix.
+    """
+    from research_agent.orchestrator.loop import _run_cornerstone_query
+    from research_agent.storage.sources import write_source
+
+    cornerstone_url = "https://example.test/cornerstone-resolver.pdf"
+
+    # Pretend a previous job (or earlier in this run) wrote chunks
+    # under the same URL. Insert chunks first so their rowids precede
+    # the parent's — without the resolver filter the chunk would be
+    # returned as the "parent".
+    parent_id = write_source(
+        job,
+        url=cornerstone_url,
+        title="Cornerstone parent",
+        raw_content="parent body",
+        kind="pdf",
+    )
+    chunk_id = write_source(
+        job,
+        url=cornerstone_url,
+        title="Cornerstone: window 1",
+        raw_content="This chunk is from window 1. body text.",
+        kind="cornerstone_chunk",
+        embedding=b"\x00" * (1024 * 4),
+        parent_source_id=parent_id,
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_query(query, job_arg, parent_arg, *, top_k=8, models_config=None):
+        captured["parent"] = parent_arg
+        return []
+
+    from research_agent.tools import local_corpus as lc_mod
+
+    monkeypatch.setattr(lc_mod, "cornerstone_query", _fake_query)
+
+    router = _StubRouter("```yaml\n[]\n```\n")
+    task = {
+        "payload": {
+            "sub_question": "anything",
+            "cornerstone_url": cornerstone_url,
+            "top_k": 4,
+        }
+    }
+
+    result = await _run_cornerstone_query(job, task, router=router)
+    assert captured["parent"] == parent_id
+    assert captured["parent"] != chunk_id
+    assert result["parent_source_id"] == parent_id
+
+
+@pytest.mark.asyncio
 async def test_cornerstone_section_walk_falls_back_for_non_pdf(
     job: Job,
     db_path: Path,
