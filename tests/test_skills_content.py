@@ -1,10 +1,11 @@
-"""Validate the shipped connector skill markdown content.
+"""Validate the shipped connector and strategy skill markdown content.
 
 Loader behavior is covered in ``test_skills_loader.py``; this file validates
 the *content* of the 5 initial connector skills (congress, edgar, fedregister,
-courtlistener, fec) — frontmatter completeness, presence of required body
-sections, and that any knobs the skill names match the connector's actual
-``search()`` signature.
+courtlistener, fec) and the 3 initial strategy skills (modern-policy-era-
+filtering, cornerstone-extraction, triangulation) — frontmatter completeness,
+presence of required body sections, and that any knobs the skill names match
+the connector's actual ``search()`` signature.
 """
 
 from __future__ import annotations
@@ -19,6 +20,12 @@ from research_agent.skills import loader as skills_loader
 from research_agent.skills.loader import clear_cache, list_skills, load_skill
 
 CONNECTOR_SKILLS = ("congress", "edgar", "fedregister", "courtlistener", "fec")
+
+STRATEGY_SKILLS = (
+    "modern-policy-era-filtering",
+    "cornerstone-extraction",
+    "triangulation",
+)
 
 REQUIRED_BODY_SECTIONS = ("Knobs available", "Anti-patterns")
 
@@ -132,4 +139,67 @@ def test_loader_module_resolves_skills_directory(monkeypatch: pytest.MonkeyPatch
     assert base.is_dir(), f"connectors directory missing at {base}"
     shipped = sorted(p.stem for p in base.glob("*.md"))
     for name in CONNECTOR_SKILLS:
+        assert name in shipped, f"{name}.md missing from {base}"
+
+
+# ---------------------------------------------------------------------------
+# Strategy skills
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", STRATEGY_SKILLS)
+def test_strategy_skill_loads_with_non_empty_body(name: str) -> None:
+    body = load_skill("strategies", name)
+    assert body, f"strategy skill {name!r} body is empty"
+    assert len(body) > 200, f"strategy skill {name!r} body looks truncated"
+
+
+@pytest.mark.parametrize("name", STRATEGY_SKILLS)
+def test_strategy_skill_frontmatter_fields_present(name: str) -> None:
+    entries = {e["name"]: e for e in list_skills("strategies")}
+    assert name in entries, f"skill {name!r} not found in strategies index"
+    entry = entries[name]
+    assert entry["description"], f"{name}: description missing"
+    assert entry["when_to_use"], f"{name}: when_to_use missing"
+
+
+def test_strategy_descriptions_are_one_line() -> None:
+    """The description is the planner-facing index signal — single-line, terse."""
+    for entry in list_skills("strategies"):
+        assert "\n" not in entry["description"], (
+            f"{entry['name']}: description must be a single line"
+        )
+        assert len(entry["description"]) <= 280, (
+            f"{entry['name']}: description longer than 280 chars "
+            f"({len(entry['description'])})"
+        )
+
+
+def test_modern_policy_era_filtering_references_every_connector() -> None:
+    """The strategy's value prop is "stack onto every connector" — its body
+    must concretely name each shipped connector and reference the one real
+    date knob (`since` on fedregister), so the planner gets actionable
+    guidance instead of generic principles."""
+    body = load_skill("strategies", "modern-policy-era-filtering")
+    for connector in CONNECTOR_SKILLS:
+        assert connector in body, (
+            f"modern-policy-era-filtering: body must reference connector "
+            f"{connector!r} so planner gets per-connector directive"
+        )
+    assert "since" in body, (
+        "modern-policy-era-filtering: must reference the `since` knob "
+        "(the one real date parameter on fedregister.search())"
+    )
+    assert "2025-01-20" in body, (
+        "modern-policy-era-filtering: must reference the 119th-Congress / "
+        "Trump-2-inauguration anchor date"
+    )
+
+
+def test_strategies_directory_resolves() -> None:
+    """Sanity: strategy files live where the loader expects."""
+    base = skills_loader._skills_dir("strategies")
+    assert base.is_dir(), f"strategies directory missing at {base}"
+    shipped = sorted(p.stem for p in base.glob("*.md"))
+    for name in STRATEGY_SKILLS:
         assert name in shipped, f"{name}.md missing from {base}"
