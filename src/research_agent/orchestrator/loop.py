@@ -95,6 +95,99 @@ async def _not_implemented_handler(job: Job, task: dict[str, Any]) -> dict[str, 
     raise FatalError(f"handler not implemented for kind={task['kind']!r}")
 
 
+# Issue #175: connector kinds dispatch directly to each tool's structured
+# API. Search payloads pass ``query`` plus any of these well-known kwargs
+# through to the underlying ``search()`` call — most connectors take a
+# ``kind`` switch (e.g. congress: bill/member/hearing) and a few take
+# ``state``/``since``/``form_type``. Unknown payload keys are ignored so
+# planner drift doesn't break the call.
+_CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
+    {
+        "kind",
+        "max_results",
+        "state",
+        "form_type",
+        "since",
+        "agencies",
+        "jurisdiction",
+        "award_type",
+        "language",
+    }
+)
+
+
+def _make_connector_search_handler(module_name: str) -> Handler:
+    """Build a thin search-handler that dispatches to ``tools.<module_name>.search``.
+
+    Converts the connector's missing-credential ``RuntimeError`` (raised by
+    edgar/courtlistener/scholar/linkedin when their API key/UA isn't
+    configured) into :class:`FatalError` so the loop marks the task failed
+    cleanly down the documented path. Returns the standard search-result
+    + ``follow_up_tasks`` shape so each top hit becomes a connector-aware
+    ``web_fetch`` follow-up.
+    """
+
+    async def _handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        from importlib import import_module
+
+        mod = import_module(f"research_agent.tools.{module_name}")
+        payload = task["payload"]
+        kwargs = {
+            k: v for k, v in payload.items() if k in _CONNECTOR_SEARCH_PASSTHROUGH
+        }
+        try:
+            results = await mod.search(payload.get("query", ""), **kwargs)
+        except RuntimeError as exc:
+            raise FatalError(f"{module_name}_search: {exc}") from exc
+        return _expand_search_to_fetches(job, payload, results)
+
+    return _handler
+
+
+def _make_connector_fetch_handler(module_name: str) -> Handler:
+    """Build a thin fetch-handler that dispatches to ``tools.<module_name>.fetch``.
+
+    Mirrors :func:`_make_connector_search_handler` but for the single-URL
+    fetch path: persists the returned ``Source`` and converts the
+    connector's missing-credential ``RuntimeError`` to :class:`FatalError`.
+    """
+
+    async def _handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        from importlib import import_module
+
+        mod = import_module(f"research_agent.tools.{module_name}")
+        payload = task["payload"]
+        try:
+            source = await mod.fetch(payload["url"])
+        except RuntimeError as exc:
+            raise FatalError(f"{module_name}_fetch: {exc}") from exc
+        return _persist_fetched_source(job, source)
+
+    return _handler
+
+
+_CONNECTOR_KINDS: tuple[str, ...] = (
+    "congress",
+    "fec",
+    "edgar",
+    "courtlistener",
+    "fedregister",
+    "lda",
+    "usaspending",
+    "gdelt",
+    "littlesis",
+    "nonprofits",
+    "opencorporates",
+    "sanctions",
+    "bbb",
+    "licensing",
+    "sos",
+    "calaccess",
+    "scholar",
+    "linkedin",
+)
+
+
 def default_handlers(router: Any) -> dict[str, Handler]:
     """Build the standard ``kind → handler`` registry.
 
@@ -240,7 +333,7 @@ def default_handlers(router: Any) -> dict[str, Handler]:
             )
         return result.model_dump()
 
-    return {
+    registry: dict[str, Handler] = {
         "web_search": _web_search,
         "web_fetch": _web_fetch,
         "arxiv_search": _arxiv_search,
@@ -255,6 +348,10 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         "synthesize": _synthesize,
         "critique": _critique,
     }
+    for name in _CONNECTOR_KINDS:
+        registry[f"{name}_search"] = _make_connector_search_handler(name)
+        registry[f"{name}_fetch"] = _make_connector_fetch_handler(name)
+    return registry
 
 
 # ---------------------------------------------------------------------------
