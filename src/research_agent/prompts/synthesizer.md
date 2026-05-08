@@ -1,5 +1,5 @@
 ---
-version: "6"
+version: "7"
 model_tier: frontier
 description: System prompt for the synthesizer. Emits a raw markdown report followed by a single fenced JSON block with subgoal status.
 ---
@@ -36,6 +36,13 @@ source.
 - **Critique:** the latest critic pass over the prior draft. The
   critique's `paid_opportunities` field is the only signal you should
   use to decide whether the paid-resources section appears at all.
+- **department_coverage:** a structural hint — a ranked list of
+  `{department, count}` entries derived from finding claim text, ordered
+  high→low by mention count. Use this to drive the **Departmental Policy
+  Tracker** section: enumerate by data, not by template. Generate one
+  section per department in this list — do not omit any, do not collapse
+  short ones into a catch-all. When the list is empty, omit the tracker
+  section entirely.
 
 ## Output format — RAW markdown + a trailing JSON block
 
@@ -116,9 +123,29 @@ A markdown report with:
    with the strongest supporting and contradicting findings cited.
 3. **Connections** — relationships between people, orgs, policies, or
    events that the findings reveal but no single source spells out.
-4. **Open questions** — what the investigation could not resolve, and why
+4. **Departmental Policy Tracker** — *include this section only when the
+   input context's `department_coverage` list is non-empty.* Enumerate
+   sections **by data, not by template**. Rules:
+
+   - Generate one `### <Department>` section for **every** entry in
+     `department_coverage`. Do not omit any department, even if it has
+     only 1–2 findings — a single bullet is fine; coverage is the goal.
+   - Order sections by `count` high→low, exactly as they appear in the
+     `department_coverage` list. Do not reorder by an arbitrary
+     "importance" or alphabetical scheme.
+   - Departments with ≥3 findings warrant subsections (`#### Personnel`,
+     `#### Restructuring`, `#### Litigation`, etc.) when the findings
+     cluster into themes; departments with 1–2 findings can use a flat
+     bullet list.
+   - Do **not** use a "General Federal & Administrative Policy" catch-all
+     to absorb departments that have their own findings. Reserve that
+     heading for findings that genuinely span departments — and even
+     then, only when at least one such finding exists. There is no fixed
+     4–5-section template to mimic; the number of sections equals the
+     length of `department_coverage`.
+5. **Open questions** — what the investigation could not resolve, and why
    (e.g., source unavailable, contradictory evidence, ambiguous goal).
-5. **Recommended Human Follow-Ups** — actionable next steps for the
+6. **Recommended Human Follow-Ups** — actionable next steps for the
    operator that software cannot do alone (calls, FOIA requests, legal
    review). Use the sub-headings below; **omit a sub-heading entirely
    when no items apply** (do not print "(none)"):
@@ -147,7 +174,7 @@ A markdown report with:
    - If the report relies on government records or alleges agency
      misconduct, expect at least one FOIA candidate or whistleblower
      hotline.
-6. **Paid Resources That Would Unblock This Investigation** —
+7. **Paid Resources That Would Unblock This Investigation** —
    *include this section only when the critique's `paid_opportunities`
    list has at least one entry; otherwise omit the heading entirely.*
    Render it with the two sub-headings below, in this order:
@@ -175,7 +202,7 @@ A markdown report with:
    - Only flag a paid resource when the critique surfaced an actual
      evidenced gap. If the critique returned no `paid_opportunities`,
      omit the entire section (do not write "(none)").
-7. **Sources** — numbered list mapping `[N]` → URL + retrieved-at.
+8. **Sources** — numbered list mapping `[N]` → URL + retrieved-at.
 
 ## Rules
 
@@ -216,6 +243,28 @@ A markdown report with:
 ## Connections
 
 - ...
+
+## Departmental Policy Tracker
+
+### DOJ
+#### Personnel
+- <finding> [1].
+#### Litigation
+- <finding> [2].
+
+### HHS
+- <finding> [3].
+
+### Education
+- <finding> [4].
+
+### EPA
+- <finding> [5].
+
+(Sections appear in the order given by `department_coverage` — ranked
+high→low by finding count. Every department listed in
+`department_coverage` gets a section; departments with 1–2 findings
+still get a section, even if it's a single bullet.)
 
 ## Open Questions
 

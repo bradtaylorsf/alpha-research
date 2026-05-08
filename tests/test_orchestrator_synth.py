@@ -1171,3 +1171,154 @@ def test_synthesizer_prompt_requires_sources_union_rule() -> None:
     # lists are not acceptable.
     assert "union" in body.lower()
     assert "Sources" in body
+
+
+# ---------------------------------------------------------------------------
+# Departmental Policy Tracker (issue #208)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_department_coverage_aliases_and_ranking() -> None:
+    """Aliases collapse to canonicals; result is ranked high→low by count."""
+    findings: list[dict[str, Any]] = [
+        # DOJ via 'DOJ' and 'Justice Department' — counts once for the finding.
+        {"claim": "DOJ filed suit. The Justice Department announced changes."},
+        # DOJ via 'Justice' alias.
+        {"claim": "Justice issued new guidance to prosecutors."},
+        # HHS via FDA + Health and Human Services — counts once.
+        {"claim": "HHS and FDA approved the policy across Health and Human Services."},
+        # HHS via Health Department.
+        {"claim": "The Department of Health changed Medicare rules."},
+        # DOD: 'Department of Defense' + 'Pentagon' + 'DOD'.
+        {"claim": "DOD reorganization at the Pentagon was confirmed by Department of Defense."},
+        # DHS.
+        {"claim": "Department of Homeland Security raised the alert level."},
+        # OPM via 'Office of Personnel Management' + 'Personnel'.
+        {"claim": "OPM rolled out new federal Personnel rules."},
+        # Education via 'Department of Education'.
+        {"claim": "Department of Education announced new Title IX guidance."},
+        # No federal department mention.
+        {"claim": "A private company released a quarterly report."},
+    ]
+
+    coverage = synth_module._compute_department_coverage(findings)
+    by_dept = {item["department"]: item["count"] for item in coverage}
+
+    # Aliases collapsed correctly (DOJ counts == 2, HHS == 2, others == 1 each).
+    assert by_dept["DOJ"] == 2
+    assert by_dept["HHS"] == 2
+    assert by_dept["DOD"] == 1
+    assert by_dept["DHS"] == 1
+    assert by_dept["OPM"] == 1
+    assert by_dept["Education"] == 1
+
+    # No false-positive entries from the unrelated finding.
+    assert "Treasury" not in by_dept
+    assert "EPA" not in by_dept
+
+    # Ranked high→low by count; tied departments use canonical name as
+    # stable tiebreaker (alphabetical: DOJ before HHS).
+    counts = [item["count"] for item in coverage]
+    assert counts == sorted(counts, reverse=True)
+    top_two = [item["department"] for item in coverage[:2]]
+    assert top_two == ["DOJ", "HHS"]
+
+
+def test_compute_department_coverage_empty_findings_returns_empty_list() -> None:
+    """No findings → empty list (the prompt uses this to omit the section)."""
+    assert synth_module._compute_department_coverage([]) == []
+
+
+def test_compute_department_coverage_handles_missing_or_non_string_claims() -> None:
+    """Findings with missing/empty/non-string claim are skipped without erroring."""
+    findings: list[dict[str, Any]] = [
+        {"claim": "DOJ acted."},
+        {"claim": ""},
+        {"claim": None},
+        {},  # no 'claim' key at all
+    ]
+    coverage = synth_module._compute_department_coverage(findings)
+    assert coverage == [{"department": "DOJ", "count": 1}]
+
+
+def test_build_context_exposes_department_coverage(job: Job) -> None:
+    """``_build_context`` renders ``department_coverage`` as an ordered list
+    with the expected canonical/count pairs for a multi-department fixture."""
+    plan_obj = Plan(
+        version=1,
+        objective="Project 2025 implementation tracker",
+        subgoals=[Subgoal(id=1, description="map departments", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=1,
+    )
+    findings: list[dict[str, Any]] = [
+        {"id": 1, "claim": "DOJ filed three lawsuits.", "confidence": 0.9, "source_ids": []},
+        {"id": 2, "claim": "Justice Department reorganized.", "confidence": 0.8, "source_ids": []},
+        {"id": 3, "claim": "DOJ briefed Congress.", "confidence": 0.7, "source_ids": []},
+        {"id": 4, "claim": "HHS announced new rules.", "confidence": 0.6, "source_ids": []},
+        {"id": 5, "claim": "FDA approved a vaccine.", "confidence": 0.5, "source_ids": []},
+        {"id": 6, "claim": "EPA cut regulations.", "confidence": 0.4, "source_ids": []},
+    ]
+
+    context_json = synth_module._build_context(
+        goal="x",
+        plan=plan_obj,
+        findings=findings,
+        sources={},
+        prior=None,
+        critique=None,
+        followup_recipes="",
+        paid_unblock_recipes="",
+        final=False,
+    )
+    payload = json.loads(context_json)
+
+    coverage = payload["department_coverage"]
+    assert isinstance(coverage, list)
+    # Order is high→low by count: DOJ(3), HHS(2), EPA(1).
+    assert coverage == [
+        {"department": "DOJ", "count": 3},
+        {"department": "HHS", "count": 2},
+        {"department": "EPA", "count": 1},
+    ]
+
+
+def test_build_context_empty_findings_emits_empty_department_coverage(job: Job) -> None:
+    """Key is always present; an empty list signals the prompt to omit the section."""
+    plan_obj = Plan(
+        version=1,
+        objective="x",
+        subgoals=[Subgoal(id=1, description="x", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=1,
+    )
+    context_json = synth_module._build_context(
+        goal="x",
+        plan=plan_obj,
+        findings=[],
+        sources={},
+        prior=None,
+        critique=None,
+        followup_recipes="",
+        paid_unblock_recipes="",
+        final=False,
+    )
+    payload = json.loads(context_json)
+    assert payload["department_coverage"] == []
+
+
+def test_synthesizer_prompt_requires_departmental_policy_tracker() -> None:
+    """The synthesizer prompt must drive the tracker off ``department_coverage``
+    rather than a fixed 4–5-section template (issue #208)."""
+    body = prompts_loader.load_prompt("synthesizer", goal="x")
+    # The structural-hint input is documented.
+    assert "department_coverage" in body
+    # The new section is named explicitly.
+    assert "Departmental Policy Tracker" in body
+    # Ranking is by count, not by template.
+    assert "high→low" in body or "high→low" in body
+    # The ≥1-finding inclusion rule is present (or the equivalent "do not
+    # omit" instruction).
+    assert "do not omit" in body.lower() or "every entry" in body.lower()
+    # The ≥3-findings → subsection threshold is named.
+    assert "≥3" in body or "≥3" in body
