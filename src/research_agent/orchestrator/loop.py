@@ -1206,7 +1206,10 @@ _CORNERSTONE_EXTRACT_TEXT_LIMIT = 80000  # ~20k tokens; still inside frontier wi
 _CORNERSTONE_FINDINGS_PER_SOURCE_LIMIT = 500
 # Documents that nobody marked as cornerstone but whose body is bigger than
 # this still get the cornerstone treatment — the planner's marker is the
-# primary signal, this is a fallback for runs whose plans pre-date #177.
+# primary signal, this is a fallback. Issue #189 gates the fallback to
+# ``source_kind == "pdf"`` so long-form HTML (Wikipedia, archive transcripts)
+# stays on the regular extraction path and the #177 report-padding
+# regression doesn't come back. See ``_is_cornerstone_source``.
 _CORNERSTONE_FALLBACK_MIN_CHARS = 200_000
 
 
