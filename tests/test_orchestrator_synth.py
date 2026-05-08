@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -545,12 +546,10 @@ def test_synthesize_extracts_subgoal_status_and_strips_fence(
     body = (
         "# Investigation Report\n\n"
         "## Executive Summary\n- finding [1]\n\n"
-        "## Sources\n1. https://example.com/0 — \"Title\"\n"
+        '## Sources\n1. https://example.com/0 — "Title"\n'
     )
     fence = (
-        '\n```json\n'
-        '{"subgoal_status": {"1": "confirmed", "2": "refuted", "3": "confirmed"}}'
-        '\n```\n'
+        '\n```json\n{"subgoal_status": {"1": "confirmed", "2": "refuted", "3": "confirmed"}}\n```\n'
     )
     router = _StubRouter(content=body + fence)
 
@@ -582,11 +581,11 @@ def test_synthesize_inconclusive_status_keeps_subgoal_open(
 ) -> None:
     """An ``inconclusive`` status leaves the subgoal ``done=False``."""
     _seed_findings(job, [0.7])
-    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
+    body = '# Report\n\n## Sources\n1. https://x — "t"\n'
     fence = (
-        '\n```json\n'
+        "\n```json\n"
         '{"subgoal_status": {"1": "confirmed", "2": "inconclusive", "3": "refuted"}}'
-        '\n```\n'
+        "\n```\n"
     )
     router = _StubRouter(content=body + fence)
 
@@ -631,8 +630,8 @@ def test_synthesize_malformed_fence_emits_warning_and_skips_plan_bump(
 ) -> None:
     """A trailing JSON fence with invalid JSON is tolerated: warn + no plan bump."""
     _seed_findings(job, [0.6])
-    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
-    fence = '\n```json\n{not valid json\n```\n'
+    body = '# Report\n\n## Sources\n1. https://x — "t"\n'
+    fence = "\n```json\n{not valid json\n```\n"
     router = _StubRouter(content=body + fence)
 
     asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
@@ -677,11 +676,11 @@ def test_synthesize_repeat_status_skips_plan_version_bump(
     through MAX_PLAN_VERSIONS (200) long before the plan actually changed.
     """
     _seed_findings(job, [0.7])
-    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
+    body = '# Report\n\n## Sources\n1. https://x — "t"\n'
     fence = (
-        '\n```json\n'
+        "\n```json\n"
         '{"subgoal_status": {"1": "confirmed", "2": "inconclusive", "3": "confirmed"}}'
-        '\n```\n'
+        "\n```\n"
     )
     router = _StubRouter(content=body + fence)
 
@@ -739,9 +738,7 @@ def test_critic_prompt_flags_missing_followups() -> None:
     assert "fact-check" in body
 
 
-def test_build_context_exposes_goal_and_licensing_board_guidance(
-    job: Job, db_path: Path
-) -> None:
+def test_build_context_exposes_goal_and_licensing_board_guidance(job: Job, db_path: Path) -> None:
     """SBI Builders fixture-style structural check.
 
     Feeds a goal naming a subject + agency through ``_build_context`` and
@@ -942,16 +939,16 @@ def test_synthesize_broad_scope_corpus_remains_inconclusive(
     # Seed a 45-task-style corpus so the test mirrors the failure repro.
     _seed_findings(job, [0.7] * 45)
 
-    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
+    body = '# Report\n\n## Sources\n1. https://x — "t"\n'
     fence = (
-        '\n```json\n'
+        "\n```json\n"
         '{"subgoal_status": {'
         '"1": "confirmed",'
         '"2": "inconclusive",'
         '"3": "inconclusive",'
         '"4": "inconclusive"'
-        '}}'
-        '\n```\n'
+        "}}"
+        "\n```\n"
     )
     router = _StubRouter(content=body + fence)
 
@@ -994,11 +991,11 @@ def test_synthesize_accepts_fence_with_space_before_json_lang(
     parsing must accept either form.
     """
     _seed_findings(job, [0.7])
-    body = "# Report\n\n## Sources\n1. https://x — \"t\"\n"
+    body = '# Report\n\n## Sources\n1. https://x — "t"\n'
     fence = (
-        '\n``` json\n'
+        "\n``` json\n"
         '{"subgoal_status": {"1": "confirmed", "2": "confirmed", "3": "confirmed"}}'
-        '\n```\n'
+        "\n```\n"
     )
     router = _StubRouter(content=body + fence)
 
@@ -1009,3 +1006,319 @@ def test_synthesize_accepts_fence_with_space_before_json_lang(
 
     subgoals = _read_latest_plan_subgoals(db_path, job.id)
     assert all(sg["done"] is True for sg in subgoals)
+
+
+# ---------------------------------------------------------------------------
+# Sources-section reconciliation (issue #207)
+# ---------------------------------------------------------------------------
+
+
+def _seed_sources_with_finding(job: Job, n: int) -> list[int]:
+    """Seed ``n`` sources + one finding citing all of them.
+
+    Returns the list of source IDs (ascending). The single finding
+    guarantees ``synth._load_sources_for`` picks up every seeded source so
+    the reconciliation helper can resolve any of them by ID.
+    """
+    sids = [_seed_source(job, f"https://example.com/url-{i}", f"content {i}") for i in range(n)]
+    write_finding(job, "claim citing many sources", 0.9, sids)
+    return sids
+
+
+def test_synthesize_reconciles_dropped_inline_citations(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    """A model output that cites ``[1][2][3, 5]`` but enumerates only ``1.`` and
+    ``2.`` must end up with reconciled entries for ``3.`` and ``5.``.
+    """
+    sids = _seed_sources_with_finding(job, 5)
+    # IDs are autoincrement on a fresh DB → sids == [1, 2, 3, 4, 5].
+    assert sids == [1, 2, 3, 4, 5]
+
+    body = (
+        "# Investigation Report\n\n"
+        "## Executive Summary\n"
+        "- Finding A [1].\n"
+        "- Finding B [2][3, 5].\n\n"
+        "## Sources\n\n"
+        '1. https://example.com/url-0 — "T0" (retrieved 2026-05-06)\n'
+        '2. https://example.com/url-1 — "T1" (retrieved 2026-05-06)\n'
+    )
+    router = _StubRouter(content=body)
+
+    asyncio.run(synthesize(job, plan, router=router))
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    # The model's enumerated lines survive verbatim.
+    assert re.search(r"^1\. https://example\.com/url-0 — ", report, re.MULTILINE)
+    assert re.search(r"^2\. https://example\.com/url-1 — ", report, re.MULTILINE)
+    # Reconciliation appended canonical lines for the dropped IDs (3 and 5).
+    assert re.search(
+        r'^3\. https://example\.com/url-2 — "[^"]+" \(retrieved \d{4}-\d{2}-\d{2}\)',
+        report,
+        re.MULTILINE,
+    )
+    assert re.search(
+        r'^5\. https://example\.com/url-4 — "[^"]+" \(retrieved \d{4}-\d{2}-\d{2}\)',
+        report,
+        re.MULTILINE,
+    )
+    # The persisted synthesis version must also include the reconciled lines.
+    synth_md = (job.root / "synthesis/0001.md").read_text(encoding="utf-8")
+    assert re.search(r"^3\. https://example\.com/url-2 — ", synth_md, re.MULTILINE)
+    assert re.search(r"^5\. https://example\.com/url-4 — ", synth_md, re.MULTILINE)
+
+
+def test_synthesize_emits_source_list_reconciled_event(job: Job, db_path: Path, plan: Plan) -> None:
+    """A drop event records exactly the IDs the helper appended."""
+    sids = _seed_sources_with_finding(job, 5)
+    assert sids == [1, 2, 3, 4, 5]
+
+    body = (
+        "# Report\n\n"
+        "- a [1].\n"
+        "- b [2][3, 5].\n\n"
+        "## Sources\n\n"
+        '1. https://example.com/url-0 — "T0" (retrieved 2026-05-06)\n'
+        '2. https://example.com/url-1 — "T1" (retrieved 2026-05-06)\n'
+    )
+    router = _StubRouter(content=body)
+
+    asyncio.run(synthesize(job, plan, router=router))
+
+    events = _read_event_rows(db_path, job.id)
+    reconciled = [e for e in events if e["kind"] == "source_list_reconciled"]
+    assert len(reconciled) == 1
+    assert reconciled[0]["level"] == "INFO"
+    payload = json.loads(reconciled[0]["payload_json"])
+    assert payload["added"] == [3, 5]
+    assert payload["unresolved"] == []
+    assert payload["already_listed"] == 2
+    assert payload["cited_total"] == 4
+
+
+def test_synthesize_no_reconciliation_when_sources_already_complete(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    """When the model enumerated every cited ID, no event fires and the body
+    is byte-for-byte unchanged below the heading.
+    """
+    sids = _seed_sources_with_finding(job, 3)
+    assert sids == [1, 2, 3]
+
+    body = (
+        "# Report\n\n"
+        "- a [1].\n"
+        "- b [2][3].\n\n"
+        "## Sources\n\n"
+        '1. https://example.com/url-0 — "T0" (retrieved 2026-05-06)\n'
+        '2. https://example.com/url-1 — "T1" (retrieved 2026-05-06)\n'
+        '3. https://example.com/url-2 — "T2" (retrieved 2026-05-06)\n'
+    )
+    router = _StubRouter(content=body)
+
+    asyncio.run(synthesize(job, plan, router=router))
+
+    events = _read_event_rows(db_path, job.id)
+    reconciled = [e for e in events if e["kind"] == "source_list_reconciled"]
+    assert reconciled == []
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    # Sources section should contain exactly the three model-emitted lines —
+    # no duplicates from a stray reconciliation pass.
+    assert report.count("https://example.com/url-0") == 1
+    assert report.count("https://example.com/url-1") == 1
+    assert report.count("https://example.com/url-2") == 1
+
+
+def test_synthesize_unresolved_inline_citation_logs_without_appending(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    """A body cite for an ID that doesn't exist in the source dict logs as
+    ``unresolved`` and does NOT inject a bogus ``999.`` line.
+    """
+    sids = _seed_sources_with_finding(job, 2)
+    assert sids == [1, 2]
+
+    body = (
+        "# Report\n\n"
+        "- a [1].\n"
+        "- b [999].\n\n"
+        "## Sources\n\n"
+        '1. https://example.com/url-0 — "T0" (retrieved 2026-05-06)\n'
+    )
+    router = _StubRouter(content=body)
+
+    asyncio.run(synthesize(job, plan, router=router))
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    # Reconciliation must not invent a 999. line.
+    assert not re.search(r"^999\. ", report, re.MULTILINE)
+
+    events = _read_event_rows(db_path, job.id)
+    reconciled = [e for e in events if e["kind"] == "source_list_reconciled"]
+    assert len(reconciled) == 1
+    payload = json.loads(reconciled[0]["payload_json"])
+    assert payload["added"] == []
+    assert payload["unresolved"] == [999]
+
+
+def test_synthesizer_prompt_requires_sources_union_rule() -> None:
+    """The synthesizer prompt must instruct the model to emit the union of
+    inline-cited IDs in the Sources section (issue #207)."""
+    body = prompts_loader.load_prompt("synthesizer", goal="x")
+    # The new rule names the union explicitly so the model knows partial
+    # lists are not acceptable.
+    assert "union" in body.lower()
+    assert "Sources" in body
+
+
+# ---------------------------------------------------------------------------
+# Departmental Policy Tracker (issue #208)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_department_coverage_aliases_and_ranking() -> None:
+    """Aliases collapse to canonicals; result is ranked high→low by count."""
+    findings: list[dict[str, Any]] = [
+        # DOJ via 'DOJ' and 'Justice Department' — counts once for the finding.
+        {"claim": "DOJ filed suit. The Justice Department announced changes."},
+        # DOJ via 'Justice' alias.
+        {"claim": "Justice issued new guidance to prosecutors."},
+        # HHS via FDA + Health and Human Services — counts once.
+        {"claim": "HHS and FDA approved the policy across Health and Human Services."},
+        # HHS via Health Department.
+        {"claim": "The Department of Health changed Medicare rules."},
+        # DOD: 'Department of Defense' + 'Pentagon' + 'DOD'.
+        {"claim": "DOD reorganization at the Pentagon was confirmed by Department of Defense."},
+        # DHS.
+        {"claim": "Department of Homeland Security raised the alert level."},
+        # OPM via 'Office of Personnel Management' + 'Personnel'.
+        {"claim": "OPM rolled out new federal Personnel rules."},
+        # Education via 'Department of Education'.
+        {"claim": "Department of Education announced new Title IX guidance."},
+        # No federal department mention.
+        {"claim": "A private company released a quarterly report."},
+    ]
+
+    coverage = synth_module._compute_department_coverage(findings)
+    by_dept = {item["department"]: item["count"] for item in coverage}
+
+    # Aliases collapsed correctly (DOJ counts == 2, HHS == 2, others == 1 each).
+    assert by_dept["DOJ"] == 2
+    assert by_dept["HHS"] == 2
+    assert by_dept["DOD"] == 1
+    assert by_dept["DHS"] == 1
+    assert by_dept["OPM"] == 1
+    assert by_dept["Education"] == 1
+
+    # No false-positive entries from the unrelated finding.
+    assert "Treasury" not in by_dept
+    assert "EPA" not in by_dept
+
+    # Ranked high→low by count; tied departments use canonical name as
+    # stable tiebreaker (alphabetical: DOJ before HHS).
+    counts = [item["count"] for item in coverage]
+    assert counts == sorted(counts, reverse=True)
+    top_two = [item["department"] for item in coverage[:2]]
+    assert top_two == ["DOJ", "HHS"]
+
+
+def test_compute_department_coverage_empty_findings_returns_empty_list() -> None:
+    """No findings → empty list (the prompt uses this to omit the section)."""
+    assert synth_module._compute_department_coverage([]) == []
+
+
+def test_compute_department_coverage_handles_missing_or_non_string_claims() -> None:
+    """Findings with missing/empty/non-string claim are skipped without erroring."""
+    findings: list[dict[str, Any]] = [
+        {"claim": "DOJ acted."},
+        {"claim": ""},
+        {"claim": None},
+        {},  # no 'claim' key at all
+    ]
+    coverage = synth_module._compute_department_coverage(findings)
+    assert coverage == [{"department": "DOJ", "count": 1}]
+
+
+def test_build_context_exposes_department_coverage(job: Job) -> None:
+    """``_build_context`` renders ``department_coverage`` as an ordered list
+    with the expected canonical/count pairs for a multi-department fixture."""
+    plan_obj = Plan(
+        version=1,
+        objective="Project 2025 implementation tracker",
+        subgoals=[Subgoal(id=1, description="map departments", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=1,
+    )
+    findings: list[dict[str, Any]] = [
+        {"id": 1, "claim": "DOJ filed three lawsuits.", "confidence": 0.9, "source_ids": []},
+        {"id": 2, "claim": "Justice Department reorganized.", "confidence": 0.8, "source_ids": []},
+        {"id": 3, "claim": "DOJ briefed Congress.", "confidence": 0.7, "source_ids": []},
+        {"id": 4, "claim": "HHS announced new rules.", "confidence": 0.6, "source_ids": []},
+        {"id": 5, "claim": "FDA approved a vaccine.", "confidence": 0.5, "source_ids": []},
+        {"id": 6, "claim": "EPA cut regulations.", "confidence": 0.4, "source_ids": []},
+    ]
+
+    context_json = synth_module._build_context(
+        goal="x",
+        plan=plan_obj,
+        findings=findings,
+        sources={},
+        prior=None,
+        critique=None,
+        followup_recipes="",
+        paid_unblock_recipes="",
+        final=False,
+    )
+    payload = json.loads(context_json)
+
+    coverage = payload["department_coverage"]
+    assert isinstance(coverage, list)
+    # Order is high→low by count: DOJ(3), HHS(2), EPA(1).
+    assert coverage == [
+        {"department": "DOJ", "count": 3},
+        {"department": "HHS", "count": 2},
+        {"department": "EPA", "count": 1},
+    ]
+
+
+def test_build_context_empty_findings_emits_empty_department_coverage(job: Job) -> None:
+    """Key is always present; an empty list signals the prompt to omit the section."""
+    plan_obj = Plan(
+        version=1,
+        objective="x",
+        subgoals=[Subgoal(id=1, description="x", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=1,
+    )
+    context_json = synth_module._build_context(
+        goal="x",
+        plan=plan_obj,
+        findings=[],
+        sources={},
+        prior=None,
+        critique=None,
+        followup_recipes="",
+        paid_unblock_recipes="",
+        final=False,
+    )
+    payload = json.loads(context_json)
+    assert payload["department_coverage"] == []
+
+
+def test_synthesizer_prompt_requires_departmental_policy_tracker() -> None:
+    """The synthesizer prompt must drive the tracker off ``department_coverage``
+    rather than a fixed 4–5-section template (issue #208)."""
+    body = prompts_loader.load_prompt("synthesizer", goal="x")
+    # The structural-hint input is documented.
+    assert "department_coverage" in body
+    # The new section is named explicitly.
+    assert "Departmental Policy Tracker" in body
+    # Ranking is by count, not by template.
+    assert "high→low" in body or "high→low" in body
+    # The ≥1-finding inclusion rule is present (or the equivalent "do not
+    # omit" instruction).
+    assert "do not omit" in body.lower() or "every entry" in body.lower()
+    # The ≥3-findings → subsection threshold is named.
+    assert "≥3" in body or "≥3" in body

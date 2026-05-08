@@ -380,3 +380,107 @@ def test_smoke_pdf_against_local_fixture():
     out = _smoke_pdf(str(ARXIV_PDF))
     assert "page_sections: 1" in out
     assert "preview:" in out
+
+
+# ---------------------------------------------------------------------------
+# Section walk (issue #206)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_sections_unstructured_falls_through_to_windows():
+    """A PDF with no outline + few pages emits sliding-window pseudo-sections.
+
+    The arxiv fixture is a single page with no bookmarks. After the outline
+    + heading-regex paths fail to produce ≥3 sections, the function falls
+    through to the sliding-window representation flagged with
+    ``structured=False`` so the caller can dedupe by Jaccard.
+    """
+    sections = pdf.extract_sections_sync(ARXIV_PDF, doc_title="ArXiv Paper")
+    assert sections, "extract_sections_sync produced no sections"
+    assert all(not s["structured"] for s in sections)
+    for section in sections:
+        assert "ArXiv Paper" in section["breadcrumb"]
+        assert "window" in section["breadcrumb"]
+        assert isinstance(section["text"], str)
+        assert section["text"].strip()
+
+
+def test_extract_sections_uses_outline_when_available(monkeypatch):
+    """Outline anchors with ≥3 entries drive the structural slice."""
+    from pathlib import Path
+
+    fake_pages = [f"Page {i + 1} body text " * 10 for i in range(8)]
+
+    class _FakePage:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def extract_text(self) -> str:
+            return self._text
+
+    class _FakeDest:
+        def __init__(self, title: str) -> None:
+            self.title = title
+
+    class _FakeReader:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.outline = [
+                _FakeDest("Chapter 1: Intro"),
+                _FakeDest("Chapter 2: Methods"),
+                _FakeDest("Chapter 3: Results"),
+            ]
+            self.pages = [_FakePage(t) for t in fake_pages]
+
+        def get_destination_page_number(self, item) -> int:
+            return {
+                "Chapter 1: Intro": 0,
+                "Chapter 2: Methods": 3,
+                "Chapter 3: Results": 5,
+            }[item.title]
+
+    fake_pypdf = type("M", (), {"PdfReader": _FakeReader})
+    monkeypatch.setitem(__import__("sys").modules, "pypdf", fake_pypdf)
+
+    sections = pdf._build_sections(
+        Path("/tmp/fake.pdf"),
+        max_pages=20,
+        max_chars_per_section=200_000,
+        doc_title="Doc",
+    )
+    assert len(sections) == 3
+    assert sections[0]["breadcrumb"].startswith("Doc > Chapter 1: Intro")
+    assert sections[0]["page_start"] == 1
+    assert sections[0]["page_end"] == 3
+    assert sections[1]["page_start"] == 4
+    assert sections[1]["page_end"] == 5
+    assert sections[2]["page_end"] == 8
+    assert all(s["structured"] is True for s in sections)
+
+
+def test_slide_windows_overlaps():
+    text = "abcdefghijklmnopqrstuvwxyz" * 1000  # 26_000 chars
+    windows = pdf._slide_windows(text, window=10_000, overlap=1_000)
+    assert len(windows) >= 3
+    # Each window's start should advance by step = window - overlap = 9_000.
+    starts = [w[0] for w in windows]
+    assert starts[0] == 0
+    assert starts[1] == 9_000
+    # Ends are bounded by len(text).
+    assert windows[-1][1] <= len(text)
+
+
+def test_split_oversized_sections_replaces_with_windows():
+    big_text = "X" * 350_000
+    sections = [
+        {
+            "breadcrumb": "Doc > Big Chapter",
+            "text": big_text,
+            "page_start": 1,
+            "page_end": 200,
+            "structured": True,
+        }
+    ]
+    out = pdf._split_oversized_sections(sections, max_chars_per_section=200_000)
+    assert len(out) >= 2
+    assert all("window" in s["breadcrumb"] for s in out)
+    assert all(s["structured"] is False for s in out)

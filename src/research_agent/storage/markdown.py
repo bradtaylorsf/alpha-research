@@ -361,6 +361,29 @@ def write_critique(
     return version
 
 
+def _rotate_report_to(history_dir: Path, report_path: Path, *, prefix: str = "") -> Path | None:
+    """Rotate ``report_path`` into ``history_dir`` as ``<prefix><stamp>[-N].md``.
+
+    Shared by :func:`write_report` (within-run rotation under
+    ``report.history/``) and :meth:`Job.archive_and_soft_reset` (cross-run
+    rotation under ``archive/``). Uses the project's UTC ISO timestamp shape
+    (``YYYYMMDDTHHMMSSZ``); if two rotations land in the same second, appends
+    a numeric suffix rather than clobbering. Returns the archive path, or
+    ``None`` if ``report_path`` did not exist.
+    """
+    if not report_path.exists():
+        return None
+    history_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    archived = history_dir / f"{prefix}{stamp}.md"
+    suffix = 1
+    while archived.exists():
+        archived = history_dir / f"{prefix}{stamp}-{suffix}.md"
+        suffix += 1
+    os.replace(report_path, archived)
+    return archived
+
+
 def write_report(job: Job, content: str) -> Path:
     """Rotate any prior ``report.md`` into ``report.history/`` then write fresh content."""
     if not isinstance(content, str):
@@ -368,19 +391,7 @@ def write_report(job: Job, content: str) -> Path:
 
     report = job.root / "report.md"
     history_dir = job.root / "report.history"
-    history_dir.mkdir(parents=True, exist_ok=True)
-
-    if report.exists():
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        archived = history_dir / f"{stamp}.md"
-        # If two rotations land in the same second, append a suffix rather
-        # than clobbering. Atomic via os.replace inside _atomic rename below
-        # is unnecessary — the source already exists fully written.
-        suffix = 1
-        while archived.exists():
-            archived = history_dir / f"{stamp}-{suffix}.md"
-            suffix += 1
-        os.replace(report, archived)
+    _rotate_report_to(history_dir, report)
 
     _atomic_write_text(report, content if content.endswith("\n") else content + "\n")
     return report

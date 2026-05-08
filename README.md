@@ -406,6 +406,10 @@ research export <job-id> --zip
 research export <job-id> --md-bundle
 research export <job-id> --zip --out PATH
 research export <job-id> --md-bundle --include-history
+
+research compare <ref-a> <ref-b>           # delta table (counts, departments, hosts)
+research compare <ref-a> <ref-b> --json    # machine-readable deltas
+research compare <ref-a> <ref-b> --side-by-side   # unified diff via $PAGER
 ```
 
 `research start` runs interactive intake (or accepts `--skip-intake --goal
@@ -425,6 +429,15 @@ debugging FTS5 syntax).
 `jobs/<job-id>/` into a `ZIP_DEFLATED` archive; `--md-bundle` concatenates
 intake, `report.md`, every finding, and the source list into one navigable
 markdown file. Exactly one mode flag is required.
+
+`research compare` diffs two runs by counts (tasks, findings, sources,
+plan versions, drain-replans, cornerstone hits), department coverage, and
+source-host frequency. Each `<ref>` is either a live job id or a path to
+a `report.md` (works on archived copies under `jobs/<id>/archive/` even
+after the job's DB rows are gone). Re-running `research start` against the
+same goal auto-archives the prior `report.md` into that folder so this
+command always has something to compare against; pass `--fresh-reset` to
+opt back into the legacy "fail on collision" behavior.
 
 ### Config verbs
 

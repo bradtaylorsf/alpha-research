@@ -95,7 +95,8 @@ CREATE TABLE IF NOT EXISTS sources (
     archive_url TEXT,
     md_path TEXT,
     kind TEXT,
-    embedding BLOB
+    embedding BLOB,
+    parent_source_id INTEGER REFERENCES sources(id)
 );
 
 -- Job ↔ source many-to-many
@@ -262,6 +263,25 @@ def _migrate_sources_md_path_nullable(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_sources_parent_source_id(conn: sqlite3.Connection) -> None:
+    """Add ``sources.parent_source_id`` to legacy DBs (issue #206).
+
+    The cornerstone vector index writes one ``cornerstone_chunk`` row per
+    chunk and links it back to the parent cornerstone source via this
+    column so retrieval can filter by the parent. ``ALTER TABLE`` is the
+    safe path here because the column is nullable. Idempotent — checked
+    via ``PRAGMA table_info`` before adding.
+    """
+    cols = conn.execute("PRAGMA table_info(sources)").fetchall()
+    if not cols:
+        return
+    if any(c["name"] == "parent_source_id" for c in cols):
+        return
+    conn.execute(
+        "ALTER TABLE sources ADD COLUMN parent_source_id INTEGER REFERENCES sources(id)"
+    )
+
+
 def _migrate_jobs_completion_reason(conn: sqlite3.Connection) -> None:
     """Add ``jobs.completion_reason`` to legacy DBs that predate issue #39.
 
@@ -293,5 +313,6 @@ def migrate(
     with conn:
         conn.executescript(SCHEMA_SQL)
         _migrate_sources_md_path_nullable(conn)
+        _migrate_sources_parent_source_id(conn)
         _migrate_jobs_completion_reason(conn)
     return conn

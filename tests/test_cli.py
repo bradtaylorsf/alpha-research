@@ -1380,6 +1380,231 @@ def test_export_default_out_uses_cwd(isolated_jobs_repo: Path):
     assert expected.exists()
 
 
+# ---------------------------------------------------------------------------
+# `research start` archive-on-rerun (issue #210)
+# ---------------------------------------------------------------------------
+
+
+def test_start_same_goal_twice_archives_prior_report(
+    isolated_jobs_repo: Path, monkeypatch
+):
+    """Re-running with the same goal archives the prior report.md and reuses the job."""
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 12345)
+
+    runner = CliRunner()
+    first = runner.invoke(
+        cli.app,
+        ["start", "--skip-intake", "--goal", "Investigate Acme"],
+    )
+    assert first.exit_code == 0, first.stdout
+
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    job_id = f"{today}-investigate-acme"
+    job_root = isolated_jobs_repo / "jobs" / job_id
+    # Drop a synthetic report from the first run.
+    (job_root / "report.md").write_text("first run report\n", encoding="utf-8")
+
+    second = runner.invoke(
+        cli.app,
+        ["start", "--skip-intake", "--goal", "Investigate Acme"],
+    )
+    assert second.exit_code == 0, second.stdout
+    assert "archived prior report to" in second.stdout
+    # Same job id reused.
+    assert job_id in second.stdout
+
+    archive_dir = job_root / "archive"
+    archived_files = list(archive_dir.glob("report-*.md"))
+    assert len(archived_files) == 1
+    assert archived_files[0].read_text(encoding="utf-8") == "first run report\n"
+    # The live report.md was rotated away — daemon will rewrite when it runs.
+    assert not (job_root / "report.md").exists()
+
+
+def test_start_fresh_reset_flag_blocks_archive_path(
+    isolated_jobs_repo: Path, monkeypatch
+):
+    """``--fresh-reset`` opts back into the legacy FileExistsError-on-collision path."""
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 99)
+
+    runner = CliRunner()
+    first = runner.invoke(
+        cli.app,
+        ["start", "--skip-intake", "--goal", "Re-run target"],
+    )
+    assert first.exit_code == 0, first.stdout
+
+    second = runner.invoke(
+        cli.app,
+        ["start", "--skip-intake", "--goal", "Re-run target", "--fresh-reset"],
+    )
+    # Job.create raises FileExistsError when --fresh-reset short-circuits the
+    # archive path. CliRunner captures the unraised exception on result.exception.
+    assert second.exit_code != 0
+    assert isinstance(second.exception, FileExistsError)
+
+
+# ---------------------------------------------------------------------------
+# `research compare` (issue #210)
+# ---------------------------------------------------------------------------
+
+
+def _seed_compare_job(repo: Path, *, goal: str, today: date, report_text: str) -> Job:
+    job = _make_synthetic_job(repo, goal=goal, today=today)
+    (job.root / "report.md").write_text(report_text, encoding="utf-8")
+    return job
+
+
+def test_compare_two_job_ids_emits_delta_table(isolated_jobs_repo: Path):
+    job_a = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="alpha target",
+        today=date(2026, 5, 1),
+        report_text=(
+            "# Report A\n\n"
+            "## Defense\n\nbody [1] [2]\n\n"
+            "## Sources\n\n"
+            "- [1] T1 — https://example.com/x\n"
+            "- [2] T2 — https://other.com/y\n"
+        ),
+    )
+    job_b = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="beta target",
+        today=date(2026, 5, 2),
+        report_text=(
+            "# Report B\n\n"
+            "## Defense\n\nbody [1] [1] [2]\n\n"
+            "## EPA\n\nmore body [3]\n\n"
+            "## Sources\n\n"
+            "- [1] T1 — https://example.com/x\n"
+            "- [2] T2 — https://other.com/y\n"
+            "- [3] T3 — https://congress.gov/z\n"
+        ),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["compare", job_a.id, job_b.id])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    assert "Tasks done" in out
+    assert "Findings" in out
+    assert "Sources" in out
+    # New department surfaces in the delta block.
+    assert "EPA" in out
+
+
+def test_compare_paths_to_archived_reports(isolated_jobs_repo: Path, tmp_path: Path):
+    """Bare filesystem paths work even when the originating job rows are gone."""
+    a_path = tmp_path / "report-a.md"
+    a_path.write_text(
+        "## Defense\n\n[1]\n\n## Sources\n\n- [1] T — https://example.com/x\n",
+        encoding="utf-8",
+    )
+    b_path = tmp_path / "report-b.md"
+    b_path.write_text(
+        "## Defense\n\n[1] [2]\n\n"
+        "## EPA\n\n[2]\n\n"
+        "## Sources\n\n"
+        "- [1] T — https://example.com/x\n"
+        "- [2] U — https://congress.gov/z\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["compare", str(a_path), str(b_path), "--json"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert "a" in payload and "b" in payload and "deltas" in payload
+    # Source counts derive from the report's Sources section.
+    assert payload["a"]["sources"] == 1
+    assert payload["b"]["sources"] == 2
+    assert "EPA" in payload["deltas"]["departments_added"]
+
+
+def test_compare_json_emits_parseable_payload(isolated_jobs_repo: Path):
+    job_a = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="alpha",
+        today=date(2026, 5, 1),
+        report_text="## Sources\n\n- [1] T — https://example.com/x\n",
+    )
+    job_b = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="beta",
+        today=date(2026, 5, 2),
+        report_text="## Sources\n\n- [1] T — https://example.com/x\n",
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["compare", job_a.id, job_b.id, "--json"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    expected_keys = {
+        "tasks_done",
+        "findings",
+        "sources",
+        "plan_versions",
+        "drain_replans",
+        "cornerstone_hits",
+        "departments",
+        "source_hosts",
+        "top_cited",
+    }
+    assert expected_keys <= payload["a"].keys()
+    assert expected_keys <= payload["b"].keys()
+
+
+def test_compare_side_by_side_invokes_pager(isolated_jobs_repo: Path, monkeypatch):
+    job_a = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="alpha",
+        today=date(2026, 5, 1),
+        report_text="line one\nline two\n",
+    )
+    job_b = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="beta",
+        today=date(2026, 5, 2),
+        report_text="line one\nline two changed\n",
+    )
+
+    captured: dict[str, object] = {}
+
+    class _Result:
+        returncode = 0
+
+    def _fake_run(cmd, *, input=None, text=None, shell=None, check=None):
+        captured["cmd"] = cmd
+        captured["input"] = input
+        captured["shell"] = shell
+        return _Result()
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        ["compare", job_a.id, job_b.id, "--side-by-side"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert captured["shell"] is True
+    diff_input = captured["input"]
+    assert isinstance(diff_input, str)
+    assert "line two changed" in diff_input
+    # Unified diff carries the two ref labels as fromfile/tofile.
+    assert job_a.id in diff_input
+    assert job_b.id in diff_input
+
+
+def test_compare_path_to_unknown_file_fails_clearly(isolated_jobs_repo: Path, tmp_path: Path):
+    nope = tmp_path / "missing.md"
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["compare", str(nope), str(nope)])
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "report" in combined.lower() or "not found" in combined.lower()
+
+
 def test_export_out_directory_appends_default_name(isolated_jobs_repo: Path):
     job = _seed_export_job(isolated_jobs_repo)
     target_dir = isolated_jobs_repo / "exports"

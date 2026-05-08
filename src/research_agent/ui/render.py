@@ -380,6 +380,109 @@ def search_results_to_json(results: list[dict[str, Any]]) -> str:
     return json.dumps(results, indent=2, sort_keys=True, default=str)
 
 
+def _delta_cell(a: int, b: int) -> str:
+    """Return ``+N`` / ``-N`` / ``±0`` with a color cue for the delta column."""
+    delta = b - a
+    if delta > 0:
+        return f"[green]+{delta}[/green]"
+    if delta < 0:
+        return f"[red]{delta}[/red]"
+    return "±0"
+
+
+def render_comparison_summary(summary_a: Any, summary_b: Any) -> Group:
+    """Render a Rich group for ``research compare`` covering counts + deltas.
+
+    Mirrors the issue #210 example output: a count table with ``a`` / ``b`` /
+    ``delta`` columns, then department-coverage and source-host delta lines.
+    Both summaries are :class:`research_agent.cli.ComparisonSummary` instances
+    (typed as ``Any`` here so this module stays pure-rendering and avoids a
+    circular import).
+    """
+    table = Table(title="research compare", show_lines=False)
+    table.add_column("metric")
+    table.add_column(getattr(summary_a, "label", "a"), justify="right")
+    table.add_column(getattr(summary_b, "label", "b"), justify="right")
+    table.add_column("delta", justify="right")
+
+    metric_specs = (
+        ("Tasks done", "tasks_done"),
+        ("Findings", "findings"),
+        ("Sources", "sources"),
+        ("Plan versions", "plan_versions"),
+        ("Drain-replans", "drain_replans"),
+        ("Cornerstone hits", "cornerstone_hits"),
+    )
+    for label, attr in metric_specs:
+        a_val = int(getattr(summary_a, attr) or 0)
+        b_val = int(getattr(summary_b, attr) or 0)
+        table.add_row(label, str(a_val), str(b_val), _delta_cell(a_val, b_val))
+
+    dept_a = set(getattr(summary_a, "departments", set()) or set())
+    dept_b = set(getattr(summary_b, "departments", set()) or set())
+    only_b = sorted(dept_b - dept_a)
+    only_a = sorted(dept_a - dept_b)
+    dept_lines: list[str] = ["", "[bold]Department coverage delta[/bold]"]
+    if only_b:
+        dept_lines.append("  [green]+ " + ", ".join(only_b) + "[/green]")
+    if only_a:
+        dept_lines.append("  [red]- " + ", ".join(only_a) + "[/red]")
+    if not only_a and not only_b:
+        dept_lines.append("  (no change)")
+
+    hosts_a = dict(getattr(summary_a, "source_hosts", {}) or {})
+    hosts_b = dict(getattr(summary_b, "source_hosts", {}) or {})
+    host_keys = set(hosts_a) | set(hosts_b)
+    host_deltas = sorted(
+        ((host, int(hosts_b.get(host, 0)) - int(hosts_a.get(host, 0))) for host in host_keys),
+        key=lambda t: (-abs(t[1]), t[0]),
+    )
+    host_deltas = [(h, d) for h, d in host_deltas if d != 0][:10]
+    host_lines: list[str] = ["", "[bold]Source-host delta (top 10 by magnitude)[/bold]"]
+    if host_deltas:
+        for host, delta in host_deltas:
+            color = "green" if delta > 0 else "red"
+            sign = "+" if delta > 0 else ""
+            host_lines.append(f"  [{color}]{sign}{delta}[/{color}] {host}")
+    else:
+        host_lines.append("  (no change)")
+
+    body = "\n".join(dept_lines + host_lines)
+    return Group(table, body)
+
+
+def comparison_summary_to_json(summary_a: Any, summary_b: Any) -> str:
+    """Serialize two ``ComparisonSummary`` instances + deltas as JSON."""
+
+    def _as_dict(s: Any) -> dict[str, Any]:
+        return {
+            "label": getattr(s, "label", None),
+            "tasks_done": int(getattr(s, "tasks_done", 0) or 0),
+            "findings": int(getattr(s, "findings", 0) or 0),
+            "sources": int(getattr(s, "sources", 0) or 0),
+            "plan_versions": int(getattr(s, "plan_versions", 0) or 0),
+            "drain_replans": int(getattr(s, "drain_replans", 0) or 0),
+            "cornerstone_hits": int(getattr(s, "cornerstone_hits", 0) or 0),
+            "departments": sorted(getattr(s, "departments", set()) or set()),
+            "source_hosts": dict(getattr(s, "source_hosts", {}) or {}),
+            "top_cited": [list(t) for t in (getattr(s, "top_cited", []) or [])],
+        }
+
+    a = _as_dict(summary_a)
+    b = _as_dict(summary_b)
+    deltas = {
+        "tasks_done": b["tasks_done"] - a["tasks_done"],
+        "findings": b["findings"] - a["findings"],
+        "sources": b["sources"] - a["sources"],
+        "plan_versions": b["plan_versions"] - a["plan_versions"],
+        "drain_replans": b["drain_replans"] - a["drain_replans"],
+        "cornerstone_hits": b["cornerstone_hits"] - a["cornerstone_hits"],
+        "departments_added": sorted(set(b["departments"]) - set(a["departments"])),
+        "departments_removed": sorted(set(a["departments"]) - set(b["departments"])),
+    }
+    return json.dumps({"a": a, "b": b, "deltas": deltas}, indent=2, sort_keys=True, default=str)
+
+
 def format_event_line(event: dict[str, Any]) -> str:
     """One-line printable form of an event for `research logs`."""
     ts = event.get("ts", "?")
@@ -394,9 +497,11 @@ def format_event_line(event: dict[str, Any]) -> str:
 
 
 __all__ = [
+    "comparison_summary_to_json",
     "format_event_line",
     "jobs_to_json",
     "load_status_data",
+    "render_comparison_summary",
     "render_jobs_table",
     "render_search_table",
     "render_status_panel",

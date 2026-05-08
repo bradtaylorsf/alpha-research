@@ -47,6 +47,7 @@ from research_agent.observability.events import emit
 from research_agent.orchestrator.checkpoint import checkpoint
 from research_agent.orchestrator.errors import FatalError, RetriableError
 from research_agent.orchestrator.plan import Plan, TaskKind, TaskSpec
+from research_agent.skills import load_skill, load_strategies
 from research_agent.storage import db
 from research_agent.storage.jobs import Job
 from research_agent.storage.tasks import (
@@ -64,7 +65,51 @@ MAX_TASKS_PER_JOB = 10000
 HEURISTIC_CHECK_EVERY_N = 25
 RETRY_WAITS: tuple[int, ...] = (1, 2, 4, 8, 16, 30, 60)
 RETRY_MAX_ATTEMPTS = 5
+# Medium-scope default for drain-replan cap. Issue #209 made the runtime
+# cap scale with ``scope_class`` via ``_MAX_DRAIN_REPLANS_BY_SCOPE``; this
+# constant is preserved as the medium-scope value and is still honored as
+# the live cap when a plan has no ``scope_class`` set, so external imports
+# and tests that monkeypatch this symbol continue to work.
 MAX_DRAIN_REPLANS = 10
+
+# Issue #209: scope-aware cap for ``run_loop``'s drain-replan budget. A
+# fixed ``MAX_DRAIN_REPLANS=10`` (introduced by #117) is too tight for
+# broad/comprehensive investigations that name a cornerstone document or
+# enumerate dozens of sub-questions — a single cornerstone section-walk
+# (per #206) plus drill-down on each closed finding can consume 15-25
+# replans on its own. The medium row preserves the historical default.
+_MAX_DRAIN_REPLANS_BY_SCOPE: dict[str, int] = {
+    "narrow": 5,
+    "medium": 10,
+    "broad": 20,
+    "comprehensive": 30,
+}
+_MAX_DRAIN_REPLANS_FALLBACK = 10
+
+# Issue #209: minimum findings-per-subgoal before a goal is considered
+# "materially answered". When the drain-replan cap fires but open subgoals
+# still fall below the floor, the loop allows up to ``cap + floor`` more
+# replans targeting the under-served subgoals before terminating. Floors
+# scale with ``scope_class`` for the same reason caps do.
+_FINDING_FLOOR_BY_SCOPE: dict[str, int] = {
+    "narrow": 5,
+    "medium": 10,
+    "broad": 20,
+    "comprehensive": 30,
+}
+_FINDING_FLOOR_FALLBACK = 10
+
+# Connectors we always check for "did this fire?" when emitting the
+# ``cap_diagnostic`` event — useful when the planner's last template
+# narrowed to one or two kinds and the operator wants to see which
+# retrieval surfaces never got exercised.
+_CORE_CONNECTOR_KINDS = (
+    "web_search",
+    "congress_search",
+    "edgar_search",
+    "fedregister_search",
+    "courtlistener_search",
+)
 
 # Scope-aware default for how many top hits per search become web_fetch
 # follow-ups. Issue #178: a global default of 3 starves broad/comprehensive
@@ -185,6 +230,35 @@ def _filter_kwargs_for(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k in accepted}
 
 
+def _deep_load_skills_for_connector(
+    job: Job,
+    module_name: str,
+    payload: dict[str, Any],
+) -> None:
+    """Deep-load the connector skill + any active strategy skills.
+
+    Fires ``skills/skill_loaded`` telemetry for the matching connector
+    (when its file ships) and for each strategy named on the latest plan's
+    ``active_strategies`` (threaded into the task payload by
+    :func:`_enqueue_plan_tasks` as ``_active_strategies``). The loaded
+    bodies are not consumed yet — the LLM-driven kwarg-construction step
+    that will read them is its own follow-up issue. Loading here is what
+    fires telemetry and warms the cache so skill content is available the
+    moment a downstream caller wants it.
+
+    Missing skills return empty strings; this never raises so a planner
+    that names a not-yet-shipped connector or strategy can't break the
+    connector path.
+    """
+    try:
+        load_skill("connectors", module_name, job=job)
+        active = payload.get("_active_strategies")
+        if isinstance(active, list) and active:
+            load_strategies([s for s in active if isinstance(s, str)], job=job)
+    except Exception:  # noqa: BLE001 — skills are auxiliary; never break the connector
+        logger.exception("skills_deep_load_failed module=%s", module_name)
+
+
 def _make_connector_search_handler(module_name: str) -> Handler:
     """Build a thin search-handler that dispatches to ``tools.<module_name>.search``.
 
@@ -197,6 +271,12 @@ def _make_connector_search_handler(module_name: str) -> Handler:
     masked as missing-credential failures. Returns the standard
     search-result + ``follow_up_tasks`` shape so each top hit becomes a
     connector-aware ``web_fetch`` follow-up.
+
+    Before dispatching to ``mod.search``, deep-loads the matching
+    connector skill (if shipped) plus any active strategies threaded into
+    the payload by :func:`_enqueue_plan_tasks`. Only the relevant skill
+    bodies are loaded — the per-connector knowledge stays out of the
+    planner's system prompt and is materialized exactly at task-emit time.
     """
 
     async def _handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
@@ -204,6 +284,7 @@ def _make_connector_search_handler(module_name: str) -> Handler:
 
         mod = import_module(f"research_agent.tools.{module_name}")
         payload = task["payload"]
+        _deep_load_skills_for_connector(job, module_name, payload)
         kwargs = {
             k: v for k, v in payload.items() if k in _CONNECTOR_SEARCH_PASSTHROUGH
         }
@@ -224,7 +305,9 @@ def _make_connector_fetch_handler(module_name: str) -> Handler:
     fetch path: persists the returned ``Source`` and converts the
     connector's :class:`MissingCredentialError` to :class:`FatalError`.
     Plain ``RuntimeError`` from inside the connector propagates to the
-    loop's catch-all so unexpected failures stay diagnosable.
+    loop's catch-all so unexpected failures stay diagnosable. Deep-loads
+    the connector skill so the same telemetry path fires whether the loop
+    enters via the search or fetch side.
     """
 
     async def _handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
@@ -232,6 +315,7 @@ def _make_connector_fetch_handler(module_name: str) -> Handler:
 
         mod = import_module(f"research_agent.tools.{module_name}")
         payload = task["payload"]
+        _deep_load_skills_for_connector(job, module_name, payload)
         url = payload.get("url")
         if not url:
             raise FatalError(f"{module_name}_fetch: missing url field")
@@ -370,6 +454,9 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         )
         return {"results": results}
 
+    async def _cornerstone_query(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        return await _run_cornerstone_query(job, task, router=router)
+
     async def _synthesize(job: Job, task: dict[str, Any]) -> dict[str, Any] | None:
         from research_agent.orchestrator.synth import final_synthesis, synthesize
 
@@ -424,6 +511,7 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         "news_search": _news_search,
         "reddit_search": _reddit_search,
         "local_corpus_query": _local_corpus_query,
+        "cornerstone_query": _cornerstone_query,
         "github_search": _not_implemented_handler,
         "github_fetch": _not_implemented_handler,
         "extract_findings": _extract_findings,
@@ -595,6 +683,157 @@ def _load_recent_task_results(job: Job, limit: int = 20) -> list[dict[str, Any]]
     return out
 
 
+def _load_pending_follow_up_questions(
+    recent_results: list[dict[str, Any]],
+) -> list[str]:
+    """Pull cornerstone-emitted ``follow_up_questions`` from recent task results.
+
+    Issue #206: cornerstone-section extraction surfaces questions the
+    document raises. The drain-replan calls this to feed them to
+    :func:`tactical_replan` so the planner sees them as candidate
+    sub-questions on the next iteration. Deduped by case-insensitive
+    text so two sections asking the same question don't double-count.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in recent_results:
+        result = r.get("result")
+        if not isinstance(result, dict):
+            continue
+        questions = result.get("follow_up_questions")
+        if not isinstance(questions, list):
+            continue
+        for q in questions:
+            if not isinstance(q, str):
+                continue
+            cleaned = q.strip()
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(cleaned)
+    return out
+
+
+def _resolve_drain_cap(plan: Plan | None) -> int:
+    """Return the drain-replan cap for ``plan``'s ``scope_class`` (issue #209).
+
+    When no scope is set we read the live ``MAX_DRAIN_REPLANS`` symbol from
+    this module so legacy callers and tests that monkeypatch the constant
+    continue to drive the cap.
+    """
+    scope = plan.scope_class if plan is not None else None
+    if scope:
+        return _MAX_DRAIN_REPLANS_BY_SCOPE.get(scope, _MAX_DRAIN_REPLANS_FALLBACK)
+    return MAX_DRAIN_REPLANS
+
+
+def _resolve_finding_floor(plan: Plan | None) -> int:
+    """Return the per-subgoal findings-floor for ``plan``'s ``scope_class``."""
+    scope = plan.scope_class if plan is not None else None
+    return _FINDING_FLOOR_BY_SCOPE.get(scope or "", _FINDING_FLOOR_FALLBACK)
+
+
+def _under_served_subgoals(
+    plan: Plan, total_findings: int, floor: int
+) -> list[dict[str, Any]]:
+    """Identify open subgoals that may justify extending the drain-replan cap.
+
+    Findings aren't tagged by subgoal in the schema, so we estimate
+    coverage as ``total_findings // open_subgoals`` — coarse but enough to
+    distinguish "barely investigated" from "thoroughly answered". Every
+    open subgoal is reported (an unclosed subgoal is by definition not
+    materially answered) along with its estimated finding count and the
+    floor threshold, so the cap-diagnostic event is self-explanatory.
+    """
+    open_subgoals = [sg for sg in plan.subgoals if not sg.done]
+    if not open_subgoals:
+        return []
+    estimate = total_findings // max(len(open_subgoals), 1)
+    return [
+        {
+            "id": sg.id,
+            "description": sg.description,
+            "finding_count": estimate,
+            "floor": floor,
+        }
+        for sg in open_subgoals
+    ]
+
+
+def _unexercised_connectors(job: Job, plan: Plan, *, limit: int = 5) -> list[str]:
+    """Return connector kinds the planner expected but never actually ran.
+
+    Combines kinds named in ``plan.task_template`` with a small core set
+    and diffs against the distinct ``kind`` of completed tasks for the
+    job. Surfaces "we never tried EDGAR / FedRegister" before the cap hit.
+    """
+    template_kinds = {spec.kind for spec in plan.task_template}
+    candidates = template_kinds | set(_CORE_CONNECTOR_KINDS)
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT kind FROM tasks WHERE job_id = ? AND status = 'done'",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    exercised = {r["kind"] for r in rows}
+    return sorted(k for k in candidates if k not in exercised)[:limit]
+
+
+def _next_plausible_searches(plan: Plan, limit: int = 3) -> list[str]:
+    """Pull up to ``limit`` next-search/fetch payload strings from the plan.
+
+    Looks at ``plan.task_template`` (i.e. the planner's most recent output)
+    and returns the first ``query``/``q``/``url`` it can find for each
+    ``*_search``/``*_fetch`` task — what the planner was *about* to do
+    when the cap hit, surfaced for the operator.
+    """
+    out: list[str] = []
+    for spec in plan.task_template:
+        kind = spec.kind
+        if not (kind.endswith("_search") or kind.endswith("_fetch")):
+            continue
+        payload = spec.payload or {}
+        for key in ("query", "q", "url"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                out.append(value.strip())
+                break
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _emit_cap_diagnostic(
+    job: Job,
+    plan: Plan,
+    findings: list[dict[str, Any]],
+    floor: int,
+    *,
+    cap: int,
+) -> None:
+    """Emit ``loop/cap_diagnostic`` so operators can see what wasn't done.
+
+    Issue #209: when the drain-replan cap fires, a sparse final report
+    leaves the operator guessing which subgoals were under-served and
+    which connectors never ran. This event makes that explicit.
+    """
+    payload = {
+        "scope_class": plan.scope_class,
+        "cap": cap,
+        "floor": floor,
+        "total_findings": len(findings),
+        "under_served_subgoals": _under_served_subgoals(plan, len(findings), floor),
+        "unexercised_connectors": _unexercised_connectors(job, plan),
+        "next_plausible_searches": _next_plausible_searches(plan),
+    }
+    emit(job, "WARN", "loop", "cap_diagnostic", payload)
+
+
 async def _drain_replan(
     job: Job,
     plan: Plan,
@@ -623,6 +862,7 @@ async def _drain_replan(
         recent_results = _load_recent_task_results(job)
         findings = _load_all_findings(job)
         synth_md = _load_latest_synthesis_md(job)
+        followups = _load_pending_follow_up_questions(recent_results)
         new_plan = await tactical_replan(
             job,
             plan,
@@ -630,6 +870,7 @@ async def _drain_replan(
             router=router,
             findings=findings,
             synthesis_md=synth_md,
+            follow_up_questions=followups,
         )
     except Exception as exc:  # noqa: BLE001 — drain replan failure must not kill the loop
         emit(
@@ -1299,14 +1540,24 @@ def _extract_yaml_block(raw: str) -> str:
 
 
 def _persist_raw_findings_yaml(
-    job: Job, source_id: int, raw: str
+    job: Job,
+    source_id: int,
+    raw: str,
+    *,
+    suffix: str | None = None,
 ) -> str:
     """Write the researcher's raw YAML to ``findings/raw/<source_id>.yaml``.
 
     Saved before parse so a malformed extraction still leaves an artifact
-    on disk for forensics + future learnings.
+    on disk for forensics + future learnings. ``suffix`` (issue #206)
+    distinguishes per-section raw outputs of a cornerstone walk: e.g.
+    ``findings/raw/000123-section-001.yaml`` so each LLM call's raw
+    output stays separately auditable.
     """
-    rel = f"findings/raw/{source_id:06d}.yaml"
+    if suffix:
+        rel = f"findings/raw/{source_id:06d}-{suffix}.yaml"
+    else:
+        rel = f"findings/raw/{source_id:06d}.yaml"
     from research_agent.storage.jobs import _atomic_write_text
 
     _atomic_write_text(job.root / rel, raw if raw.endswith("\n") else raw + "\n")
@@ -1323,16 +1574,21 @@ async def _run_extract_findings(
 
     Payload contract: ``{"source_id": int, "sub_question": str (optional)}``.
     The model emits a YAML list of ``{claim, confidence, quote, tags}``
-    findings, which we parse + validate + write via :func:`write_finding`.
-    Raw output is also persisted under ``findings/raw/`` for forensics.
-    Empty extractions are valid and return ``findings_written = 0``.
+    findings (or, for cornerstones, a mapping with ``findings`` and
+    ``follow_up_questions``). We parse + validate + write each via
+    :func:`write_finding`. Raw output is also persisted under
+    ``findings/raw/`` for forensics.
+
+    Cornerstone documents (issue #206) take a structural section-walk
+    path: ``pdf.extract_sections`` slices the PDF by outline / heading
+    regex, and the cornerstone-extract prompt fires once per section
+    with breadcrumb context prepended. Findings are tagged with the
+    section breadcrumb, sliding-window fallback sections are deduped
+    by claim Jaccard ≥ 0.85, and the document is also chunk-and-
+    embedded into a per-job vector index so the ``cornerstone_query``
+    task can retrieve top-K chunks for a sub-question without
+    re-fetching the PDF.
     """
-    import yaml
-    from pydantic_ai import Agent
-
-    from research_agent.prompts.loader import load_prompt
-    from research_agent.storage.markdown import write_finding
-
     payload = task.get("payload") or {}
     source_id = payload.get("source_id")
     if not isinstance(source_id, int):
@@ -1347,9 +1603,6 @@ async def _run_extract_findings(
 
     is_cornerstone, via_size_fallback = _is_cornerstone_source(job, meta, text)
     if is_cornerstone:
-        prompt_name = "researcher_cornerstone"
-        text_limit = _CORNERSTONE_EXTRACT_TEXT_LIMIT
-        findings_limit = _CORNERSTONE_FINDINGS_PER_SOURCE_LIMIT
         if via_size_fallback:
             emit(
                 job,
@@ -1371,27 +1624,79 @@ async def _run_extract_findings(
             {
                 "source_id": source_id,
                 "url": meta.get("url"),
-                "prompt": prompt_name,
+                "prompt": "researcher_cornerstone",
                 "text_chars": len(text),
             },
         )
-    else:
-        prompt_name = "researcher"
-        text_limit = _EXTRACT_TEXT_LIMIT
-        findings_limit = _FINDINGS_PER_SOURCE_LIMIT
+        return await _run_cornerstone_section_walk(
+            job,
+            source_id=source_id,
+            meta=meta,
+            text=text,
+            sub_question=sub_question,
+            payload=payload,
+            router=router,
+        )
+
+    regular_result = await _run_single_extract(
+        job,
+        source_id=source_id,
+        meta=meta,
+        text=text,
+        sub_question=sub_question,
+        payload=payload,
+        router=router,
+        prompt_name="researcher",
+        text_limit=_EXTRACT_TEXT_LIMIT,
+        findings_limit=_FINDINGS_PER_SOURCE_LIMIT,
+    )
+    # ``_written_findings`` is an internal handoff for the cornerstone walk
+    # and ``cornerstone_query`` aggregators; never persist it into the regular
+    # extract task's ``result_json``.
+    regular_result.pop("_written_findings", None)
+    return regular_result
+
+
+async def _run_single_extract(
+    job: Job,
+    *,
+    source_id: int,
+    meta: dict[str, Any],
+    text: str,
+    sub_question: str,
+    payload: dict[str, Any],
+    router: Any,
+    prompt_name: str,
+    text_limit: int,
+    findings_limit: int,
+    extra_tags: list[str] | None = None,
+    breadcrumb: str | None = None,
+    raw_path_suffix: str | None = None,
+) -> dict[str, Any]:
+    """Single-pass extract used by the regular path and per-section calls."""
+    import yaml
+    from pydantic_ai import Agent
+
+    from research_agent.prompts.loader import load_prompt
 
     rendered = load_prompt(prompt_name, job=job, goal=job.goal)
     agent = Agent(router.model_for("general"), output_type=str, system_prompt=rendered)
+    breadcrumb_line = (
+        f"This section is from {breadcrumb}.\n\n" if breadcrumb else ""
+    )
     context = (
         f"Sub-question: {sub_question}\n"
         f"Source URL: {meta.get('url')}\n"
         f"Source title: {meta.get('title')}\n\n"
+        f"{breadcrumb_line}"
         f"Source content:\n{_truncate_for_prompt(text, text_limit)}"
     )
     result = await router.call("general", agent, context)
     raw = result.output if isinstance(result.output, str) else str(result.output)
 
-    raw_path = _persist_raw_findings_yaml(job, source_id, raw)
+    raw_path = _persist_raw_findings_yaml(
+        job, source_id, raw, suffix=raw_path_suffix
+    )
 
     yaml_text = _extract_yaml_block(raw)
     try:
@@ -1402,22 +1707,338 @@ async def _run_extract_findings(
             f"({raw_path}): {exc}"
         ) from exc
 
-    if parsed is None:
-        parsed = []
-    if not isinstance(parsed, list):
-        raise FatalError(
-            f"extract_findings: YAML root must be a list (source {source_id}, "
-            f"{raw_path}); got {type(parsed).__name__}"
+    items, follow_up_questions = _normalize_findings_yaml(
+        parsed, source_id=source_id, raw_path=raw_path
+    )
+
+    written, written_findings, skipped = _write_findings_batch(
+        job,
+        source_id=source_id,
+        items=items,
+        findings_limit=findings_limit,
+        extra_tags=extra_tags,
+    )
+
+    result_dict: dict[str, Any] = {
+        "source_id": source_id,
+        "findings_written": len(written),
+        "finding_ids": written,
+        "skipped": skipped,
+        "raw_path": raw_path,
+        "follow_up_questions": follow_up_questions,
+    }
+
+    follow_ups = _build_second_order_fanout(job, written_findings, payload)
+    if follow_ups:
+        result_dict["follow_up_tasks"] = [t.model_dump() for t in follow_ups]
+    result_dict["_written_findings"] = written_findings
+    return result_dict
+
+
+_CORNERSTONE_DEDUP_THRESHOLD = 0.85
+
+
+async def _run_cornerstone_section_walk(
+    job: Job,
+    *,
+    source_id: int,
+    meta: dict[str, Any],
+    text: str,
+    sub_question: str,
+    payload: dict[str, Any],
+    router: Any,
+) -> dict[str, Any]:
+    """Section-walk + per-job index for cornerstone documents (issue #206).
+
+    1. Try ``pdf.extract_sections`` to slice the document by outline /
+       heading regex / sliding window.
+    2. Run the cornerstone-extract prompt once per section with a
+       breadcrumb-prefixed context line. Per-section findings carry the
+       breadcrumb as a tag.
+    3. When sections are unstructured (sliding-window fallback), dedupe
+       findings by Jaccard ≥ :data:`_CORNERSTONE_DEDUP_THRESHOLD`.
+    4. After extraction, build a per-job vector index of the document so
+       a future ``cornerstone_query`` can retrieve top-K chunks without
+       re-fetching the PDF.
+    """
+    sections = await _try_extract_sections(job, meta, text)
+
+    aggregated_written: list[int] = []
+    aggregated_written_findings: list[dict[str, Any]] = []
+    aggregated_skipped = 0
+    aggregated_follow_ups: list[str] = []
+    raw_paths: list[str] = []
+    seen_claim_token_sets: list[set[str]] = []
+    any_unstructured = False
+
+    if not sections:
+        # No section walk available — fall back to one whole-document call,
+        # preserving the legacy single-pass cornerstone behavior.
+        whole_result = await _run_single_extract(
+            job,
+            source_id=source_id,
+            meta=meta,
+            text=text,
+            sub_question=sub_question,
+            payload=payload,
+            router=router,
+            prompt_name="researcher_cornerstone",
+            text_limit=_CORNERSTONE_EXTRACT_TEXT_LIMIT,
+            findings_limit=_CORNERSTONE_FINDINGS_PER_SOURCE_LIMIT,
+        )
+        whole_result.pop("_written_findings", None)
+        return whole_result
+
+    for idx, section in enumerate(sections):
+        breadcrumb = str(section.get("breadcrumb") or f"section {idx + 1}")
+        section_text = str(section.get("text") or "")
+        if not section_text.strip():
+            continue
+        structured = bool(section.get("structured", True))
+        if not structured:
+            any_unstructured = True
+        section_result = await _run_single_extract(
+            job,
+            source_id=source_id,
+            meta=meta,
+            text=section_text,
+            sub_question=sub_question,
+            payload=payload,
+            router=router,
+            prompt_name="researcher_cornerstone",
+            text_limit=_CORNERSTONE_EXTRACT_TEXT_LIMIT,
+            findings_limit=_CORNERSTONE_FINDINGS_PER_SOURCE_LIMIT,
+            extra_tags=[breadcrumb],
+            breadcrumb=breadcrumb,
+            raw_path_suffix=f"section-{idx + 1:03d}",
         )
 
+        section_written = section_result.pop("_written_findings", [])
+        emit(
+            job,
+            "INFO",
+            "loop",
+            "cornerstone_section_extract",
+            {
+                "source_id": source_id,
+                "section_idx": idx,
+                "breadcrumb": breadcrumb,
+                "text_chars": len(section_text),
+                "findings_written": int(section_result.get("findings_written") or 0),
+                "structured": structured,
+            },
+        )
+        aggregated_written.extend(section_result.get("finding_ids") or [])
+        aggregated_written_findings.extend(section_written)
+        aggregated_skipped += int(section_result.get("skipped") or 0)
+        aggregated_follow_ups.extend(section_result.get("follow_up_questions") or [])
+        raw_paths.append(str(section_result.get("raw_path") or ""))
+        for f in section_written:
+            seen_claim_token_sets.append(_tokenize_for_jaccard(f.get("claim", "")))
+
+    if any_unstructured and aggregated_written_findings:
+        before = len(aggregated_written_findings)
+        kept_findings, kept_ids = _dedupe_findings_by_jaccard(
+            aggregated_written_findings,
+            threshold=_CORNERSTONE_DEDUP_THRESHOLD,
+        )
+        if len(kept_findings) != before:
+            emit(
+                job,
+                "INFO",
+                "loop",
+                "cornerstone_dedup",
+                {
+                    "source_id": source_id,
+                    "before": before,
+                    "after": len(kept_findings),
+                    "threshold": _CORNERSTONE_DEDUP_THRESHOLD,
+                },
+            )
+        aggregated_written_findings = kept_findings
+        aggregated_written = kept_ids
+
+    if aggregated_follow_ups:
+        emit(
+            job,
+            "INFO",
+            "loop",
+            "cornerstone_followups_emitted",
+            {
+                "source_id": source_id,
+                "count": len(aggregated_follow_ups),
+            },
+        )
+
+    result_dict: dict[str, Any] = {
+        "source_id": source_id,
+        "findings_written": len(aggregated_written),
+        "finding_ids": aggregated_written,
+        "skipped": aggregated_skipped,
+        "raw_path": raw_paths[0] if raw_paths else None,
+        "section_raw_paths": raw_paths,
+        "follow_up_questions": aggregated_follow_ups,
+    }
+
+    follow_ups = _build_second_order_fanout(
+        job, aggregated_written_findings, payload
+    )
+    if follow_ups:
+        result_dict["follow_up_tasks"] = [t.model_dump() for t in follow_ups]
+
+    # Build the per-job vector index. Failure here must not fail the
+    # extraction task — a missing index just disables Stage-3 retrieval
+    # for this document.
+    try:
+        await _build_cornerstone_index(job, source_id, sections, meta)
+    except Exception as exc:  # noqa: BLE001
+        emit(
+            job,
+            "WARN",
+            "loop",
+            "cornerstone_index_failed",
+            {"source_id": source_id, "error": str(exc)},
+        )
+
+    return result_dict
+
+
+async def _try_extract_sections(
+    job: Job,
+    meta: dict[str, Any],
+    text: str,
+) -> list[dict[str, object]]:
+    """Try ``pdf.extract_sections`` for a cornerstone PDF; return [] otherwise.
+
+    Section-walk only fires when the source was actually fetched as a
+    PDF (``source_kind == 'pdf'``) and we have a URL we can re-fetch.
+    HTML / markdown cornerstones (older test fixtures, web-fetched
+    cornerstones) keep the legacy single-pass behavior so existing
+    callers don't break — issue #206 explicitly scopes the section-walk
+    to PDF inputs.
+    """
+    if meta.get("source_kind") != "pdf":
+        return []
+    url = meta.get("url")
+    if not isinstance(url, str) or not url:
+        return []
+    from research_agent.tools import pdf
+
+    try:
+        sections = await pdf.extract_sections(
+            url,
+            doc_title=meta.get("title") or url,
+            job=job,
+        )
+    except Exception as exc:  # noqa: BLE001 — section walk is best-effort
+        emit(
+            job,
+            "WARN",
+            "loop",
+            "cornerstone_section_walk_failed",
+            {"url": url, "error": str(exc)},
+        )
+        return []
+    return sections
+
+
+async def _build_cornerstone_index(
+    job: Job,
+    parent_source_id: int,
+    sections: list[dict[str, object]],
+    meta: dict[str, Any],
+) -> None:
+    """Run :func:`local_corpus.index_cornerstone_source` in an executor.
+
+    Embedding calls are blocking HTTP requests against LM Studio; running
+    them inline would stall the loop. The orchestrator already ships a
+    sync indexer for the corpus path, so we mirror it here.
+    """
+    if not sections:
+        return
+    from research_agent.tools import local_corpus
+
+    def _index() -> dict[str, int]:
+        return local_corpus.index_cornerstone_source(
+            job,
+            parent_source_id,
+            sections,
+            parent_url=meta.get("url"),
+            parent_title=meta.get("title"),
+        )
+
+    summary = await asyncio.get_running_loop().run_in_executor(None, _index)
+    emit(
+        job,
+        "INFO",
+        "loop",
+        "cornerstone_index_built",
+        {
+            "source_id": parent_source_id,
+            "chunks_indexed": summary.get("chunks_indexed", 0),
+            "chunks_skipped": summary.get("chunks_skipped", 0),
+            "embed_dim": summary.get("embed_dim", 0),
+            "section_count": len(sections),
+        },
+    )
+
+
+def _normalize_findings_yaml(
+    parsed: Any,
+    *,
+    source_id: int,
+    raw_path: str,
+) -> tuple[list[Any], list[str]]:
+    """Coerce parser output to ``(items, follow_up_questions)``.
+
+    Accepts either the legacy list-root form (just findings) or the new
+    mapping form ``{findings: [...], follow_up_questions: [...]}``
+    introduced for the cornerstone-section pass (issue #206).
+    """
+    if parsed is None:
+        return [], []
+    if isinstance(parsed, list):
+        return parsed, []
+    if isinstance(parsed, dict):
+        items = parsed.get("findings") or []
+        if not isinstance(items, list):
+            raise FatalError(
+                f"extract_findings: 'findings' must be a list (source {source_id}, "
+                f"{raw_path}); got {type(items).__name__}"
+            )
+        questions_raw = parsed.get("follow_up_questions") or []
+        questions: list[str] = []
+        if isinstance(questions_raw, list):
+            for q in questions_raw:
+                if isinstance(q, str) and q.strip():
+                    questions.append(q.strip())
+        return items, questions
+    raise FatalError(
+        f"extract_findings: YAML root must be a list or mapping (source {source_id}, "
+        f"{raw_path}); got {type(parsed).__name__}"
+    )
+
+
+def _write_findings_batch(
+    job: Job,
+    *,
+    source_id: int,
+    items: list[Any],
+    findings_limit: int,
+    extra_tags: list[str] | None = None,
+) -> tuple[list[int], list[dict[str, Any]], int]:
+    """Write up to ``findings_limit`` findings; return ``(ids, mirrors, skipped)``.
+
+    ``extra_tags`` are prepended to each finding's ``tags`` list so the
+    section breadcrumb is preserved on the persisted row — downstream
+    ``tactical_replan`` reads tags to build per-proposal sub-questions.
+    """
+    from research_agent.storage.markdown import write_finding
+
     written: list[int] = []
-    # Mirror of ``written`` plus the {claim, confidence, quote} fields the
-    # second-order URL fan-out (#194) needs. We capture them at write time
-    # so the fan-out helper doesn't have to round-trip through the DB to
-    # rebuild what we already parsed.
     written_findings: list[dict[str, Any]] = []
     skipped = 0
-    for item in parsed[:findings_limit]:
+    for item in items[:findings_limit]:
         if not isinstance(item, dict):
             skipped += 1
             continue
@@ -1435,7 +2056,10 @@ async def _run_extract_findings(
             skipped += 1
             continue
         tags_raw = item.get("tags") or []
-        tags_list = [str(t) for t in tags_raw if isinstance(t, (str, int))] or None
+        tags_list = [str(t) for t in tags_raw if isinstance(t, (str, int))]
+        if extra_tags:
+            tags_list = [*extra_tags, *tags_list]
+        tags_final = tags_list or None
         quote_raw = item.get("quote")
         quote_str = quote_raw.strip() if isinstance(quote_raw, str) else ""
         try:
@@ -1444,7 +2068,7 @@ async def _run_extract_findings(
                 claim=claim_raw.strip(),
                 confidence=conf,
                 source_ids=[source_id],
-                tags=tags_list,
+                tags=tags_final,
             )
             written.append(fid)
             written_findings.append(
@@ -1458,20 +2082,215 @@ async def _run_extract_findings(
         except (ValueError, TypeError):
             skipped += 1
             continue
+    return written, written_findings, skipped
 
-    result_dict: dict[str, Any] = {
-        "source_id": source_id,
-        "findings_written": len(written),
-        "finding_ids": written,
-        "skipped": skipped,
-        "raw_path": raw_path,
-    }
 
-    follow_ups = _build_second_order_fanout(job, written_findings, payload)
-    if follow_ups:
-        result_dict["follow_up_tasks"] = [t.model_dump() for t in follow_ups]
+def _tokenize_for_jaccard(text: str) -> set[str]:
+    """Lowercase + whitespace-split tokens for Jaccard dedupe."""
+    if not isinstance(text, str):
+        return set()
+    return {t for t in text.lower().split() if t}
 
-    return result_dict
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    if union == 0:
+        return 0.0
+    return inter / union
+
+
+def _dedupe_findings_by_jaccard(
+    findings: list[dict[str, Any]],
+    *,
+    threshold: float,
+) -> tuple[list[dict[str, Any]], list[int]]:
+    """Drop near-duplicates from ``findings`` using whitespace-token Jaccard.
+
+    Earlier findings beat later ones when they're near-duplicates — the
+    sliding-window fallback emits sections in document order, so the
+    first occurrence of a claim is the one we keep.
+    """
+    kept: list[dict[str, Any]] = []
+    kept_ids: list[int] = []
+    seen_token_sets: list[set[str]] = []
+    for f in findings:
+        tokens = _tokenize_for_jaccard(f.get("claim") or "")
+        if not tokens:
+            kept.append(f)
+            fid = f.get("finding_id")
+            if isinstance(fid, int):
+                kept_ids.append(fid)
+            seen_token_sets.append(tokens)
+            continue
+        is_dup = any(
+            _jaccard(tokens, prior) >= threshold for prior in seen_token_sets
+        )
+        if is_dup:
+            continue
+        kept.append(f)
+        fid = f.get("finding_id")
+        if isinstance(fid, int):
+            kept_ids.append(fid)
+        seen_token_sets.append(tokens)
+    return kept, kept_ids
+
+
+async def _run_cornerstone_query(
+    job: Job,
+    task: dict[str, Any],
+    *,
+    router: Any,
+) -> dict[str, Any]:
+    """Retrieve cornerstone chunks for a sub-question + extract findings (issue #206).
+
+    Payload contract: ``{"sub_question": str, "cornerstone_url": str (optional),
+    "parent_source_id": int (optional), "top_k": int (default 8)}``.
+
+    Resolves the parent source by ``parent_source_id`` directly when given,
+    otherwise by URL match against the latest plan's ``cornerstone_url`` /
+    payload's ``cornerstone_url``. Embeds the sub-question, ranks chunks
+    by cosine, and feeds the top-K (with breadcrumb-tagged context) to
+    the standard ``researcher`` prompt — *not* ``researcher_cornerstone``,
+    because retrieval already focuses the prompt on a sub-question.
+    """
+    payload = task.get("payload") or {}
+    sub_question = payload.get("sub_question") or job.goal
+    if not isinstance(sub_question, str) or not sub_question.strip():
+        raise FatalError("cornerstone_query: payload.sub_question (str) is required")
+
+    parent_source_id = payload.get("parent_source_id")
+    if not isinstance(parent_source_id, int):
+        target_url = payload.get("cornerstone_url")
+        if not isinstance(target_url, str) or not target_url:
+            plan = _load_latest_plan(job)
+            target_url = plan.cornerstone_url if plan is not None else None
+        if not isinstance(target_url, str) or not target_url:
+            raise FatalError(
+                "cornerstone_query: parent_source_id or cornerstone_url is required"
+            )
+        parent_source_id = _resolve_cornerstone_parent_id(job, target_url)
+        if parent_source_id is None:
+            raise FatalError(
+                f"cornerstone_query: no parent source found for url {target_url!r}"
+            )
+
+    top_k = int(payload.get("top_k") or 8)
+
+    from research_agent.tools import local_corpus
+
+    def _retrieve() -> list[dict[str, Any]]:
+        return local_corpus.cornerstone_query(
+            sub_question, job, parent_source_id, top_k=top_k
+        )
+
+    hits = await asyncio.get_running_loop().run_in_executor(None, _retrieve)
+    emit(
+        job,
+        "INFO",
+        "loop",
+        "cornerstone_query_run",
+        {
+            "parent_source_id": parent_source_id,
+            "sub_question": sub_question,
+            "top_k": top_k,
+            "hits": len(hits),
+        },
+    )
+    if not hits:
+        return {
+            "parent_source_id": parent_source_id,
+            "sub_question": sub_question,
+            "hits": 0,
+            "findings_written": 0,
+            "finding_ids": [],
+        }
+
+    # Concatenate the retrieved chunks (each already breadcrumb-prefixed
+    # by the indexer's contextual-retrieval format) and run a focused
+    # researcher pass.
+    parts: list[str] = []
+    breadcrumbs: list[str] = []
+    for hit in hits:
+        md_path = hit.get("md_path")
+        if not isinstance(md_path, str):
+            continue
+        chunk_path = job.root / md_path
+        if not chunk_path.exists():
+            continue
+        body = chunk_path.read_text(encoding="utf-8")
+        parts.append(body)
+        title = hit.get("title")
+        if isinstance(title, str):
+            breadcrumbs.append(title)
+    if not parts:
+        return {
+            "parent_source_id": parent_source_id,
+            "sub_question": sub_question,
+            "hits": len(hits),
+            "findings_written": 0,
+            "finding_ids": [],
+        }
+    combined = "\n\n---\n\n".join(parts)
+    parent_loaded = _load_source_text(job, parent_source_id)
+    parent_meta: dict[str, Any]
+    if parent_loaded is None:
+        parent_meta = {"id": parent_source_id, "url": None, "title": None}
+    else:
+        _, parent_meta = parent_loaded
+
+    result = await _run_single_extract(
+        job,
+        source_id=parent_source_id,
+        meta=parent_meta,
+        text=combined,
+        sub_question=sub_question,
+        payload=payload,
+        router=router,
+        prompt_name="researcher",
+        text_limit=_CORNERSTONE_EXTRACT_TEXT_LIMIT,
+        findings_limit=_FINDINGS_PER_SOURCE_LIMIT,
+        extra_tags=["cornerstone_query"],
+        breadcrumb=" / ".join(breadcrumbs[:3]) if breadcrumbs else None,
+        raw_path_suffix="cornerstone-query",
+    )
+    result.pop("_written_findings", None)
+    result["parent_source_id"] = parent_source_id
+    result["sub_question"] = sub_question
+    result["hits"] = len(hits)
+    return result
+
+
+def _resolve_cornerstone_parent_id(job: Job, url: str) -> int | None:
+    """Resolve a cornerstone URL to its parent source rowid for ``job``.
+
+    Uses :func:`_normalize_url_for_compare` so the same forgiving match
+    that drives ``_is_cornerstone_source`` resolves the retrieval target
+    too. Excludes ``cornerstone_chunk`` rows, since the indexer copies
+    the parent URL onto every chunk — without this filter, the resolver
+    can return a chunk id and ``cornerstone_query`` would then filter
+    chunks by that chunk id and find nothing.
+    """
+    target_norm = _normalize_url_for_compare(url)
+    if target_norm is None:
+        return None
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT s.id, s.url FROM sources s"
+            " JOIN job_sources js ON js.source_id = s.id"
+            " WHERE js.job_id = ? AND s.url IS NOT NULL"
+            " AND (s.kind IS NULL OR s.kind != 'cornerstone_chunk')",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        if _normalize_url_for_compare(row["url"]) == target_norm:
+            return int(row["id"])
+    return None
 
 
 async def _run_summarize_source(
@@ -1563,15 +2382,48 @@ async def run_loop(
     while not _should_stop(job) and not plan.is_complete() and tasks_done < max_tasks:
         task = next_pending(job)
         if task is None:
-            if drain_replans >= MAX_DRAIN_REPLANS:
-                emit(
-                    job,
-                    "WARN",
-                    "loop",
-                    "warning",
-                    {"drain_replan_cap_hit": True, "cap": MAX_DRAIN_REPLANS},
-                )
-                break
+            cap = _resolve_drain_cap(plan)
+            floor = _resolve_finding_floor(plan)
+            if drain_replans >= cap:
+                # Issue #209: before bailing, check whether subgoals are
+                # materially answered. If open subgoals remain we allow up
+                # to ``cap + floor`` more replans before giving up — a
+                # broad/comprehensive run that names a 30-department
+                # tracker shouldn't terminate just because the planner
+                # hit a defensive cap, when half the goal is still open.
+                findings = _load_all_findings(job)
+                under_served = _under_served_subgoals(plan, len(findings), floor)
+                if under_served and drain_replans < cap + floor:
+                    emit(
+                        job,
+                        "INFO",
+                        "loop",
+                        "drain_replan_floor_extension",
+                        {
+                            "cap": cap,
+                            "floor": floor,
+                            "scope_class": plan.scope_class,
+                            "drain_replans": drain_replans,
+                            "extension": drain_replans - cap + 1,
+                            "under_served_count": len(under_served),
+                        },
+                    )
+                    # fall through into the replan call below
+                else:
+                    emit(
+                        job,
+                        "WARN",
+                        "loop",
+                        "warning",
+                        {
+                            "drain_replan_cap_hit": True,
+                            "cap": cap,
+                            "scope_class": plan.scope_class,
+                            "drain_replans": drain_replans,
+                        },
+                    )
+                    _emit_cap_diagnostic(job, plan, findings, floor, cap=cap)
+                    break
             new_plan = await _drain_replan(
                 job, plan, router=router, drain_count=drain_replans + 1
             )

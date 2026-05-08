@@ -75,6 +75,7 @@ def test_task_kind_covers_expected_set() -> None:
         "news_search",
         "reddit_search",
         "local_corpus_query",
+        "cornerstone_query",
         "extract_findings",
         "summarize_source",
         "synthesize",
@@ -1077,6 +1078,8 @@ def test_planner_md_documents_connector_site_operators() -> None:
     body = prompts_loader.load_prompt(
         "planner",
         goal="dummy goal — this test only inspects static prompt content",
+        connector_skills_index="(none)",
+        strategy_skills_index="(none)",
     )
 
     assert "Connector routing" in body, (

@@ -24,7 +24,17 @@ after. The block must parse as YAML and conform to the schema below.
 
 ### Schema
 
-A YAML list of findings. Each list item is a mapping with these keys:
+The block may take **one of two shapes**. The orchestrator accepts either:
+
+1. A YAML list of findings (back-compat shape — used when no follow-up
+   questions are produced).
+2. A mapping with two keys: `findings` (the list described below) and
+   `follow_up_questions` (a list of strings — questions this section
+   raises but does not fully answer; the planner uses them as candidate
+   sub-questions for the next replan). Use this shape whenever the
+   section surfaces gaps the orchestrator should chase.
+
+Each item in `findings` is a mapping with these keys:
 
 - `claim`: one sentence stating the proposal/section/claim, factual
   and specific. Name the agency, department, statute, or actor when
@@ -91,8 +101,22 @@ Leadership make, organized by department?" reading the document:
   tags: [epa, climate, ch.13]
 ```
 
+### Mapped form (with follow-up questions)
+
+```yaml
+findings:
+  - claim: "The Mandate proposes converting career civil-service positions in policy-influencing roles into Schedule F appointments."
+    confidence: 0.95
+    quote: "Schedule F should be reinstated and expanded to cover all confidential and policy-determining positions."
+    tags: [schedule-f, executive-office, ch.1]
+follow_up_questions:
+  - "Has any agency issued draft regulations implementing Schedule F since January 2025?"
+  - "Which courts have heard challenges to the Schedule F reinstatement?"
+```
+
 If the document is empty or contains no discrete claims (which is
-unusual for a cornerstone source), emit `[]`.
+unusual for a cornerstone source), emit `[]` (list form) or
+`{findings: [], follow_up_questions: []}` (mapping form).
 
 ## Hard rules
 
