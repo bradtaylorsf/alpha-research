@@ -657,6 +657,77 @@ async def test_fetch_dispatches_to_connector_for_bare_domain(
     assert result is None
 
 
+async def test_fetch_falls_through_for_congress_bill_text_url(monkeypatch):
+    """Issue #193: bill-text URLs on ``www.congress.gov`` (path
+    ``/<congress>/bills/<slug>/BILLS-...``) are raw HTML/XML bodies that
+    ``congress.fetch`` doesn't handle — its URL classifier only matches the
+    canonical ``/bill/<congress>/<chamber>/<n>`` permalink. Without the
+    carve-out, the bill-text fan-out hits ``congress.fetch`` → ``None`` →
+    ``_persist_fetched_source`` FatalErrors. This test pins the regression:
+    bill-text URLs must skip the connector and reach the generic httpx
+    extractor.
+    """
+    _disable_robots(monkeypatch)
+    _stub_archive(monkeypatch)
+
+    from research_agent.tools import congress
+
+    async def _should_not_dispatch(*args, **kwargs):
+        raise AssertionError(
+            "congress.fetch was called for a bill-text URL — should fall through"
+        )
+
+    monkeypatch.setattr(congress, "fetch", _should_not_dispatch)
+
+    httpx_calls: list[str] = []
+
+    async def _fake_httpx(url, timeout, user_agent):
+        httpx_calls.append(url)
+        return 200, ARTICLE_HTML, ARTICLE_HTML.encode("utf-8"), "text/html"
+
+    monkeypatch.setattr(web_fetch, "_fetch_via_httpx", _fake_httpx)
+
+    bill_text_url = (
+        "https://www.congress.gov/117/bills/hr5376/BILLS-117hr5376enr.htm"
+    )
+    source = await web_fetch.fetch(bill_text_url)
+    assert httpx_calls == [bill_text_url]
+    assert source is not None
+    assert source.metadata["fetched_via"] == "httpx"
+
+
+async def test_fetch_canonical_bill_url_still_dispatches_to_congress(monkeypatch):
+    """Counterpart to the bill-text carve-out: the canonical
+    ``/bill/<congress>/<chamber>/<n>`` permalink must still route to
+    ``congress.fetch`` (issue #174 contract). The carve-out only covers the
+    ``/<congress>/bills/.../BILLS-...`` content-URL shape.
+    """
+    _disable_robots(monkeypatch)
+    _stub_archive(monkeypatch)
+
+    from research_agent.tools import congress
+
+    async def _no_httpx(*args, **kwargs):
+        raise AssertionError(
+            "web_fetch fell through to httpx for a canonical bill URL"
+        )
+
+    monkeypatch.setattr(web_fetch, "_fetch_via_httpx", _no_httpx)
+
+    captured: list[str] = []
+
+    async def _fake_congress_fetch(target_url, *args, **kwargs):
+        captured.append(target_url)
+        return None
+
+    monkeypatch.setattr(congress, "fetch", _fake_congress_fetch)
+
+    canonical = "https://www.congress.gov/bill/117th-congress/house-bill/5376"
+    result = await web_fetch.fetch(canonical)
+    assert captured == [canonical]
+    assert result is None
+
+
 async def test_fetch_falls_through_to_generic_for_propublica_non_nonprofits(
     monkeypatch,
 ):

@@ -310,6 +310,18 @@ _YOUTUBE_HOSTS = frozenset(
 # These do not appear here; the planner emits search tasks for them.
 
 _CONGRESS_HOSTS = frozenset({"www.congress.gov", "congress.gov"})
+# Bill-text content URLs (e.g. ``/117/bills/hr5376/BILLS-117hr5376enr.htm``)
+# are raw HTML/XML/PDF bodies that ``congress.fetch`` does not handle — its
+# URL classifier only matches the canonical bill / member / hearing pages.
+# Without this carve-out, the bill-text fan-out (issue #193) routes these
+# URLs to ``congress.fetch``, which returns ``None``, and the loop FatalErrors
+# instead of reading the legislative text. The PDF variant is already caught
+# by ``_is_pdf_url`` ahead of host-dispatch; this pattern handles the
+# ``Formatted Text`` / ``Formatted XML`` HTML variants that are the preferred
+# format per ``_bill_text_pick``.
+_CONGRESS_BILL_TEXT_PATH_RE = re.compile(
+    r"^/\d+/bills?/[^/]+/BILLS-", re.IGNORECASE
+)
 _FEC_HOSTS = frozenset({"www.fec.gov", "fec.gov"})
 _EDGAR_HOSTS = frozenset({"www.sec.gov", "sec.gov"})
 _FEDREGISTER_HOSTS = frozenset(
@@ -598,9 +610,15 @@ async def fetch(
         return await youtube.fetch(url)
 
     if netloc in _CONGRESS_HOSTS:
-        from research_agent.tools import congress
+        # Bill-text content URLs slip past congress.fetch (which only handles
+        # canonical /bill/, /member/, /hearing/ permalinks) and fall through
+        # to the generic httpx + trafilatura extractor below. Issue #193:
+        # without this carve-out, the bill-text fan-out FatalErrors on the
+        # preferred ``Formatted Text`` (HTML) format.
+        if not _CONGRESS_BILL_TEXT_PATH_RE.match(urlparse(url).path):
+            from research_agent.tools import congress
 
-        return await congress.fetch(url)
+            return await congress.fetch(url)
 
     if netloc in _FEC_HOSTS:
         from research_agent.tools import fec

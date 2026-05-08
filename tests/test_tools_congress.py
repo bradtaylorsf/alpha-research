@@ -581,6 +581,9 @@ async def test_fetch_bill_builds_markdown_and_caches(monkeypatch, cache_dir: Pat
     assert md["bill_number"] == "5376"
     assert md["text_url"].endswith("BILLS-117hr5376enr.htm")
     assert md["text_format"] == "Formatted Text"
+    # Issue #193: alias keys consumed by the loop's bill-text fan-out.
+    assert md["bill_text_url"] == md["text_url"]
+    assert md["bill_text_format"] == md["text_format"]
     assert isinstance(md["actions"], list)
     assert md["actions"][0]["text"].startswith("Became Public Law")
 
@@ -594,6 +597,35 @@ async def test_fetch_bill_builds_markdown_and_caches(monkeypatch, cache_dir: Pat
     s2 = await congress.fetch(url)
     assert s2 is not None
     assert len(captured["urls"]) == api_calls_before
+
+
+async def test_fetch_bill_no_public_text_omits_bill_text_url(monkeypatch, cache_dir: Path):
+    """Issue #193: when the bill has no published text yet (common for newly-
+    introduced bills), the metadata's ``bill_text_url`` must be ``None`` so the
+    loop's fan-out helper silently skips emitting a follow-up.
+    """
+
+    def _no_text_responder(url, _params):
+        if url.endswith("/bill/117/hr/5376/text"):
+            return 200, json.dumps({"textVersions": []})
+        if url.endswith("/bill/117/hr/5376/actions"):
+            return 200, json.dumps(_BILL_ACTIONS_PAYLOAD)
+        if url.endswith("/bill/117/hr/5376"):
+            return 200, json.dumps(_BILL_HEADER_PAYLOAD)
+        return 404, ""
+
+    _patch_httpx(monkeypatch, responder=_no_text_responder)
+
+    url = "https://www.congress.gov/bill/117th-congress/house-bill/5376"
+    source = await congress.fetch(url)
+
+    assert source is not None
+    md = source.metadata
+    assert md["bill_text_url"] is None
+    assert md["bill_text_format"] is None
+    # And the cleaned-text body should reflect the absence rather than
+    # showing a stale URL.
+    assert "_No public text available yet._" in source.cleaned_text
 
 
 # ---------------------------------------------------------------------------

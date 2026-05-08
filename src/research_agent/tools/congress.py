@@ -895,6 +895,12 @@ async def _fetch_bill(
         "latest_action": latest_action,
         "text_url": text_url,
         "text_format": text_label,
+        # Issue #193: alias the bill-text pointer under stable, loop-friendly
+        # keys so ``_persist_fetched_source`` can fan out a web_fetch for the
+        # actual bill body. ``text_url``/``text_format`` are kept above for
+        # back-compat.
+        "bill_text_url": text_url,
+        "bill_text_format": text_label,
         "actions": actions,
     }
 
