@@ -621,7 +621,11 @@ def test_plan_created_event_payload_includes_scope_class_when_unset(
 
 
 def _make_recent_results(n: int) -> list[dict[str, Any]]:
-    """Build ``n`` synthetic completed-task entries shaped like loop output."""
+    """Build ``n`` synthetic completed-task entries shaped like loop output.
+
+    Emits DESC order (task_id from ``n`` down to ``1``) to match the contract
+    of ``_load_recent_task_results`` (issue #188).
+    """
     return [
         {
             "task_id": i,
@@ -634,7 +638,7 @@ def _make_recent_results(n: int) -> list[dict[str, Any]]:
                 ]
             },
         }
-        for i in range(1, n + 1)
+        for i in range(n, 0, -1)
     ]
 
 
@@ -655,8 +659,8 @@ def test_tactical_replan_truncates_recent_results_to_max(
     payload = json.loads(args[0])
     sent = payload["recent_results"]
     assert len(sent) == MAX_RECENT_RESULTS_FOR_REPLAN == 25
-    # The tail — last 25 entries — must be what we sent (verified by task_id).
-    assert [r["task_id"] for r in sent] == list(range(76, 101))
+    # Newest 25 (DESC) must survive the slice — task_ids 100..76, not 1..25.
+    assert [r["task_id"] for r in sent] == list(range(100, 75, -1))
 
 
 def test_tactical_replan_emits_replan_truncated_event(

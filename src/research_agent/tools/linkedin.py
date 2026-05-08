@@ -40,6 +40,7 @@ from urllib.parse import urlparse
 import httpx
 
 from research_agent import config
+from research_agent.tools._errors import MissingCredentialError
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -513,7 +514,7 @@ def _resolve_broker() -> tuple[str, dict[str, Any]]:
     name = (config.get("LINKEDIN_BROKER") or "proxycurl").strip().lower()
     recipe = _BROKERS.get(name)
     if recipe is None:
-        raise RuntimeError(
+        raise MissingCredentialError(
             f"Unknown LINKEDIN_BROKER {name!r}; expected one of "
             f"{sorted(_BROKERS)}."
         )
@@ -524,7 +525,7 @@ def _resolve_key(broker: str, recipe: dict[str, Any]) -> str:
     env_name = recipe["key_env"]
     key = config.get(env_name) or ""
     if not key.strip():
-        raise RuntimeError(
+        raise MissingCredentialError(
             f"LinkedIn connector requires a {env_name} (broker={broker}). "
             f"Sign up at {recipe['signup_url']} and set {env_name} in your .env."
         )

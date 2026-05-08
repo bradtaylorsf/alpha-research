@@ -67,7 +67,7 @@ skip_install: true
 
 # CLI/daemon project, no UI to drive with Playwright. The Playwright UI stage
 # is bypassed; per-issue functional verification happens via `smoke_test` below.
-skip_verify: true
+# skip_verify: true
 
 # Post-pipeline smoke test runs after every issue completes. Three layers:
 #   1. CLI surface still parses (`research --help` returns 0)

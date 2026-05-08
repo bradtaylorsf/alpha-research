@@ -1,0 +1,25 @@
+# URL blocklist for second-order fan-out (issue #194).
+#
+# Hosts listed here are excluded from `_run_extract_findings`'s
+# auto-fan-out of `web_fetch` tasks for URLs cited inside extracted
+# findings. The match is a case-insensitive substring check against
+# the URL's hostname — so `twitter.com` blocks `mobile.twitter.com`,
+# `t.co/...` redirects we've already followed, and friends.
+#
+# Scope of this list:
+#   * Social-media surfaces that don't render meaningful content for
+#     the agent (auth wall, JS-heavy SPA, paywalled timelines).
+#   * Archive hosts that have their own connector (`archive`) and
+#     should not be fetched twice.
+#
+# This list is intentionally short. Anything that *should* be skipped
+# globally (login walls, paywalls, etc.) belongs in the per-site
+# fetch-layer handling, not here.
+- twitter.com
+- x.com
+- facebook.com
+- instagram.com
+- tiktok.com
+- linkedin.com
+- web.archive.org
+- archive.org

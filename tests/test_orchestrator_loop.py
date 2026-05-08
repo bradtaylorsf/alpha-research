@@ -16,6 +16,8 @@ from research_agent.orchestrator.loop import (
     RETRY_MAX_ATTEMPTS,
     Handler,
     _expand_search_to_fetches,
+    _is_cornerstone_source,
+    _load_source_text,
     _run_extract_findings,
     default_handlers,
     run_loop,
@@ -547,15 +549,16 @@ async def test_connector_fetch_handler_dispatches_to_module(
 async def test_connector_search_handler_wraps_runtime_error_as_fatal(
     job: Job, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When a connector raises ``RuntimeError`` (its missing-credential path),
-    the handler must convert it to :class:`FatalError` so the loop marks the
-    task failed cleanly down the documented path rather than relying on the
-    daemon's catch-all guard.
+    """When a connector raises :class:`MissingCredentialError`, the handler
+    must convert it to :class:`FatalError` so the loop marks the task failed
+    cleanly down the documented path rather than relying on the daemon's
+    catch-all guard. Preserves the smoke-skip contract.
     """
     from research_agent.tools import linkedin
+    from research_agent.tools._errors import MissingCredentialError
 
     async def fake_search(query: str, **kwargs: Any) -> list[SearchResult]:
-        raise RuntimeError(
+        raise MissingCredentialError(
             "linkedin requires LINKEDIN_DATA_API_KEY (or LIX_API_KEY for lix broker)"
         )
 
@@ -572,11 +575,15 @@ async def test_connector_search_handler_wraps_runtime_error_as_fatal(
 async def test_connector_fetch_handler_wraps_runtime_error_as_fatal(
     job: Job, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``<prefix>_fetch`` mirrors the search-side FatalError wrapping."""
+    """``<prefix>_fetch`` mirrors the search-side FatalError wrapping for
+    :class:`MissingCredentialError`."""
     from research_agent.tools import courtlistener
+    from research_agent.tools._errors import MissingCredentialError
 
     async def fake_fetch(url: str) -> Any:
-        raise RuntimeError("courtlistener requires COURTLISTENER_API_TOKEN")
+        raise MissingCredentialError(
+            "courtlistener requires COURTLISTENER_API_TOKEN"
+        )
 
     monkeypatch.setattr(courtlistener, "fetch", fake_fetch)
 
@@ -589,6 +596,281 @@ async def test_connector_fetch_handler_wraps_runtime_error_as_fatal(
                 "payload": {"url": "https://www.courtlistener.com/opinion/123/"},
             },
         )
+
+
+@pytest.mark.asyncio
+async def test_connector_search_handler_does_not_wrap_unrelated_runtime_error(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-credential ``RuntimeError`` from inside a connector must NOT get
+    masked as a credential FatalError. It propagates to the loop's catch-all
+    so the original bug message surfaces in ``daemon/error`` events with
+    traceback. Issue #190.
+    """
+    from research_agent.tools import congress
+
+    bug_message = "unrecoverable: response.json() returned None"
+
+    async def fake_search(query: str, **kwargs: Any) -> list[SearchResult]:
+        raise RuntimeError(bug_message)
+
+    monkeypatch.setattr(congress, "search", fake_search)
+
+    handler = default_handlers(router=None)["congress_search"]
+    with pytest.raises(RuntimeError) as excinfo:
+        await handler(
+            job, {"kind": "congress_search", "payload": {"query": "needle"}}
+        )
+    assert not isinstance(excinfo.value, FatalError)
+    assert bug_message in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_connector_fetch_handler_does_not_wrap_unrelated_runtime_error(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirror of the search variant for the fetch handler. Issue #190."""
+    from research_agent.tools import congress
+
+    bug_message = "boom: state-machine violation in fetch"
+
+    async def fake_fetch(url: str) -> Any:
+        raise RuntimeError(bug_message)
+
+    monkeypatch.setattr(congress, "fetch", fake_fetch)
+
+    handler = default_handlers(router=None)["congress_fetch"]
+    with pytest.raises(RuntimeError) as excinfo:
+        await handler(
+            job,
+            {
+                "kind": "congress_fetch",
+                "payload": {"url": "https://www.congress.gov/bill/118/hr/1"},
+            },
+        )
+    assert not isinstance(excinfo.value, FatalError)
+    assert bug_message in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_connector_fetch_handler_missing_url_raises_fatal(
+    job: Job,
+) -> None:
+    """A connector-fetch task without a ``url`` payload field surfaces as a
+    clean :class:`FatalError` rather than a ``KeyError`` into the daemon
+    catch-all. Issue #190.
+    """
+    handler = default_handlers(router=None)["congress_fetch"]
+    with pytest.raises(FatalError, match="missing url field"):
+        await handler(job, {"kind": "congress_fetch", "payload": {}})
+
+
+# ---------------------------------------------------------------------------
+# Issue #193: bill-text fan-out via _persist_fetched_source
+# ---------------------------------------------------------------------------
+
+
+def _make_congress_source(
+    *,
+    url: str = "https://www.congress.gov/bill/117th-congress/house-bill/5376",
+    title: str = "Inflation Reduction Act of 2022",
+    bill_text_url: str | None = (
+        "https://www.congress.gov/117/bills/hr5376/BILLS-117hr5376enr.pdf"
+    ),
+    bill_text_format: str | None = "PDF",
+) -> Any:
+    from datetime import UTC, datetime
+
+    from research_agent.tools.models import Source
+
+    metadata: dict[str, Any] = {
+        "congress": 117,
+        "bill_type": "hr",
+        "bill_number": "5376",
+    }
+    if bill_text_url is not None:
+        metadata["bill_text_url"] = bill_text_url
+    if bill_text_format is not None:
+        metadata["bill_text_format"] = bill_text_format
+
+    return Source(
+        url=url,
+        title=title,
+        cleaned_text=f"# {title}\n\nMetadata roll-up.",
+        fetched_at=datetime.now(tz=UTC),
+        source_kind="congress",
+        metadata=metadata,
+    )
+
+
+def test_persist_fetched_source_emits_bill_text_followup(job: Job) -> None:
+    """A congress source with ``bill_text_url`` in metadata fans out a
+    ``web_fetch`` follow-up pointing at the bill body — not at the metadata
+    URL — and inherits ``sub_question`` from the originating task payload.
+    """
+    from research_agent.orchestrator.loop import _persist_fetched_source
+
+    bill_text_url = "https://www.congress.gov/117/bills/hr5376/BILLS-117hr5376enr.pdf"
+    source = _make_congress_source(bill_text_url=bill_text_url)
+
+    payload = {
+        "url": "https://www.congress.gov/bill/117th-congress/house-bill/5376",
+        "sub_question": "How does HR 5376 fund climate provisions?",
+    }
+    result = _persist_fetched_source(job, source, payload=payload)
+
+    assert isinstance(result, dict)
+    assert "follow_up_tasks" in result
+    follow_ups = result["follow_up_tasks"]
+    assert len(follow_ups) == 1
+    fu = follow_ups[0]
+    assert fu["kind"] == "web_fetch"
+    assert fu["payload"]["url"] == bill_text_url
+    # Critically: the follow-up's URL must be the bill text, not the metadata
+    # source URL — that's the bug #193 fixes.
+    assert fu["payload"]["url"] != source.url
+    assert fu["payload"]["sub_question"] == "How does HR 5376 fund climate provisions?"
+
+
+def test_persist_fetched_source_no_followup_when_bill_text_url_absent(
+    job: Job,
+) -> None:
+    """When the metadata has no ``bill_text_url`` (e.g. newly-introduced bill
+    with no published text yet), no follow-up is emitted and no log noise.
+    """
+    from research_agent.orchestrator.loop import _persist_fetched_source
+
+    source = _make_congress_source(bill_text_url=None, bill_text_format=None)
+    result = _persist_fetched_source(job, source, payload={"sub_question": "anything"})
+
+    assert "follow_up_tasks" not in result
+
+
+def test_persist_fetched_source_dedups_already_fetched_bill_text(
+    job: Job,
+) -> None:
+    """Anti-runaway: if the bill text URL has already been fetched for this
+    job, ``_persist_fetched_source`` must not re-emit a follow-up. Otherwise
+    tactical_replan can cycle the same bill repeatedly.
+    """
+    from research_agent.orchestrator.loop import _persist_fetched_source
+    from research_agent.storage.sources import write_source
+
+    bill_text_url = "https://www.congress.gov/117/bills/hr5376/BILLS-117hr5376enr.pdf"
+
+    # Pre-seed: the bill text has already been fetched for this job.
+    write_source(
+        job,
+        url=bill_text_url,
+        title="HR 5376 — Bill Text",
+        raw_content="Section 1. Findings. Section 2. ...",
+        kind="pdf",
+    )
+
+    source = _make_congress_source(bill_text_url=bill_text_url)
+    result = _persist_fetched_source(job, source, payload={"sub_question": "again?"})
+
+    assert "follow_up_tasks" not in result
+
+
+def test_persist_fetched_source_falls_back_sub_question_from_title(
+    job: Job,
+) -> None:
+    """When no payload sub_question is supplied, the follow-up's sub_question
+    is derived from the bill title so downstream extraction still has context.
+    """
+    from research_agent.orchestrator.loop import _persist_fetched_source
+
+    source = _make_congress_source(title="Inflation Reduction Act of 2022")
+    # Pass an empty payload (no sub_question key).
+    result = _persist_fetched_source(job, source, payload={})
+
+    follow_ups = result.get("follow_up_tasks") or []
+    assert len(follow_ups) == 1
+    sub_q = follow_ups[0]["payload"]["sub_question"]
+    assert "Inflation Reduction Act of 2022" in sub_q
+
+
+@pytest.mark.asyncio
+async def test_congress_fetch_handler_emits_bill_text_followup(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end through the handler: the ``congress_fetch`` handler returns
+    a ``follow_up_tasks`` list whose only entry is a ``web_fetch`` for the
+    bill text URL, with the originating task's ``sub_question`` propagated.
+    """
+    from research_agent.tools import congress as congress_mod
+
+    bill_text_url = "https://www.congress.gov/117/bills/hr5376/BILLS-117hr5376enr.pdf"
+    metadata_url = "https://www.congress.gov/bill/117th-congress/house-bill/5376"
+    expected_source = _make_congress_source(
+        url=metadata_url, bill_text_url=bill_text_url
+    )
+
+    async def fake_fetch(url: str) -> Any:
+        assert url == metadata_url
+        return expected_source
+
+    monkeypatch.setattr(congress_mod, "fetch", fake_fetch)
+
+    handler = default_handlers(router=None)["congress_fetch"]
+    out = await handler(
+        job,
+        {
+            "kind": "congress_fetch",
+            "payload": {
+                "url": metadata_url,
+                "sub_question": "What does HR 5376 do for energy?",
+            },
+        },
+    )
+
+    assert isinstance(out, dict)
+    assert "source_id" in out
+    follow_ups = out.get("follow_up_tasks") or []
+    assert len(follow_ups) == 1
+    fu = follow_ups[0]
+    assert fu["kind"] == "web_fetch"
+    assert fu["payload"]["url"] == bill_text_url
+    assert fu["payload"]["sub_question"] == "What does HR 5376 do for energy?"
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_handler_merges_bill_text_and_extract_followups(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #193 + the existing extract-findings fan-out interact correctly:
+    when ``web_fetch`` host-dispatches to ``congress.fetch`` and the source has
+    ``bill_text_url``, the resulting follow_up_tasks must contain BOTH the
+    bill-text web_fetch and the extract_findings task on the metadata source.
+    """
+    from research_agent.tools import web_fetch as web_fetch_mod
+
+    bill_text_url = "https://www.congress.gov/117/bills/hr5376/BILLS-117hr5376enr.pdf"
+    metadata_url = "https://www.congress.gov/bill/117th-congress/house-bill/5376"
+
+    async def fake_fetch(url: str) -> Any:
+        return _make_congress_source(url=url, bill_text_url=bill_text_url)
+
+    monkeypatch.setattr(web_fetch_mod, "fetch", fake_fetch)
+
+    handler = default_handlers(router=None)["web_fetch"]
+    out = await handler(
+        job,
+        {
+            "kind": "web_fetch",
+            "payload": {
+                "url": metadata_url,
+                "sub_question": "energy provisions?",
+            },
+        },
+    )
+
+    follow_ups = out.get("follow_up_tasks") or []
+    kinds = sorted(f["kind"] for f in follow_ups)
+    assert kinds == ["extract_findings", "web_fetch"]
+    bill_followup = next(f for f in follow_ups if f["kind"] == "web_fetch")
+    assert bill_followup["payload"]["url"] == bill_text_url
 
 
 @pytest.mark.asyncio
@@ -1018,7 +1300,7 @@ class _StubRouter:
         return _Result()
 
 
-def _seed_source(job: Job, *, url: str, body: str) -> int:
+def _seed_source(job: Job, *, url: str, body: str, kind: str = "web") -> int:
     from research_agent.storage.sources import write_source
 
     return write_source(
@@ -1026,7 +1308,7 @@ def _seed_source(job: Job, *, url: str, body: str) -> int:
         url=url,
         title="Cornerstone Document",
         raw_content=body,
-        kind="web",
+        kind=kind,
     )
 
 
@@ -1211,3 +1493,455 @@ async def test_extract_findings_non_cornerstone_uses_default_cap(
     assert result["findings_written"] == 8
     assert "researcher" in loaded_prompts
     assert "researcher_cornerstone" not in loaded_prompts
+
+
+def test_is_cornerstone_source_size_fallback_gated_to_pdf(
+    job: Job,
+) -> None:
+    """Issue #189: size-fallback only fires for ``source_kind == "pdf"``.
+
+    Three cases — all share the same 250k-char body, only ``source_kind``
+    and the planner marker differ:
+
+    * HTML, no planner match → ``(False, False)`` — long-form HTML must
+      not be promoted to cornerstone, or #177's report-padding regression
+      comes back.
+    * PDF, no planner match  → ``(True, True)`` — the second flag tells
+      the call site to emit ``cornerstone_fallback_triggered``.
+    * Planner-marked URL     → ``(True, False)`` — primary signal wins,
+      no fallback event regardless of kind/size.
+    """
+    # Bodies must differ — sources dedupe by content sha256 across kinds.
+    html_id = _seed_source(
+        job,
+        url="https://example.test/long-article.html",
+        body="H" * 250_000,
+        kind="html",
+    )
+    pdf_id = _seed_source(
+        job,
+        url="https://example.test/big-doc.pdf",
+        body="P" * 250_000,
+        kind="pdf",
+    )
+    marked_id = _seed_source(
+        job,
+        url="https://example.test/marked.html",
+        body="short body",
+        kind="html",
+    )
+
+    _persist_plan_with_cornerstone(job, "https://example.test/marked.html")
+
+    html_loaded = _load_source_text(job, html_id)
+    pdf_loaded = _load_source_text(job, pdf_id)
+    marked_loaded = _load_source_text(job, marked_id)
+    assert html_loaded is not None
+    assert pdf_loaded is not None
+    assert marked_loaded is not None
+
+    html_text, html_meta = html_loaded
+    pdf_text, pdf_meta = pdf_loaded
+    marked_text, marked_meta = marked_loaded
+
+    assert _is_cornerstone_source(job, html_meta, html_text) == (False, False)
+    assert _is_cornerstone_source(job, pdf_meta, pdf_text) == (True, True)
+    assert _is_cornerstone_source(job, marked_meta, marked_text) == (True, False)
+
+
+@pytest.mark.asyncio
+async def test_extract_findings_pdf_fallback_emits_event(
+    job: Job,
+    db_path: Path,
+) -> None:
+    """PDF size-fallback path emits ``cornerstone_fallback_triggered`` (WARN).
+
+    The planner did not mark this URL; only the PDF size-fallback path
+    routes the source through the cornerstone prompt, so the operator-
+    visible WARN event must fire alongside the existing INFO
+    ``cornerstone_extract`` event.
+    """
+    url = "https://example.test/forgot-to-mark.pdf"
+    _persist_plan_with_cornerstone(job, "https://example.test/something-else.pdf")
+    source_id = _seed_source(job, url=url, body="P" * 250_000, kind="pdf")
+
+    router = _StubRouter("```yaml\n[]\n```\n")
+    task = {"payload": {"source_id": source_id, "sub_question": "What?"}}
+
+    await _run_extract_findings(job, task, router=router)
+
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT level, kind, payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'cornerstone_fallback_triggered'",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0]["level"] == "WARN"
+    import json as _json
+
+    payload = _json.loads(rows[0]["payload_json"])
+    assert payload["source_id"] == source_id
+    assert payload["url"] == url
+    assert payload["source_kind"] == "pdf"
+    # md_path is written as ``cleaned + "\n"`` so the read-back text adds
+    # one byte to the body length; tolerate that without fixing the value.
+    assert payload["cleaned_chars"] >= 250_000
+
+    # Both the fallback WARN and the standard cornerstone_extract INFO must fire.
+    kinds = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_fallback_triggered" in kinds
+    assert "cornerstone_extract" in kinds
+
+
+@pytest.mark.asyncio
+async def test_extract_findings_html_size_does_not_emit_fallback(
+    job: Job,
+    db_path: Path,
+) -> None:
+    """A 250k-char HTML source must NOT trigger the size fallback.
+
+    Long-form HTML (Wikipedia, archive.org transcripts) frequently
+    crosses the 200k-char threshold without being investigation
+    cornerstones — the gate must keep them on the regular extraction
+    path with the 8-finding cap intact.
+    """
+    url = "https://example.test/very-long.html"
+    _persist_plan_with_cornerstone(job, "https://example.test/something-else.pdf")
+    source_id = _seed_source(job, url=url, body="H" * 250_000, kind="html")
+
+    router = _StubRouter("```yaml\n[]\n```\n")
+    task = {"payload": {"source_id": source_id, "sub_question": "What?"}}
+
+    await _run_extract_findings(job, task, router=router)
+
+    kinds = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_fallback_triggered" not in kinds
+    assert "cornerstone_extract" not in kinds
+
+
+@pytest.mark.asyncio
+async def test_extract_findings_planner_marker_does_not_emit_fallback(
+    job: Job,
+    db_path: Path,
+) -> None:
+    """Planner-marked cornerstone never emits the fallback WARN event."""
+    url = "https://example.test/policy.md"
+    _persist_plan_with_cornerstone(job, url)
+    source_id = _seed_source(job, url=url, body=_CORNERSTONE_BODY)
+
+    router = _StubRouter("```yaml\n[]\n```\n")
+    task = {"payload": {"source_id": source_id, "sub_question": "What?"}}
+
+    await _run_extract_findings(job, task, router=router)
+
+    kinds = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_extract" in kinds
+    assert "cornerstone_fallback_triggered" not in kinds
+
+
+# ---------------------------------------------------------------------------
+# Issue #194: second-order URL fan-out from extracted findings
+# ---------------------------------------------------------------------------
+
+
+def _persist_plan_with_full_scope(
+    job: Job,
+    scope: ScopeClass | None,
+    *,
+    cornerstone_url: str | None = None,
+) -> None:
+    p = Plan(
+        version=1,
+        objective="Investigate the target",
+        subgoals=[Subgoal(id=1, description="Gather", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=3,
+        scope_class=scope,
+        cornerstone_url=cornerstone_url,
+    )
+    write_plan(job, p.model_dump())
+
+
+def _reset_blocklist_cache() -> None:
+    """Clear the module-level blocklist cache so tests can re-stub it."""
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _loop_mod._BLOCKLIST_CACHE = None
+
+
+@pytest.mark.asyncio
+async def test_second_order_fanout_skips_url_already_in_job_sources(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Citation that points at an already-fetched URL must NOT fan out.
+
+    A finding's claim text contains 2 URLs: one already linked to this
+    job via ``job_sources`` (the agent fetched it during a prior task)
+    and one new. Only the new URL should become a ``web_fetch``
+    follow-up — same-job dedup is the whole point of this guard.
+    """
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _reset_blocklist_cache()
+    monkeypatch.setattr(_loop_mod, "_load_url_blocklist", lambda: set())
+
+    _persist_plan_with_full_scope(job, "broad")
+
+    # Pre-seed: the agent has already fetched ``already.example/doc.pdf`` for
+    # this job, so a finding citing that URL must not re-fan-out.
+    already_url = "https://already.example/doc.pdf"
+    _seed_source(
+        job,
+        url=already_url,
+        body="prior fetch contents",
+        kind="pdf",
+    )
+
+    new_url = "https://new.example/citation.pdf"
+    extract_url = "https://example.test/article.html"
+    source_id = _seed_source(
+        job,
+        url=extract_url,
+        body="An article body that triggers extraction.",
+        kind="web",
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        f'- claim: "Important point — see {already_url} and also {new_url} for detail."\n'
+        '  confidence: 0.9\n'
+        '  quote: ""\n'
+        '  tags: [policy]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "Detail?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    follow_ups = result.get("follow_up_tasks") or []
+    urls = [f["payload"]["url"] for f in follow_ups]
+    assert urls == [new_url], (
+        f"expected only the new URL to fan out; got {urls}"
+    )
+
+    # The fanned-out follow-up must carry the marker key so the job-cap
+    # query can count it.
+    assert (
+        follow_ups[0]["payload"].get("second_order_parent_finding_id") is not None
+    )
+
+    # And one ``second_order_fanout`` event must have fired.
+    events = _read_event_kinds(db_path, job.id)
+    assert events.count("second_order_fanout") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scope,expected_count",
+    [("comprehensive", 3), ("broad", 2)],
+)
+async def test_second_order_fanout_per_extract_cap_by_scope(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: ScopeClass,
+    expected_count: int,
+) -> None:
+    """Per-extract cap follows scope: comprehensive → 3, broad → 2.
+
+    Three high-confidence findings, each citing one distinct URL. The
+    same input must produce 3 follow-ups under comprehensive and only 2
+    under broad — sorted by parent confidence so the strongest signals
+    survive the clip.
+    """
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _reset_blocklist_cache()
+    monkeypatch.setattr(_loop_mod, "_load_url_blocklist", lambda: set())
+
+    _persist_plan_with_full_scope(job, scope)
+
+    extract_url = "https://example.test/article.html"
+    source_id = _seed_source(
+        job,
+        url=extract_url,
+        body=f"Body for {scope}",
+        kind="web",
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "Top finding cites https://a.example/one.pdf for evidence."\n'
+        '  confidence: 0.95\n'
+        '  quote: ""\n'
+        '  tags: [a]\n'
+        '- claim: "Second finding cites https://b.example/two.pdf for evidence."\n'
+        '  confidence: 0.85\n'
+        '  quote: ""\n'
+        '  tags: [b]\n'
+        '- claim: "Third finding cites https://c.example/three.pdf for evidence."\n'
+        '  confidence: 0.75\n'
+        '  quote: ""\n'
+        '  tags: [c]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "Refs?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    follow_ups = result.get("follow_up_tasks") or []
+    assert len(follow_ups) == expected_count
+
+    urls = [f["payload"]["url"] for f in follow_ups]
+    # Highest-confidence finding's URL must always be present (sorted-by-conf).
+    assert "https://a.example/one.pdf" in urls
+    if expected_count >= 2:
+        assert "https://b.example/two.pdf" in urls
+
+
+@pytest.mark.asyncio
+async def test_second_order_fanout_skips_low_confidence_findings(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finding below the 0.5 confidence threshold must NOT fan out.
+
+    The agent's least-reliable signals should not trigger more fetching.
+    """
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _reset_blocklist_cache()
+    monkeypatch.setattr(_loop_mod, "_load_url_blocklist", lambda: set())
+
+    _persist_plan_with_full_scope(job, "comprehensive")
+
+    extract_url = "https://example.test/article.html"
+    source_id = _seed_source(
+        job,
+        url=extract_url,
+        body="A weakly-confident article.",
+        kind="web",
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "Possibly relevant — see https://shaky.example/doc.pdf."\n'
+        '  confidence: 0.3\n'
+        '  quote: ""\n'
+        '  tags: [shaky]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "Maybe?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    follow_ups = result.get("follow_up_tasks") or []
+    assert follow_ups == []
+
+
+@pytest.mark.asyncio
+async def test_second_order_fanout_drops_blocklisted_urls(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A high-confidence finding citing a blocklisted host must NOT fan out.
+
+    The blocklist filters social-media + archive hosts (issue #194)
+    even when the parent finding is otherwise eligible.
+    """
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _reset_blocklist_cache()
+    monkeypatch.setattr(
+        _loop_mod, "_load_url_blocklist", lambda: {"twitter.com"}
+    )
+
+    _persist_plan_with_full_scope(job, "comprehensive")
+
+    extract_url = "https://example.test/article.html"
+    source_id = _seed_source(
+        job,
+        url=extract_url,
+        body="An article with a Twitter citation.",
+        kind="web",
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "Per https://twitter.com/foo/status/123 the source confirms it."\n'
+        '  confidence: 0.9\n'
+        '  quote: ""\n'
+        '  tags: [social]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "Confirms?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    follow_ups = result.get("follow_up_tasks") or []
+    assert follow_ups == []
+
+
+def test_second_order_fanout_helpers_normalize_and_block() -> None:
+    """Spot-check the URL normalizer + blocklist matcher for trailing punctuation."""
+    from research_agent.orchestrator.loop import (
+        _is_url_blocked,
+        _normalize_url_for_fanout,
+    )
+
+    assert (
+        _normalize_url_for_fanout("https://Example.com/path).")
+        == "https://example.com/path"
+    )
+    assert _normalize_url_for_fanout("ftp://nope/x") is None
+    assert _normalize_url_for_fanout("not-a-url") is None
+    assert _is_url_blocked(
+        "https://mobile.twitter.com/foo", {"twitter.com"}
+    ) is True
+    assert _is_url_blocked("https://example.com/x", {"twitter.com"}) is False
+
+
+@pytest.mark.asyncio
+async def test_second_order_fanout_narrow_scope_emits_zero(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``narrow`` scope leaves drill-downs to the planner — no auto fan-out."""
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _reset_blocklist_cache()
+    monkeypatch.setattr(_loop_mod, "_load_url_blocklist", lambda: set())
+
+    _persist_plan_with_full_scope(job, "narrow")
+
+    extract_url = "https://example.test/article.html"
+    source_id = _seed_source(
+        job,
+        url=extract_url,
+        body="A narrow-scope body.",
+        kind="web",
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "See https://primary.example/doc.pdf for the underlying record."\n'
+        '  confidence: 0.95\n'
+        '  quote: ""\n'
+        '  tags: [primary]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    assert (result.get("follow_up_tasks") or []) == []
