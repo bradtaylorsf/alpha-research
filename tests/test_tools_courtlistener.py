@@ -184,7 +184,7 @@ async def test_search_builds_correct_query_and_auth_header(monkeypatch):
         "type": "o",
     }
     # URL is the search endpoint.
-    assert captured["urls"][0].endswith("/api/rest/v3/search/")
+    assert captured["urls"][0].endswith("/api/rest/v4/search/")
 
 
 async def test_search_parses_results(monkeypatch):
@@ -351,11 +351,11 @@ async def test_rate_limit_gate_sleeps_within_interval(monkeypatch):
 _OPINION_URL = (
     "https://www.courtlistener.com/opinion/4341372/lozman-v-city-of-riviera-beach/"
 )
-_OPINION_API = "https://www.courtlistener.com/api/rest/v3/opinions/4341372/"
+_OPINION_API = "https://www.courtlistener.com/api/rest/v4/opinions/4341372/"
 
 _DOCKET_URL = "https://www.courtlistener.com/docket/555/united-states-v-acme/"
-_DOCKET_API = "https://www.courtlistener.com/api/rest/v3/dockets/555/"
-_DOCKET_ENTRIES_API = "https://www.courtlistener.com/api/rest/v3/docket-entries/"
+_DOCKET_API = "https://www.courtlistener.com/api/rest/v4/dockets/555/"
+_DOCKET_ENTRIES_API = "https://www.courtlistener.com/api/rest/v4/docket-entries/"
 
 
 async def test_fetch_opinion_uses_plain_text(monkeypatch, cache_dir: Path):
