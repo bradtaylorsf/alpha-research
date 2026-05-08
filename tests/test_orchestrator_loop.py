@@ -549,15 +549,16 @@ async def test_connector_fetch_handler_dispatches_to_module(
 async def test_connector_search_handler_wraps_runtime_error_as_fatal(
     job: Job, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When a connector raises ``RuntimeError`` (its missing-credential path),
-    the handler must convert it to :class:`FatalError` so the loop marks the
-    task failed cleanly down the documented path rather than relying on the
-    daemon's catch-all guard.
+    """When a connector raises :class:`MissingCredentialError`, the handler
+    must convert it to :class:`FatalError` so the loop marks the task failed
+    cleanly down the documented path rather than relying on the daemon's
+    catch-all guard. Preserves the smoke-skip contract.
     """
     from research_agent.tools import linkedin
+    from research_agent.tools._errors import MissingCredentialError
 
     async def fake_search(query: str, **kwargs: Any) -> list[SearchResult]:
-        raise RuntimeError(
+        raise MissingCredentialError(
             "linkedin requires LINKEDIN_DATA_API_KEY (or LIX_API_KEY for lix broker)"
         )
 
@@ -574,11 +575,15 @@ async def test_connector_search_handler_wraps_runtime_error_as_fatal(
 async def test_connector_fetch_handler_wraps_runtime_error_as_fatal(
     job: Job, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``<prefix>_fetch`` mirrors the search-side FatalError wrapping."""
+    """``<prefix>_fetch`` mirrors the search-side FatalError wrapping for
+    :class:`MissingCredentialError`."""
     from research_agent.tools import courtlistener
+    from research_agent.tools._errors import MissingCredentialError
 
     async def fake_fetch(url: str) -> Any:
-        raise RuntimeError("courtlistener requires COURTLISTENER_API_TOKEN")
+        raise MissingCredentialError(
+            "courtlistener requires COURTLISTENER_API_TOKEN"
+        )
 
     monkeypatch.setattr(courtlistener, "fetch", fake_fetch)
 
@@ -591,6 +596,73 @@ async def test_connector_fetch_handler_wraps_runtime_error_as_fatal(
                 "payload": {"url": "https://www.courtlistener.com/opinion/123/"},
             },
         )
+
+
+@pytest.mark.asyncio
+async def test_connector_search_handler_does_not_wrap_unrelated_runtime_error(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-credential ``RuntimeError`` from inside a connector must NOT get
+    masked as a credential FatalError. It propagates to the loop's catch-all
+    so the original bug message surfaces in ``daemon/error`` events with
+    traceback. Issue #190.
+    """
+    from research_agent.tools import congress
+
+    bug_message = "unrecoverable: response.json() returned None"
+
+    async def fake_search(query: str, **kwargs: Any) -> list[SearchResult]:
+        raise RuntimeError(bug_message)
+
+    monkeypatch.setattr(congress, "search", fake_search)
+
+    handler = default_handlers(router=None)["congress_search"]
+    with pytest.raises(RuntimeError) as excinfo:
+        await handler(
+            job, {"kind": "congress_search", "payload": {"query": "needle"}}
+        )
+    assert not isinstance(excinfo.value, FatalError)
+    assert bug_message in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_connector_fetch_handler_does_not_wrap_unrelated_runtime_error(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirror of the search variant for the fetch handler. Issue #190."""
+    from research_agent.tools import congress
+
+    bug_message = "boom: state-machine violation in fetch"
+
+    async def fake_fetch(url: str) -> Any:
+        raise RuntimeError(bug_message)
+
+    monkeypatch.setattr(congress, "fetch", fake_fetch)
+
+    handler = default_handlers(router=None)["congress_fetch"]
+    with pytest.raises(RuntimeError) as excinfo:
+        await handler(
+            job,
+            {
+                "kind": "congress_fetch",
+                "payload": {"url": "https://www.congress.gov/bill/118/hr/1"},
+            },
+        )
+    assert not isinstance(excinfo.value, FatalError)
+    assert bug_message in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_connector_fetch_handler_missing_url_raises_fatal(
+    job: Job,
+) -> None:
+    """A connector-fetch task without a ``url`` payload field surfaces as a
+    clean :class:`FatalError` rather than a ``KeyError`` into the daemon
+    catch-all. Issue #190.
+    """
+    handler = default_handlers(router=None)["congress_fetch"]
+    with pytest.raises(FatalError, match="missing url field"):
+        await handler(job, {"kind": "congress_fetch", "payload": {}})
 
 
 @pytest.mark.asyncio

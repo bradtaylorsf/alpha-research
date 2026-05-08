@@ -56,6 +56,7 @@ from research_agent.storage.tasks import (
     mark_running,
     next_pending,
 )
+from research_agent.tools._errors import MissingCredentialError
 
 logger = logging.getLogger(__name__)
 
@@ -156,12 +157,15 @@ def _filter_kwargs_for(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
 def _make_connector_search_handler(module_name: str) -> Handler:
     """Build a thin search-handler that dispatches to ``tools.<module_name>.search``.
 
-    Converts the connector's missing-credential ``RuntimeError`` (raised by
+    Converts the connector's :class:`MissingCredentialError` (raised by
     edgar/courtlistener/scholar/linkedin when their API key/UA isn't
     configured) into :class:`FatalError` so the loop marks the task failed
-    cleanly down the documented path. Returns the standard search-result
-    + ``follow_up_tasks`` shape so each top hit becomes a connector-aware
-    ``web_fetch`` follow-up.
+    cleanly down the documented path. Other ``RuntimeError`` subclasses —
+    real connector bugs — propagate to the loop's catch-all so they
+    surface as ``daemon/error`` events with tracebacks instead of getting
+    masked as missing-credential failures. Returns the standard
+    search-result + ``follow_up_tasks`` shape so each top hit becomes a
+    connector-aware ``web_fetch`` follow-up.
     """
 
     async def _handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
@@ -175,7 +179,7 @@ def _make_connector_search_handler(module_name: str) -> Handler:
         kwargs = _filter_kwargs_for(mod.search, kwargs)
         try:
             results = await mod.search(payload.get("query", ""), **kwargs)
-        except RuntimeError as exc:
+        except MissingCredentialError as exc:
             raise FatalError(f"{module_name}_search: {exc}") from exc
         return _expand_search_to_fetches(job, payload, results)
 
@@ -187,7 +191,9 @@ def _make_connector_fetch_handler(module_name: str) -> Handler:
 
     Mirrors :func:`_make_connector_search_handler` but for the single-URL
     fetch path: persists the returned ``Source`` and converts the
-    connector's missing-credential ``RuntimeError`` to :class:`FatalError`.
+    connector's :class:`MissingCredentialError` to :class:`FatalError`.
+    Plain ``RuntimeError`` from inside the connector propagates to the
+    loop's catch-all so unexpected failures stay diagnosable.
     """
 
     async def _handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
@@ -195,9 +201,12 @@ def _make_connector_fetch_handler(module_name: str) -> Handler:
 
         mod = import_module(f"research_agent.tools.{module_name}")
         payload = task["payload"]
+        url = payload.get("url")
+        if not url:
+            raise FatalError(f"{module_name}_fetch: missing url field")
         try:
-            source = await mod.fetch(payload["url"])
-        except RuntimeError as exc:
+            source = await mod.fetch(url)
+        except MissingCredentialError as exc:
             raise FatalError(f"{module_name}_fetch: {exc}") from exc
         return _persist_fetched_source(job, source)
 

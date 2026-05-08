@@ -34,6 +34,7 @@ import trafilatura
 
 from research_agent import config
 from research_agent.tools import pdf as pdf_tool
+from research_agent.tools._errors import MissingCredentialError
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ def _resolve_key() -> str:
     """
     key = config.get("SERPAPI_KEY") or ""
     if not key.strip():
-        raise RuntimeError(
+        raise MissingCredentialError(
             "Google Scholar connector requires a SERPAPI key. Sign up at "
             "https://serpapi.com/ and set SERPAPI_KEY in your .env."
         )
