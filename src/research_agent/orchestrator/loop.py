@@ -65,7 +65,51 @@ MAX_TASKS_PER_JOB = 10000
 HEURISTIC_CHECK_EVERY_N = 25
 RETRY_WAITS: tuple[int, ...] = (1, 2, 4, 8, 16, 30, 60)
 RETRY_MAX_ATTEMPTS = 5
+# Medium-scope default for drain-replan cap. Issue #209 made the runtime
+# cap scale with ``scope_class`` via ``_MAX_DRAIN_REPLANS_BY_SCOPE``; this
+# constant is preserved as the medium-scope value and is still honored as
+# the live cap when a plan has no ``scope_class`` set, so external imports
+# and tests that monkeypatch this symbol continue to work.
 MAX_DRAIN_REPLANS = 10
+
+# Issue #209: scope-aware cap for ``run_loop``'s drain-replan budget. A
+# fixed ``MAX_DRAIN_REPLANS=10`` (introduced by #117) is too tight for
+# broad/comprehensive investigations that name a cornerstone document or
+# enumerate dozens of sub-questions — a single cornerstone section-walk
+# (per #206) plus drill-down on each closed finding can consume 15-25
+# replans on its own. The medium row preserves the historical default.
+_MAX_DRAIN_REPLANS_BY_SCOPE: dict[str, int] = {
+    "narrow": 5,
+    "medium": 10,
+    "broad": 20,
+    "comprehensive": 30,
+}
+_MAX_DRAIN_REPLANS_FALLBACK = 10
+
+# Issue #209: minimum findings-per-subgoal before a goal is considered
+# "materially answered". When the drain-replan cap fires but open subgoals
+# still fall below the floor, the loop allows up to ``cap + floor`` more
+# replans targeting the under-served subgoals before terminating. Floors
+# scale with ``scope_class`` for the same reason caps do.
+_FINDING_FLOOR_BY_SCOPE: dict[str, int] = {
+    "narrow": 5,
+    "medium": 10,
+    "broad": 20,
+    "comprehensive": 30,
+}
+_FINDING_FLOOR_FALLBACK = 10
+
+# Connectors we always check for "did this fire?" when emitting the
+# ``cap_diagnostic`` event — useful when the planner's last template
+# narrowed to one or two kinds and the operator wants to see which
+# retrieval surfaces never got exercised.
+_CORE_CONNECTOR_KINDS = (
+    "web_search",
+    "congress_search",
+    "edgar_search",
+    "fedregister_search",
+    "courtlistener_search",
+)
 
 # Scope-aware default for how many top hits per search become web_fetch
 # follow-ups. Issue #178: a global default of 3 starves broad/comprehensive
@@ -671,6 +715,123 @@ def _load_pending_follow_up_questions(
             seen.add(key)
             out.append(cleaned)
     return out
+
+
+def _resolve_drain_cap(plan: Plan | None) -> int:
+    """Return the drain-replan cap for ``plan``'s ``scope_class`` (issue #209).
+
+    When no scope is set we read the live ``MAX_DRAIN_REPLANS`` symbol from
+    this module so legacy callers and tests that monkeypatch the constant
+    continue to drive the cap.
+    """
+    scope = plan.scope_class if plan is not None else None
+    if scope:
+        return _MAX_DRAIN_REPLANS_BY_SCOPE.get(scope, _MAX_DRAIN_REPLANS_FALLBACK)
+    return MAX_DRAIN_REPLANS
+
+
+def _resolve_finding_floor(plan: Plan | None) -> int:
+    """Return the per-subgoal findings-floor for ``plan``'s ``scope_class``."""
+    scope = plan.scope_class if plan is not None else None
+    return _FINDING_FLOOR_BY_SCOPE.get(scope or "", _FINDING_FLOOR_FALLBACK)
+
+
+def _under_served_subgoals(
+    plan: Plan, total_findings: int, floor: int
+) -> list[dict[str, Any]]:
+    """Identify open subgoals that may justify extending the drain-replan cap.
+
+    Findings aren't tagged by subgoal in the schema, so we estimate
+    coverage as ``total_findings // open_subgoals`` — coarse but enough to
+    distinguish "barely investigated" from "thoroughly answered". Every
+    open subgoal is reported (an unclosed subgoal is by definition not
+    materially answered) along with its estimated finding count and the
+    floor threshold, so the cap-diagnostic event is self-explanatory.
+    """
+    open_subgoals = [sg for sg in plan.subgoals if not sg.done]
+    if not open_subgoals:
+        return []
+    estimate = total_findings // max(len(open_subgoals), 1)
+    return [
+        {
+            "id": sg.id,
+            "description": sg.description,
+            "finding_count": estimate,
+            "floor": floor,
+        }
+        for sg in open_subgoals
+    ]
+
+
+def _unexercised_connectors(job: Job, plan: Plan, *, limit: int = 5) -> list[str]:
+    """Return connector kinds the planner expected but never actually ran.
+
+    Combines kinds named in ``plan.task_template`` with a small core set
+    and diffs against the distinct ``kind`` of completed tasks for the
+    job. Surfaces "we never tried EDGAR / FedRegister" before the cap hit.
+    """
+    template_kinds = {spec.kind for spec in plan.task_template}
+    candidates = template_kinds | set(_CORE_CONNECTOR_KINDS)
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT kind FROM tasks WHERE job_id = ? AND status = 'done'",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    exercised = {r["kind"] for r in rows}
+    return sorted(k for k in candidates if k not in exercised)[:limit]
+
+
+def _next_plausible_searches(plan: Plan, limit: int = 3) -> list[str]:
+    """Pull up to ``limit`` next-search/fetch payload strings from the plan.
+
+    Looks at ``plan.task_template`` (i.e. the planner's most recent output)
+    and returns the first ``query``/``q``/``url`` it can find for each
+    ``*_search``/``*_fetch`` task — what the planner was *about* to do
+    when the cap hit, surfaced for the operator.
+    """
+    out: list[str] = []
+    for spec in plan.task_template:
+        kind = spec.kind
+        if not (kind.endswith("_search") or kind.endswith("_fetch")):
+            continue
+        payload = spec.payload or {}
+        for key in ("query", "q", "url"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                out.append(value.strip())
+                break
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _emit_cap_diagnostic(
+    job: Job,
+    plan: Plan,
+    findings: list[dict[str, Any]],
+    floor: int,
+    *,
+    cap: int,
+) -> None:
+    """Emit ``loop/cap_diagnostic`` so operators can see what wasn't done.
+
+    Issue #209: when the drain-replan cap fires, a sparse final report
+    leaves the operator guessing which subgoals were under-served and
+    which connectors never ran. This event makes that explicit.
+    """
+    payload = {
+        "scope_class": plan.scope_class,
+        "cap": cap,
+        "floor": floor,
+        "total_findings": len(findings),
+        "under_served_subgoals": _under_served_subgoals(plan, len(findings), floor),
+        "unexercised_connectors": _unexercised_connectors(job, plan),
+        "next_plausible_searches": _next_plausible_searches(plan),
+    }
+    emit(job, "WARN", "loop", "cap_diagnostic", payload)
 
 
 async def _drain_replan(
@@ -2221,15 +2382,48 @@ async def run_loop(
     while not _should_stop(job) and not plan.is_complete() and tasks_done < max_tasks:
         task = next_pending(job)
         if task is None:
-            if drain_replans >= MAX_DRAIN_REPLANS:
-                emit(
-                    job,
-                    "WARN",
-                    "loop",
-                    "warning",
-                    {"drain_replan_cap_hit": True, "cap": MAX_DRAIN_REPLANS},
-                )
-                break
+            cap = _resolve_drain_cap(plan)
+            floor = _resolve_finding_floor(plan)
+            if drain_replans >= cap:
+                # Issue #209: before bailing, check whether subgoals are
+                # materially answered. If open subgoals remain we allow up
+                # to ``cap + floor`` more replans before giving up — a
+                # broad/comprehensive run that names a 30-department
+                # tracker shouldn't terminate just because the planner
+                # hit a defensive cap, when half the goal is still open.
+                findings = _load_all_findings(job)
+                under_served = _under_served_subgoals(plan, len(findings), floor)
+                if under_served and drain_replans < cap + floor:
+                    emit(
+                        job,
+                        "INFO",
+                        "loop",
+                        "drain_replan_floor_extension",
+                        {
+                            "cap": cap,
+                            "floor": floor,
+                            "scope_class": plan.scope_class,
+                            "drain_replans": drain_replans,
+                            "extension": drain_replans - cap + 1,
+                            "under_served_count": len(under_served),
+                        },
+                    )
+                    # fall through into the replan call below
+                else:
+                    emit(
+                        job,
+                        "WARN",
+                        "loop",
+                        "warning",
+                        {
+                            "drain_replan_cap_hit": True,
+                            "cap": cap,
+                            "scope_class": plan.scope_class,
+                            "drain_replans": drain_replans,
+                        },
+                    )
+                    _emit_cap_diagnostic(job, plan, findings, floor, cap=cap)
+                    break
             new_plan = await _drain_replan(
                 job, plan, router=router, drain_count=drain_replans + 1
             )
