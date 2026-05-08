@@ -36,6 +36,7 @@ from pydantic_ai import Agent
 
 from research_agent.observability.events import emit
 from research_agent.prompts.loader import load_prompt
+from research_agent.skills import list_skills
 from research_agent.storage import db
 from research_agent.storage.jobs import _atomic_write_text
 from research_agent.storage.markdown import write_plan
@@ -155,6 +156,11 @@ class Plan(BaseModel):
     the structured-index ``researcher_cornerstone`` prompt and bypasses the
     per-source findings cap so a 920-page policy document yields one finding
     per proposal — not the article-sized 2–6."""
+    active_strategies: list[str] = Field(default_factory=list)
+    """Names of strategy skills the planner is invoking for this plan
+    (e.g. ``["modern-policy-era-filtering"]``). The orchestrator deep-loads
+    each named strategy body at connector-task-emit time so the relevant
+    cross-cutting guidance is injected only where it matters."""
 
     def is_complete(self) -> bool:
         if not self.subgoals:
@@ -338,12 +344,33 @@ def _enqueue_plan_tasks(job: Job, plan: Plan) -> list[int]:
     Without this the loop would pull ``None`` immediately after a fresh
     plan and exit before doing any research. Deferred import — ``storage.tasks``
     imports ``TaskSpec`` from this module, so a top-level import would cycle.
+
+    Also attaches ``plan.active_strategies`` (when non-empty) to each task's
+    payload under the underscore-prefixed ``_active_strategies`` key. The
+    underscore prefix marks it as orchestrator-internal — ``_filter_kwargs_for``
+    drops it before any connector ``search`` / ``fetch`` call sees it, but
+    the loop's connector handlers can read it for skill deep-load without a
+    second DB round-trip on the latest-plan row.
     """
     from research_agent.storage.tasks import enqueue
 
     if not plan.task_template:
         return []
-    return enqueue(job, list(plan.task_template), plan.version)
+    if plan.active_strategies:
+        specs = [
+            spec.model_copy(
+                update={
+                    "payload": {
+                        **spec.payload,
+                        "_active_strategies": list(plan.active_strategies),
+                    }
+                }
+            )
+            for spec in plan.task_template
+        ]
+    else:
+        specs = list(plan.task_template)
+    return enqueue(job, specs, plan.version)
 
 
 _YAML_FENCE_RE = re.compile(r"```(?:yaml|yml)?\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
@@ -449,6 +476,45 @@ def _parse_plan_yaml(raw: str, *, version: int, raw_path: str) -> Plan:
         ) from e
 
 
+def _render_skills_index_section(category: str, entries: list[dict[str, Any]]) -> str:
+    """Render a planner-facing skills index list as a markdown bullet list.
+
+    Connector entries are exposed as ``{name}_search`` so the planner sees
+    the exact ``TaskKind`` it should emit; strategy entries keep their bare
+    name. Empty input produces ``"(none)"`` so the rendered prompt never
+    leaves a placeholder bullet that would confuse the LLM.
+    """
+    if not entries:
+        return "(none)"
+    lines: list[str] = []
+    for s in entries:
+        if category == "connectors":
+            label = f"`{s['name']}_search`"
+        else:
+            label = f"`{s['name']}`"
+        lines.append(f"- {label}: {s['description']}")
+    return "\n".join(lines)
+
+
+def _render_planner_prompt(job: Job) -> str:
+    """Build the planner system prompt with skills indexes injected.
+
+    The planner sees every shipped connector + strategy by name and
+    description so it can route directly without each skill's body bloating
+    the system prompt across all 18 connectors. Bodies are deep-loaded at
+    task-emit time. Emits ``skills/index_loaded`` once per (job, category).
+    """
+    connectors = list_skills("connectors", job=job)
+    strategies = list_skills("strategies", job=job)
+    return load_prompt(
+        "planner",
+        job=job,
+        goal=job.goal,
+        connector_skills_index=_render_skills_index_section("connectors", connectors),
+        strategy_skills_index=_render_skills_index_section("strategies", strategies),
+    )
+
+
 async def _run_planner_for_yaml(
     job: Job,
     *,
@@ -461,7 +527,7 @@ async def _run_planner_for_yaml(
     Local models choke on tool-call structured output for our nested
     Plan schema; YAML-on-disk is the resilient path.
     """
-    rendered = load_prompt("planner", job=job, goal=job.goal)
+    rendered = _render_planner_prompt(job)
     agent = Agent(router.model_for(tier), output_type=str, system_prompt=rendered)
     result = await router.call(tier, agent, user_message)
     output = result.output

@@ -108,7 +108,12 @@ def test_shipped_prompt_loads_with_valid_frontmatter(name: str) -> None:
 
 
 def test_planner_substitutes_goal_placeholder() -> None:
-    rendered = load_prompt("planner", goal="map who funded ACME Corp 2019-2024")
+    rendered = load_prompt(
+        "planner",
+        goal="map who funded ACME Corp 2019-2024",
+        connector_skills_index="(none)",
+        strategy_skills_index="(none)",
+    )
     assert "{{goal}}" not in rendered
     assert "map who funded ACME Corp 2019-2024" in rendered
 
