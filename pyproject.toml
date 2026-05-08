@@ -72,7 +72,11 @@ where = ["src"]
 include = ["research_agent*"]
 
 [tool.setuptools.package-data]
-research_agent = ["prompts/*.md"]
+research_agent = [
+    "prompts/*.md",
+    "skills/connectors/*.md",
+    "skills/strategies/*.md",
+]
 
 [tool.ruff]
 line-length = 100

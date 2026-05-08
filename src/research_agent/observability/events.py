@@ -55,6 +55,8 @@ EventKind = Literal[
     "tool_call",
     "checkpoint",
     "prompt_loaded",
+    "index_loaded",
+    "skill_loaded",
     "source_pruned",
     "pdf_vlm_escalation",
     "ocr_vlm_escalation",

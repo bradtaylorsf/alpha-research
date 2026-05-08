@@ -47,6 +47,7 @@ from research_agent.observability.events import emit
 from research_agent.orchestrator.checkpoint import checkpoint
 from research_agent.orchestrator.errors import FatalError, RetriableError
 from research_agent.orchestrator.plan import Plan, TaskKind, TaskSpec
+from research_agent.skills import load_skill, load_strategies
 from research_agent.storage import db
 from research_agent.storage.jobs import Job
 from research_agent.storage.tasks import (
@@ -185,6 +186,35 @@ def _filter_kwargs_for(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k in accepted}
 
 
+def _deep_load_skills_for_connector(
+    job: Job,
+    module_name: str,
+    payload: dict[str, Any],
+) -> None:
+    """Deep-load the connector skill + any active strategy skills.
+
+    Fires ``skills/skill_loaded`` telemetry for the matching connector
+    (when its file ships) and for each strategy named on the latest plan's
+    ``active_strategies`` (threaded into the task payload by
+    :func:`_enqueue_plan_tasks` as ``_active_strategies``). The loaded
+    bodies are not consumed yet — the LLM-driven kwarg-construction step
+    that will read them is its own follow-up issue. Loading here is what
+    fires telemetry and warms the cache so skill content is available the
+    moment a downstream caller wants it.
+
+    Missing skills return empty strings; this never raises so a planner
+    that names a not-yet-shipped connector or strategy can't break the
+    connector path.
+    """
+    try:
+        load_skill("connectors", module_name, job=job)
+        active = payload.get("_active_strategies")
+        if isinstance(active, list) and active:
+            load_strategies([s for s in active if isinstance(s, str)], job=job)
+    except Exception:  # noqa: BLE001 — skills are auxiliary; never break the connector
+        logger.exception("skills_deep_load_failed module=%s", module_name)
+
+
 def _make_connector_search_handler(module_name: str) -> Handler:
     """Build a thin search-handler that dispatches to ``tools.<module_name>.search``.
 
@@ -197,6 +227,12 @@ def _make_connector_search_handler(module_name: str) -> Handler:
     masked as missing-credential failures. Returns the standard
     search-result + ``follow_up_tasks`` shape so each top hit becomes a
     connector-aware ``web_fetch`` follow-up.
+
+    Before dispatching to ``mod.search``, deep-loads the matching
+    connector skill (if shipped) plus any active strategies threaded into
+    the payload by :func:`_enqueue_plan_tasks`. Only the relevant skill
+    bodies are loaded — the per-connector knowledge stays out of the
+    planner's system prompt and is materialized exactly at task-emit time.
     """
 
     async def _handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
@@ -204,6 +240,7 @@ def _make_connector_search_handler(module_name: str) -> Handler:
 
         mod = import_module(f"research_agent.tools.{module_name}")
         payload = task["payload"]
+        _deep_load_skills_for_connector(job, module_name, payload)
         kwargs = {
             k: v for k, v in payload.items() if k in _CONNECTOR_SEARCH_PASSTHROUGH
         }
@@ -224,7 +261,9 @@ def _make_connector_fetch_handler(module_name: str) -> Handler:
     fetch path: persists the returned ``Source`` and converts the
     connector's :class:`MissingCredentialError` to :class:`FatalError`.
     Plain ``RuntimeError`` from inside the connector propagates to the
-    loop's catch-all so unexpected failures stay diagnosable.
+    loop's catch-all so unexpected failures stay diagnosable. Deep-loads
+    the connector skill so the same telemetry path fires whether the loop
+    enters via the search or fetch side.
     """
 
     async def _handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
@@ -232,6 +271,7 @@ def _make_connector_fetch_handler(module_name: str) -> Handler:
 
         mod = import_module(f"research_agent.tools.{module_name}")
         payload = task["payload"]
+        _deep_load_skills_for_connector(job, module_name, payload)
         url = payload.get("url")
         if not url:
             raise FatalError(f"{module_name}_fetch: missing url field")

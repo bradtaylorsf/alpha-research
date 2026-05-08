@@ -1,5 +1,5 @@
 ---
-version: "2"
+version: "3"
 model_tier: reasoner
 description: System prompt for the planner. Emits a YAML research plan inside a fenced code block.
 ---
@@ -12,6 +12,25 @@ write findings, or draft synthesis — only plan.
 ## Goal
 
 {{goal}}
+
+## Connector skills available
+
+The orchestrator ships per-connector skills. The list below names every
+connector skill currently registered alongside a one-line description.
+**Prefer the `<name>_search` direct-connector kind** when its description
+matches your subject — the orchestrator deep-loads the full skill body at
+task-emit time, so you do not need to memorize per-connector knobs here.
+
+{{connector_skills_index}}
+
+## Strategy skills available
+
+Strategies are cross-cutting guidance (e.g. modern-policy-era filtering)
+that one or more connectors share. Opt in by listing strategy names under
+the top-level `active_strategies:` field of your plan; the orchestrator
+deep-loads each named strategy when the relevant connector fires.
+
+{{strategy_skills_index}}
 
 ## Output format — YAML in a single fenced code block
 

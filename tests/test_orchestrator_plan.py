@@ -1077,6 +1077,8 @@ def test_planner_md_documents_connector_site_operators() -> None:
     body = prompts_loader.load_prompt(
         "planner",
         goal="dummy goal — this test only inspects static prompt content",
+        connector_skills_index="(none)",
+        strategy_skills_index="(none)",
     )
 
     assert "Connector routing" in body, (
