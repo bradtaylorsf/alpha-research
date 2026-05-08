@@ -187,6 +187,14 @@ A markdown report with:
   ambiguous, say so.
 - Citation numbers in the body must reference entries in your Sources
   list. Do not cite numbers higher than the count of sources you list.
+- **The `## Sources` section MUST enumerate exactly the union of every
+  source ID cited inline in the report body, in order of first
+  appearance.** No curation, no omissions, no "top sources" subset — if
+  `[131]` appears anywhere above, then `131.` MUST appear as a numbered
+  line below. Reuse each source row's primary-key id from the input
+  context as the leading number; do NOT renumber to a contiguous
+  1..N range. A reader who sees `[131]` in the body must be able to scroll
+  to `131.` below to verify the URL and retrieval timestamp.
 
 ## Concrete example of the expected format
 
@@ -241,6 +249,11 @@ A markdown report with:
 
 1. https://example.com/a — "Title A" (retrieved 2026-05-06)
 2. https://example.com/b — "Title B" (retrieved 2026-05-06)
+3. https://example.com/c — "Title C" (retrieved 2026-05-06)
+
+(Note: every `[N]` cited above — including grouped citations like
+`[2][3]` — must appear as `N.` here. The Sources section is the
+union of inline citations, not a curated subset.)
 ``` json
 {"subgoal_status": {"1": "confirmed", "2": "inconclusive"}}
 ```

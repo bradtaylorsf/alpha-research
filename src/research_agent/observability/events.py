@@ -70,6 +70,7 @@ EventKind = Literal[
     "cornerstone_dedup",
     "cornerstone_followups_emitted",
     "second_order_fanout",
+    "source_list_reconciled",
     "error",
     "warning",
 ]
