@@ -78,6 +78,37 @@ _DEFAULT_TOP_K_BY_SCOPE: dict[str, int] = {
 }
 _DEFAULT_TOP_K_FALLBACK = 3
 
+# Issue #194: how many ``web_fetch`` follow-ups ``_run_extract_findings``
+# may emit per extraction for URLs cited inside the findings it just wrote.
+# Mirrors the scope-class scaling pattern from #178: narrow runs do not
+# auto-fan-out at all (drill-downs at the planner level only), while
+# comprehensive runs ride citation chains aggressively.
+_SECOND_ORDER_MAX_BY_SCOPE: dict[str, int] = {
+    "narrow": 0,
+    "medium": 1,
+    "broad": 2,
+    "comprehensive": 3,
+}
+_SECOND_ORDER_MAX_FALLBACK = 1
+# Don't fan out from low-confidence findings — the agent's least-reliable
+# signal. ``>= 0.5`` is a starting threshold that the planner can override
+# per task via ``payload['second_order_confidence_threshold']``.
+_SECOND_ORDER_CONFIDENCE_THRESHOLD = 0.5
+# Hard cap per job across all extracts. Prevents pathological cases where
+# every fetched document carries dozens of cited URLs and the queue
+# explodes — the user can still get the planner to drill into specific
+# paths via ``tactical_replan`` once this budget is spent.
+_SECOND_ORDER_JOB_CAP = 200
+# URLs in fan-out candidates: match http/https plus a healthy slug of URL-
+# safe characters. Trailing punctuation (``.``, ``,``, ``)``, ``]``, ``}``,
+# ``>``, quotes) is stripped post-match by ``_normalize_url_for_fanout`` so
+# the regex itself stays readable.
+_URL_REGEX = re.compile(r"https?://[^\s)\]\}<>\"']+")
+# Marker key written into a follow-up task's payload so we can SQL-query
+# how many second-order tasks have already been emitted for the job (and
+# enforce the per-job cap).
+_SECOND_ORDER_PARENT_FINDING_ID_KEY = "second_order_parent_finding_id"
+
 Handler = Callable[[Job, dict[str, Any]], Awaitable[dict[str, Any] | None]]
 
 
@@ -848,6 +879,289 @@ def _build_bill_text_followup(
     )
 
 
+# ---------------------------------------------------------------------------
+# Issue #194: second-order URL fan-out from extracted findings
+# ---------------------------------------------------------------------------
+
+
+_BLOCKLIST_PATH_REL = "config/url_blocklist.yaml"
+_BLOCKLIST_CACHE: set[str] | None = None
+
+
+def _load_url_blocklist() -> set[str]:
+    """Read ``config/url_blocklist.yaml`` once; return host substrings.
+
+    The blocklist filters second-order ``web_fetch`` follow-ups so the
+    fan-out doesn't burn budget on social media surfaces, paywalled hosts,
+    or archive.org (which has its own connector). Match is host-substring,
+    case-insensitive, applied in :func:`_is_url_blocked`. Missing or
+    malformed file → empty set; we'd rather lose blocklist enforcement
+    than crash extraction.
+    """
+    global _BLOCKLIST_CACHE
+    if _BLOCKLIST_CACHE is not None:
+        return _BLOCKLIST_CACHE
+
+    from pathlib import Path
+
+    import yaml
+
+    # Walk upward from this module until we find a directory carrying both
+    # the blocklist and a ``pyproject.toml`` (the worktree root). The package
+    # is installed editable, so ``__file__`` always lives inside the project.
+    blocklist: set[str] = set()
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / _BLOCKLIST_PATH_REL
+        if (parent / "pyproject.toml").exists():
+            if candidate.exists():
+                try:
+                    data = yaml.safe_load(candidate.read_text(encoding="utf-8"))
+                except (OSError, yaml.YAMLError):
+                    data = None
+                if isinstance(data, list):
+                    for entry in data:
+                        if isinstance(entry, str) and entry.strip():
+                            blocklist.add(entry.strip().lower())
+            break
+
+    _BLOCKLIST_CACHE = blocklist
+    return _BLOCKLIST_CACHE
+
+
+def _normalize_url_for_fanout(url: str) -> str | None:
+    """Strip trailing punctuation + fragment, lowercase host. Return canonical or None.
+
+    Returns ``None`` for URLs that don't have an http/https scheme or that
+    parse to nonsense — those should never be treated as fan-out candidates.
+    Path/query are preserved as-is (no aggressive normalization that might
+    alias two genuinely different resources).
+    """
+    if not isinstance(url, str) or not url:
+        return None
+    trimmed = url.strip().rstrip(".,;:!?)\"'>]}")
+    if not trimmed:
+        return None
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(trimmed)
+    except ValueError:
+        return None
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return None
+    host = parts.hostname or ""
+    if not host:
+        return None
+    netloc = host.lower()
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((scheme, netloc, parts.path, parts.query, ""))
+
+
+def _is_url_blocked(url: str, blocklist: set[str]) -> bool:
+    """Substring match against ``blocklist`` on the URL's hostname.
+
+    ``blocklist`` entries are lowercase host fragments (``twitter.com``,
+    ``web.archive.org``); we extract the URL's host once and check for
+    substring containment so ``mobile.twitter.com`` and ``t.co`` redirects
+    that resolve to the same host are both caught.
+    """
+    if not blocklist:
+        return False
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower()
+    if not host:
+        return False
+    return any(entry in host for entry in blocklist)
+
+
+def _count_second_order_emitted(job: Job) -> int:
+    """Count tasks for ``job`` whose payload carries the second-order marker.
+
+    Used to enforce the job-wide cap (:data:`_SECOND_ORDER_JOB_CAP`). We
+    count tasks in any status — pending/running/done/failed all count
+    against the budget so a long run that has already burned 200 fetches
+    on dead URLs doesn't get to keep adding more.
+    """
+    json_path = f"$.{_SECOND_ORDER_PARENT_FINDING_ID_KEY}"
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM tasks"
+            " WHERE job_id = ?"
+            " AND json_extract(payload_json, ?) IS NOT NULL",
+            (job.id, json_path),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return 0
+    return int(row["n"])
+
+
+def _existing_job_source_urls(job: Job) -> set[str]:
+    """Return the normalized URLs of every source already linked to ``job``.
+
+    Drives same-job dedup: if extraction emits a finding citing a URL that
+    the agent has already fetched in this run, skip it. Cross-job dedup
+    is intentionally out of scope (issue #194 § "Out of scope").
+    """
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT s.url AS url FROM sources s"
+            " JOIN job_sources js ON js.source_id = s.id"
+            " WHERE js.job_id = ? AND s.url IS NOT NULL",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    out: set[str] = set()
+    for row in rows:
+        norm = _normalize_url_for_fanout(row["url"])
+        if norm is not None:
+            out.add(norm)
+    return out
+
+
+def _extract_followup_urls(
+    findings: list[dict[str, Any]],
+    *,
+    max_per_extract: int,
+    confidence_threshold: float,
+    exclude_urls: set[str],
+    blocklist: set[str],
+) -> list[tuple[dict[str, Any], str]]:
+    """Pick high-confidence findings' cited URLs; return ``(finding, url)`` pairs.
+
+    Sorted by parent confidence descending so when ``max_per_extract`` clips
+    the list, the strongest signals survive. URLs are deduped within the
+    call, normalized via :func:`_normalize_url_for_fanout`, blocklist-
+    filtered via :func:`_is_url_blocked`, and any URL in ``exclude_urls``
+    (typically the job's already-fetched source URLs) is dropped before
+    the cap fires so we don't waste cap slots on dedups.
+    """
+    seen: set[str] = set()
+    candidates: list[tuple[float, dict[str, Any], str]] = []
+    for f in findings:
+        try:
+            confidence = float(f.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if confidence < confidence_threshold:
+            continue
+        text_parts = [str(f.get("claim") or ""), str(f.get("quote") or "")]
+        text = " ".join(text_parts)
+        for raw_url in _URL_REGEX.findall(text):
+            normalized = _normalize_url_for_fanout(raw_url)
+            if normalized is None:
+                continue
+            if normalized in seen:
+                continue
+            if normalized in exclude_urls:
+                continue
+            if _is_url_blocked(normalized, blocklist):
+                continue
+            seen.add(normalized)
+            candidates.append((confidence, f, normalized))
+    # Stable sort by descending confidence so per-extract cap retains the
+    # strongest parent signals.
+    candidates.sort(key=lambda c: -c[0])
+    return [(f, u) for _, f, u in candidates[:max_per_extract]]
+
+
+def _build_second_order_fanout(
+    job: Job,
+    findings: list[dict[str, Any]],
+    payload: dict[str, Any] | None,
+) -> list[TaskSpec]:
+    """Build ``web_fetch`` follow-ups for URLs cited inside ``findings``.
+
+    Precedence for the per-extract cap (mirrors :func:`_expand_search_to_fetches`):
+    explicit ``payload['second_order_max']`` > plan ``scope_class`` > fallback.
+    Returns an empty list when the cap is 0 (e.g. narrow scope), when the
+    job-wide cap is already exceeded, or when nothing in ``findings`` cites
+    a fan-out-eligible URL. Emits one ``second_order_fanout`` event per
+    surfaced URL so operators can audit the fan-out volume.
+    """
+    payload = payload or {}
+    if "second_order_max" in payload:
+        try:
+            max_per_extract = int(payload["second_order_max"])
+        except (TypeError, ValueError):
+            max_per_extract = _SECOND_ORDER_MAX_FALLBACK
+    else:
+        plan = _load_latest_plan(job)
+        scope = plan.scope_class if plan is not None else None
+        max_per_extract = _SECOND_ORDER_MAX_BY_SCOPE.get(
+            scope or "", _SECOND_ORDER_MAX_FALLBACK
+        )
+    if max_per_extract <= 0 or not findings:
+        return []
+
+    threshold_raw = payload.get(
+        "second_order_confidence_threshold", _SECOND_ORDER_CONFIDENCE_THRESHOLD
+    )
+    try:
+        threshold = float(threshold_raw)
+    except (TypeError, ValueError):
+        threshold = _SECOND_ORDER_CONFIDENCE_THRESHOLD
+
+    already_emitted = _count_second_order_emitted(job)
+    remaining_job_budget = _SECOND_ORDER_JOB_CAP - already_emitted
+    if remaining_job_budget <= 0:
+        return []
+    effective_cap = min(max_per_extract, remaining_job_budget)
+
+    blocklist = _load_url_blocklist()
+    exclude_urls = _existing_job_source_urls(job)
+
+    selected = _extract_followup_urls(
+        findings,
+        max_per_extract=effective_cap,
+        confidence_threshold=threshold,
+        exclude_urls=exclude_urls,
+        blocklist=blocklist,
+    )
+    if not selected:
+        return []
+
+    follow_ups: list[TaskSpec] = []
+    for finding, url in selected:
+        parent_finding_id = finding.get("finding_id")
+        sub_question = (finding.get("claim") or "").strip() or job.goal
+        emit(
+            job,
+            "INFO",
+            "loop",
+            "second_order_fanout",
+            {
+                "parent_finding_id": parent_finding_id,
+                "parent_confidence": float(finding.get("confidence", 0.0)),
+                "url": url,
+                "sub_question": sub_question,
+            },
+        )
+        follow_ups.append(
+            TaskSpec(
+                kind="web_fetch",
+                payload={
+                    "url": url,
+                    "sub_question": sub_question,
+                    _SECOND_ORDER_PARENT_FINDING_ID_KEY: parent_finding_id,
+                },
+            )
+        )
+    return follow_ups
+
+
 def _load_source_text(job: Job, source_id: int) -> tuple[str, dict[str, Any]] | None:
     """Read ``sources/<sha>.md`` for ``source_id``; return ``(text, meta)`` or None.
 
@@ -1094,6 +1408,11 @@ async def _run_extract_findings(
         )
 
     written: list[int] = []
+    # Mirror of ``written`` plus the {claim, confidence, quote} fields the
+    # second-order URL fan-out (#194) needs. We capture them at write time
+    # so the fan-out helper doesn't have to round-trip through the DB to
+    # rebuild what we already parsed.
+    written_findings: list[dict[str, Any]] = []
     skipped = 0
     for item in parsed[:findings_limit]:
         if not isinstance(item, dict):
@@ -1114,6 +1433,8 @@ async def _run_extract_findings(
             continue
         tags_raw = item.get("tags") or []
         tags_list = [str(t) for t in tags_raw if isinstance(t, (str, int))] or None
+        quote_raw = item.get("quote")
+        quote_str = quote_raw.strip() if isinstance(quote_raw, str) else ""
         try:
             fid = write_finding(
                 job,
@@ -1123,17 +1444,31 @@ async def _run_extract_findings(
                 tags=tags_list,
             )
             written.append(fid)
+            written_findings.append(
+                {
+                    "finding_id": fid,
+                    "claim": claim_raw.strip(),
+                    "confidence": conf,
+                    "quote": quote_str,
+                }
+            )
         except (ValueError, TypeError):
             skipped += 1
             continue
 
-    return {
+    result_dict: dict[str, Any] = {
         "source_id": source_id,
         "findings_written": len(written),
         "finding_ids": written,
         "skipped": skipped,
         "raw_path": raw_path,
     }
+
+    follow_ups = _build_second_order_fanout(job, written_findings, payload)
+    if follow_ups:
+        result_dict["follow_up_tasks"] = [t.model_dump() for t in follow_ups]
+
+    return result_dict
 
 
 async def _run_summarize_source(

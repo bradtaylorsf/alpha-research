@@ -1641,3 +1641,307 @@ async def test_extract_findings_planner_marker_does_not_emit_fallback(
     kinds = _read_event_kinds(db_path, job.id)
     assert "cornerstone_extract" in kinds
     assert "cornerstone_fallback_triggered" not in kinds
+
+
+# ---------------------------------------------------------------------------
+# Issue #194: second-order URL fan-out from extracted findings
+# ---------------------------------------------------------------------------
+
+
+def _persist_plan_with_full_scope(
+    job: Job,
+    scope: ScopeClass | None,
+    *,
+    cornerstone_url: str | None = None,
+) -> None:
+    p = Plan(
+        version=1,
+        objective="Investigate the target",
+        subgoals=[Subgoal(id=1, description="Gather", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=3,
+        scope_class=scope,
+        cornerstone_url=cornerstone_url,
+    )
+    write_plan(job, p.model_dump())
+
+
+def _reset_blocklist_cache() -> None:
+    """Clear the module-level blocklist cache so tests can re-stub it."""
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _loop_mod._BLOCKLIST_CACHE = None
+
+
+@pytest.mark.asyncio
+async def test_second_order_fanout_skips_url_already_in_job_sources(
+    job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Citation that points at an already-fetched URL must NOT fan out.
+
+    A finding's claim text contains 2 URLs: one already linked to this
+    job via ``job_sources`` (the agent fetched it during a prior task)
+    and one new. Only the new URL should become a ``web_fetch``
+    follow-up — same-job dedup is the whole point of this guard.
+    """
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _reset_blocklist_cache()
+    monkeypatch.setattr(_loop_mod, "_load_url_blocklist", lambda: set())
+
+    _persist_plan_with_full_scope(job, "broad")
+
+    # Pre-seed: the agent has already fetched ``already.example/doc.pdf`` for
+    # this job, so a finding citing that URL must not re-fan-out.
+    already_url = "https://already.example/doc.pdf"
+    _seed_source(
+        job,
+        url=already_url,
+        body="prior fetch contents",
+        kind="pdf",
+    )
+
+    new_url = "https://new.example/citation.pdf"
+    extract_url = "https://example.test/article.html"
+    source_id = _seed_source(
+        job,
+        url=extract_url,
+        body="An article body that triggers extraction.",
+        kind="web",
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        f'- claim: "Important point — see {already_url} and also {new_url} for detail."\n'
+        '  confidence: 0.9\n'
+        '  quote: ""\n'
+        '  tags: [policy]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "Detail?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    follow_ups = result.get("follow_up_tasks") or []
+    urls = [f["payload"]["url"] for f in follow_ups]
+    assert urls == [new_url], (
+        f"expected only the new URL to fan out; got {urls}"
+    )
+
+    # The fanned-out follow-up must carry the marker key so the job-cap
+    # query can count it.
+    assert (
+        follow_ups[0]["payload"].get("second_order_parent_finding_id") is not None
+    )
+
+    # And one ``second_order_fanout`` event must have fired.
+    events = _read_event_kinds(db_path, job.id)
+    assert events.count("second_order_fanout") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scope,expected_count",
+    [("comprehensive", 3), ("broad", 2)],
+)
+async def test_second_order_fanout_per_extract_cap_by_scope(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: ScopeClass,
+    expected_count: int,
+) -> None:
+    """Per-extract cap follows scope: comprehensive → 3, broad → 2.
+
+    Three high-confidence findings, each citing one distinct URL. The
+    same input must produce 3 follow-ups under comprehensive and only 2
+    under broad — sorted by parent confidence so the strongest signals
+    survive the clip.
+    """
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _reset_blocklist_cache()
+    monkeypatch.setattr(_loop_mod, "_load_url_blocklist", lambda: set())
+
+    _persist_plan_with_full_scope(job, scope)
+
+    extract_url = "https://example.test/article.html"
+    source_id = _seed_source(
+        job,
+        url=extract_url,
+        body=f"Body for {scope}",
+        kind="web",
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "Top finding cites https://a.example/one.pdf for evidence."\n'
+        '  confidence: 0.95\n'
+        '  quote: ""\n'
+        '  tags: [a]\n'
+        '- claim: "Second finding cites https://b.example/two.pdf for evidence."\n'
+        '  confidence: 0.85\n'
+        '  quote: ""\n'
+        '  tags: [b]\n'
+        '- claim: "Third finding cites https://c.example/three.pdf for evidence."\n'
+        '  confidence: 0.75\n'
+        '  quote: ""\n'
+        '  tags: [c]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "Refs?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    follow_ups = result.get("follow_up_tasks") or []
+    assert len(follow_ups) == expected_count
+
+    urls = [f["payload"]["url"] for f in follow_ups]
+    # Highest-confidence finding's URL must always be present (sorted-by-conf).
+    assert "https://a.example/one.pdf" in urls
+    if expected_count >= 2:
+        assert "https://b.example/two.pdf" in urls
+
+
+@pytest.mark.asyncio
+async def test_second_order_fanout_skips_low_confidence_findings(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finding below the 0.5 confidence threshold must NOT fan out.
+
+    The agent's least-reliable signals should not trigger more fetching.
+    """
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _reset_blocklist_cache()
+    monkeypatch.setattr(_loop_mod, "_load_url_blocklist", lambda: set())
+
+    _persist_plan_with_full_scope(job, "comprehensive")
+
+    extract_url = "https://example.test/article.html"
+    source_id = _seed_source(
+        job,
+        url=extract_url,
+        body="A weakly-confident article.",
+        kind="web",
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "Possibly relevant — see https://shaky.example/doc.pdf."\n'
+        '  confidence: 0.3\n'
+        '  quote: ""\n'
+        '  tags: [shaky]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "Maybe?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    follow_ups = result.get("follow_up_tasks") or []
+    assert follow_ups == []
+
+
+@pytest.mark.asyncio
+async def test_second_order_fanout_drops_blocklisted_urls(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A high-confidence finding citing a blocklisted host must NOT fan out.
+
+    The blocklist filters social-media + archive hosts (issue #194)
+    even when the parent finding is otherwise eligible.
+    """
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _reset_blocklist_cache()
+    monkeypatch.setattr(
+        _loop_mod, "_load_url_blocklist", lambda: {"twitter.com"}
+    )
+
+    _persist_plan_with_full_scope(job, "comprehensive")
+
+    extract_url = "https://example.test/article.html"
+    source_id = _seed_source(
+        job,
+        url=extract_url,
+        body="An article with a Twitter citation.",
+        kind="web",
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "Per https://twitter.com/foo/status/123 the source confirms it."\n'
+        '  confidence: 0.9\n'
+        '  quote: ""\n'
+        '  tags: [social]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "Confirms?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    follow_ups = result.get("follow_up_tasks") or []
+    assert follow_ups == []
+
+
+def test_second_order_fanout_helpers_normalize_and_block() -> None:
+    """Spot-check the URL normalizer + blocklist matcher for trailing punctuation."""
+    from research_agent.orchestrator.loop import (
+        _is_url_blocked,
+        _normalize_url_for_fanout,
+    )
+
+    assert (
+        _normalize_url_for_fanout("https://Example.com/path).")
+        == "https://example.com/path"
+    )
+    assert _normalize_url_for_fanout("ftp://nope/x") is None
+    assert _normalize_url_for_fanout("not-a-url") is None
+    assert _is_url_blocked(
+        "https://mobile.twitter.com/foo", {"twitter.com"}
+    ) is True
+    assert _is_url_blocked("https://example.com/x", {"twitter.com"}) is False
+
+
+@pytest.mark.asyncio
+async def test_second_order_fanout_narrow_scope_emits_zero(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``narrow`` scope leaves drill-downs to the planner — no auto fan-out."""
+    import research_agent.orchestrator.loop as _loop_mod
+
+    _reset_blocklist_cache()
+    monkeypatch.setattr(_loop_mod, "_load_url_blocklist", lambda: set())
+
+    _persist_plan_with_full_scope(job, "narrow")
+
+    extract_url = "https://example.test/article.html"
+    source_id = _seed_source(
+        job,
+        url=extract_url,
+        body="A narrow-scope body.",
+        kind="web",
+    )
+
+    yaml_payload = (
+        "```yaml\n"
+        '- claim: "See https://primary.example/doc.pdf for the underlying record."\n'
+        '  confidence: 0.95\n'
+        '  quote: ""\n'
+        '  tags: [primary]\n'
+        "```\n"
+    )
+    router = _StubRouter(yaml_payload)
+    task = {"payload": {"source_id": source_id, "sub_question": "?"}}
+
+    result = await _run_extract_findings(job, task, router=router)
+
+    assert (result.get("follow_up_tasks") or []) == []
