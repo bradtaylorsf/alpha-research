@@ -46,6 +46,8 @@ EventKind = Literal[
     "critique_written",
     "drain_replan",
     "replan_triggered",
+    "replan_truncated",
+    "findings_truncated",
     "llm_call",
     "lmstudio_degraded",
     "lmstudio_recovered",
@@ -56,6 +58,7 @@ EventKind = Literal[
     "source_pruned",
     "pdf_vlm_escalation",
     "ocr_vlm_escalation",
+    "cornerstone_extract",
     "error",
     "warning",
 ]

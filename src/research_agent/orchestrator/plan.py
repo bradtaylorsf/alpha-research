@@ -58,6 +58,47 @@ TaskKind = Literal[
     "summarize_source",
     "synthesize",
     "critique",
+    # Issue #175: connector-specific kinds dispatch directly to each
+    # tool's structured-API call (one round trip, JSON in / claims out)
+    # instead of routing through Brave + trafilatura. Each *_search emits
+    # ``web_fetch`` follow-ups via ``_expand_search_to_fetches``; each
+    # *_fetch persists a single source like ``arxiv_fetch``.
+    "congress_search",
+    "congress_fetch",
+    "fec_search",
+    "fec_fetch",
+    "edgar_search",
+    "edgar_fetch",
+    "courtlistener_search",
+    "courtlistener_fetch",
+    "fedregister_search",
+    "fedregister_fetch",
+    "lda_search",
+    "lda_fetch",
+    "usaspending_search",
+    "usaspending_fetch",
+    "gdelt_search",
+    "gdelt_fetch",
+    "littlesis_search",
+    "littlesis_fetch",
+    "nonprofits_search",
+    "nonprofits_fetch",
+    "opencorporates_search",
+    "opencorporates_fetch",
+    "sanctions_search",
+    "sanctions_fetch",
+    "bbb_search",
+    "bbb_fetch",
+    "licensing_search",
+    "licensing_fetch",
+    "sos_search",
+    "sos_fetch",
+    "calaccess_search",
+    "calaccess_fetch",
+    "scholar_search",
+    "scholar_fetch",
+    "linkedin_search",
+    "linkedin_fetch",
 ]
 
 ScopeClass = Literal["narrow", "medium", "broad", "comprehensive"]
@@ -107,6 +148,13 @@ class Plan(BaseModel):
     task_template: list[TaskSpec]
     expected_iterations: int = Field(ge=1)
     scope_class: ScopeClass | None = None
+    cornerstone_url: str | None = None
+    """When the goal names a specific document (PDF, court opinion, SEC
+    filing, named report), the planner declares it here and emits a
+    ``web_fetch`` for it as task 0. Extraction against this URL switches to
+    the structured-index ``researcher_cornerstone`` prompt and bypasses the
+    per-source findings cap so a 920-page policy document yields one finding
+    per proposal — not the article-sized 2–6."""
 
     def is_complete(self) -> bool:
         if not self.subgoals:
@@ -115,6 +163,127 @@ class Plan(BaseModel):
 
 
 MAX_PLAN_VERSIONS = 200
+
+MAX_RECENT_RESULTS_FOR_REPLAN = 25
+"""Cap on entries from ``recent_results`` that ``tactical_replan`` ships to the
+local-tier planner. Each entry is also compressed to a small summary dict so a
+long-running goal can't push the prompt past the model's context window —
+issue #176 saw a 524k-token payload at task 96."""
+
+MAX_FINDINGS_FOR_REPLAN = 60
+"""Cap on ``findings`` shipped into the ``tactical_replan`` payload (issue #179).
+
+Drilling down into named claims (Schedule F, WOTUS, mifepristone) requires the
+planner to *see* those claims — but a long broad-scope run can accumulate
+hundreds of findings, so we keep the most recent N (highest ids) and re-order
+them ascending before injection. Each entry is also compressed by
+:func:`_summarize_finding` so the per-entry footprint stays small."""
+
+_SUMMARY_REPR_MAX_CHARS = 500
+
+
+def _summarize_recent_result(r: dict[str, Any]) -> dict[str, Any]:
+    """Compress one ``recent_results`` entry into a planner-sized dict.
+
+    The full ``result_json`` per task carries every URL of every search hit,
+    every fetched source's body shape, every emitted claim. Stacking 25 of
+    those at full fidelity already overflows local-tier context windows on
+    long runs; the planner only needs to know *what kind of work ran, what
+    came back at what scale, and the top hits* to decide what to do next.
+    """
+    result = r.get("result")
+    summary: Any
+    status = "ok" if result is not None else "no_result"
+
+    if isinstance(result, dict):
+        hits = result.get("results")
+        if not isinstance(hits, list):
+            hits = result.get("hits") if isinstance(result.get("hits"), list) else None
+        if isinstance(hits, list):
+            top: list[dict[str, Any]] = []
+            for h in hits[:3]:
+                if isinstance(h, dict):
+                    top.append(
+                        {
+                            k: h[k]
+                            for k in ("url", "title")
+                            if k in h and isinstance(h[k], str)
+                        }
+                    )
+            summary = {"count": len(hits), "top": top}
+            if "follow_up_tasks" in result:
+                fu = result.get("follow_up_tasks")
+                summary["follow_up_tasks"] = len(fu) if isinstance(fu, list) else 0
+        elif "source" in result and isinstance(result["source"], dict):
+            src = result["source"]
+            summary = {
+                k: src[k]
+                for k in ("url", "title", "source_kind")
+                if k in src and isinstance(src[k], str)
+            }
+            text = src.get("cleaned_text") or src.get("raw_content") or ""
+            if isinstance(text, str):
+                summary["content_chars"] = len(text)
+            if "source_id" in result:
+                summary["source_id"] = result["source_id"]
+        elif "findings_written" in result or "finding_ids" in result:
+            ids = result.get("finding_ids") or []
+            summary = {
+                "findings_written": result.get(
+                    "findings_written",
+                    len(ids) if isinstance(ids, list) else 0,
+                ),
+                "source_id": result.get("source_id"),
+            }
+        elif "summary" in result and isinstance(result["summary"], str):
+            text = result["summary"]
+            summary = {
+                "summary_chars": len(text),
+                "source_id": result.get("source_id"),
+            }
+        else:
+            text = repr(result)
+            if len(text) > _SUMMARY_REPR_MAX_CHARS:
+                text = text[:_SUMMARY_REPR_MAX_CHARS] + "…"
+            summary = text
+    elif result is None:
+        summary = None
+    else:
+        text = repr(result)
+        if len(text) > _SUMMARY_REPR_MAX_CHARS:
+            text = text[:_SUMMARY_REPR_MAX_CHARS] + "…"
+        summary = text
+
+    return {
+        "task_id": r.get("task_id"),
+        "kind": r.get("kind"),
+        "status": status,
+        "summary": summary,
+    }
+
+
+def _summarize_finding(f: dict[str, Any]) -> dict[str, Any]:
+    """Compress one finding row into a planner-sized dict (issue #179).
+
+    The planner needs the *claim text* (so it can drill into the named
+    entity/proposal/rule), plus minimal evidence weight (``confidence``,
+    ``tags``, one source pointer). The full ``source_ids`` list is dropped
+    in favor of a single ``source_id`` — chasing every source URL is the
+    fetcher's job, not the planner's.
+    """
+    src_ids = f.get("source_ids")
+    first_source: Any = None
+    if isinstance(src_ids, list) and src_ids:
+        first_source = src_ids[0]
+
+    summarized: dict[str, Any] = {
+        "id": f.get("id"),
+        "claim": f.get("claim"),
+        "confidence": f.get("confidence"),
+        "tags": f.get("tags"),
+        "source_id": first_source,
+    }
+    return summarized
 
 
 class PlanVersionCapExceeded(RuntimeError):
@@ -341,15 +510,72 @@ async def tactical_replan(
     """
     _assert_under_cap(job)
     next_version = plan.version + 1
+
+    # issue #176: bound the payload regardless of caller. recent_results is
+    # truncated to the last MAX_RECENT_RESULTS_FOR_REPLAN entries and each is
+    # replaced by a compact summary; older results are already reflected in
+    # the running plan + findings so dropping them is safe.
+    original_len = len(recent_results)
+    tail = recent_results[-MAX_RECENT_RESULTS_FOR_REPLAN:]
+    summarized = [_summarize_recent_result(r) for r in tail]
+
     payload: dict[str, Any] = {
         "prior_plan": plan.model_dump(),
-        "recent_results": recent_results,
+        "recent_results": summarized,
     }
+
+    # issue #179: include a bounded view of the running ``findings`` so the
+    # planner can drill into named claims (Schedule F, WOTUS, mifepristone)
+    # rather than re-emitting the same per-department generic queries. Cap to
+    # the most recent MAX_FINDINGS_FOR_REPLAN entries (highest ids first, then
+    # re-ordered ascending) and compress each via ``_summarize_finding``.
+    findings_truncation: tuple[int, int] | None = None
     if findings is not None:
-        payload["findings"] = findings
+        findings_before = len(findings)
+        if findings_before > MAX_FINDINGS_FOR_REPLAN:
+            top_recent = sorted(
+                findings,
+                key=lambda f: f.get("id") if isinstance(f.get("id"), int) else -1,
+                reverse=True,
+            )[:MAX_FINDINGS_FOR_REPLAN]
+            tail_findings = sorted(
+                top_recent,
+                key=lambda f: f.get("id") if isinstance(f.get("id"), int) else -1,
+            )
+            findings_truncation = (findings_before, len(tail_findings))
+        else:
+            tail_findings = list(findings)
+        payload["findings"] = [_summarize_finding(f) for f in tail_findings]
     if synthesis_md is not None:
         payload["synthesis_md"] = synthesis_md
     context = json.dumps(payload, sort_keys=True, default=str)
+
+    if original_len > 0:
+        emit(
+            job,
+            "WARN" if original_len > MAX_RECENT_RESULTS_FOR_REPLAN else "INFO",
+            "planner",
+            "replan_truncated",
+            {
+                "before": original_len,
+                "after": len(summarized),
+                "compressed": True,
+                "max": MAX_RECENT_RESULTS_FOR_REPLAN,
+            },
+        )
+    if findings_truncation is not None:
+        emit(
+            job,
+            "WARN",
+            "planner",
+            "findings_truncated",
+            {
+                "before": findings_truncation[0],
+                "after": findings_truncation[1],
+                "compressed": True,
+                "max": MAX_FINDINGS_FOR_REPLAN,
+            },
+        )
     raw = await _run_planner_for_yaml(
         job, tier="general", router=router, user_message=context
     )
@@ -512,7 +738,9 @@ async def cloud_replan(
 
 
 __all__ = [
+    "MAX_FINDINGS_FOR_REPLAN",
     "MAX_PLAN_VERSIONS",
+    "MAX_RECENT_RESULTS_FOR_REPLAN",
     "Plan",
     "PlanParseError",
     "PlanVersionCapExceeded",

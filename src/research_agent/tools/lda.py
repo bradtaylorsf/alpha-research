@@ -45,7 +45,7 @@ _BASE_URL = "https://lda.senate.gov/api/v1/"
 _SITE_BASE = "https://lda.senate.gov"
 # Accept the new ``lda.gov`` cutover host once the migration lands; keeping
 # both in the set means we don't have to flip a flag the moment it happens.
-_ACCEPTED_HOSTS = frozenset({"lda.senate.gov", "lda.gov"})
+_ACCEPTED_HOSTS = frozenset({"lda.senate.gov", "lda.gov", "www.lda.gov"})
 # AC: per-host rate of 1 RPS.
 _RATE_LIMIT_INTERVAL = 1.0
 

@@ -65,6 +65,18 @@ RETRY_WAITS: tuple[int, ...] = (1, 2, 4, 8, 16, 30, 60)
 RETRY_MAX_ATTEMPTS = 5
 MAX_DRAIN_REPLANS = 10
 
+# Scope-aware default for how many top hits per search become web_fetch
+# follow-ups. Issue #178: a global default of 3 starves broad/comprehensive
+# investigations of fetch surface area. The planner can still override per
+# task via ``payload["expand_top_k"]``.
+_DEFAULT_TOP_K_BY_SCOPE: dict[str, int] = {
+    "narrow": 3,
+    "medium": 5,
+    "broad": 7,
+    "comprehensive": 10,
+}
+_DEFAULT_TOP_K_FALLBACK = 3
+
 Handler = Callable[[Job, dict[str, Any]], Awaitable[dict[str, Any] | None]]
 
 
@@ -81,6 +93,137 @@ async def _not_implemented_handler(job: Job, task: dict[str, Any]) -> dict[str, 
     connector handlers land in their own follow-up issues.
     """
     raise FatalError(f"handler not implemented for kind={task['kind']!r}")
+
+
+# Issue #175: connector kinds dispatch directly to each tool's structured
+# API. Search payloads pass ``query`` plus any of these well-known kwargs
+# through to the underlying ``search()`` call — most connectors take a
+# ``kind`` switch (e.g. congress: bill/member/hearing) and a few take
+# ``state``/``since``/``form_type``. The set is the *union* across all
+# connectors; ``_filter_kwargs_for`` then narrows to what each connector
+# actually accepts, so planner drift (e.g. emitting ``kind`` for
+# ``edgar_search``, which takes ``form_type`` instead) doesn't surface as
+# a TypeError that bypasses the documented FatalError path.
+_CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
+    {
+        "kind",
+        "max_results",
+        "state",
+        "form_type",
+        "since",
+        "agencies",
+        "jurisdiction",
+        "award_type",
+        "language",
+    }
+)
+
+
+def _filter_kwargs_for(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Drop kwargs the callable doesn't accept.
+
+    Connectors have heterogeneous signatures — congress takes ``kind``,
+    edgar takes ``form_type``, fedregister takes ``since``/``agencies``.
+    The handler's passthrough whitelist is the union; this narrows it to
+    what ``fn`` actually accepts so a planner-drift kwarg like ``kind``
+    on ``edgar_search`` is silently dropped instead of crashing the call.
+    Falls back to the unfiltered dict when introspection fails (e.g.
+    C-implemented or wrapped callables).
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return kwargs
+    accepts_var_kw = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if accepts_var_kw:
+        return kwargs
+    accepted = {
+        name
+        for name, p in sig.parameters.items()
+        if p.kind
+        in (
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    }
+    return {k: v for k, v in kwargs.items() if k in accepted}
+
+
+def _make_connector_search_handler(module_name: str) -> Handler:
+    """Build a thin search-handler that dispatches to ``tools.<module_name>.search``.
+
+    Converts the connector's missing-credential ``RuntimeError`` (raised by
+    edgar/courtlistener/scholar/linkedin when their API key/UA isn't
+    configured) into :class:`FatalError` so the loop marks the task failed
+    cleanly down the documented path. Returns the standard search-result
+    + ``follow_up_tasks`` shape so each top hit becomes a connector-aware
+    ``web_fetch`` follow-up.
+    """
+
+    async def _handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        from importlib import import_module
+
+        mod = import_module(f"research_agent.tools.{module_name}")
+        payload = task["payload"]
+        kwargs = {
+            k: v for k, v in payload.items() if k in _CONNECTOR_SEARCH_PASSTHROUGH
+        }
+        kwargs = _filter_kwargs_for(mod.search, kwargs)
+        try:
+            results = await mod.search(payload.get("query", ""), **kwargs)
+        except RuntimeError as exc:
+            raise FatalError(f"{module_name}_search: {exc}") from exc
+        return _expand_search_to_fetches(job, payload, results)
+
+    return _handler
+
+
+def _make_connector_fetch_handler(module_name: str) -> Handler:
+    """Build a thin fetch-handler that dispatches to ``tools.<module_name>.fetch``.
+
+    Mirrors :func:`_make_connector_search_handler` but for the single-URL
+    fetch path: persists the returned ``Source`` and converts the
+    connector's missing-credential ``RuntimeError`` to :class:`FatalError`.
+    """
+
+    async def _handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        from importlib import import_module
+
+        mod = import_module(f"research_agent.tools.{module_name}")
+        payload = task["payload"]
+        try:
+            source = await mod.fetch(payload["url"])
+        except RuntimeError as exc:
+            raise FatalError(f"{module_name}_fetch: {exc}") from exc
+        return _persist_fetched_source(job, source)
+
+    return _handler
+
+
+_CONNECTOR_KINDS: tuple[str, ...] = (
+    "congress",
+    "fec",
+    "edgar",
+    "courtlistener",
+    "fedregister",
+    "lda",
+    "usaspending",
+    "gdelt",
+    "littlesis",
+    "nonprofits",
+    "opencorporates",
+    "sanctions",
+    "bbb",
+    "licensing",
+    "sos",
+    "calaccess",
+    "scholar",
+    "linkedin",
+)
 
 
 def default_handlers(router: Any) -> dict[str, Handler]:
@@ -228,7 +371,7 @@ def default_handlers(router: Any) -> dict[str, Handler]:
             )
         return result.model_dump()
 
-    return {
+    registry: dict[str, Handler] = {
         "web_search": _web_search,
         "web_fetch": _web_fetch,
         "arxiv_search": _arxiv_search,
@@ -243,6 +386,10 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         "synthesize": _synthesize,
         "critique": _critique,
     }
+    for name in _CONNECTOR_KINDS:
+        registry[f"{name}_search"] = _make_connector_search_handler(name)
+        registry[f"{name}_fetch"] = _make_connector_fetch_handler(name)
+    return registry
 
 
 # ---------------------------------------------------------------------------
@@ -530,15 +677,23 @@ def _expand_search_to_fetches(
     ``extract_findings`` follow-up inherits context.
 
     ``payload`` knobs:
-      * ``expand_top_k`` (default 3) — cap follow-ups per search to keep
-        the queue from exploding.
+      * ``expand_top_k`` — cap follow-ups per search to keep the queue
+        from exploding. If the planner sets it explicitly, that wins.
+        Otherwise the default scales with the plan's ``scope_class``
+        (narrow→3, medium→5, broad→7, comprehensive→10), falling back
+        to 3 when no plan / no scope is available.
       * ``sub_question`` — overrides the auto-derived question.
       * ``query`` — used as the sub_question fallback if neither
         ``sub_question`` nor ``job.goal`` are set.
     """
     from research_agent.orchestrator.plan import TaskSpec
 
-    top_k = int(payload.get("expand_top_k", 3))
+    if "expand_top_k" in payload:
+        top_k = int(payload["expand_top_k"])
+    else:
+        plan = _load_latest_plan(job)
+        scope = plan.scope_class if plan is not None else None
+        top_k = _DEFAULT_TOP_K_BY_SCOPE.get(scope or "", _DEFAULT_TOP_K_FALLBACK)
     sub_question = payload.get("sub_question") or payload.get("query") or job.goal
 
     follow_ups: list[TaskSpec] = [
@@ -640,11 +795,70 @@ def _load_source_text(job: Job, source_id: int) -> tuple[str, dict[str, Any]] | 
 _EXTRACT_TEXT_LIMIT = 20000  # ~5k tokens; well under any tier's window
 _FINDINGS_PER_SOURCE_LIMIT = 8
 
+# Issue #177: cornerstone documents (the document the goal is anchored on —
+# the Mandate for Leadership PDF, a 10-K, a court opinion) carry the spine
+# of the investigation. Article-sized caps starve the rest of the run, so
+# the cornerstone path uses a much larger text window and a much higher
+# findings ceiling. The ceiling exists only to bound truly pathological
+# model output, not to constrain a real indexing pass.
+_CORNERSTONE_EXTRACT_TEXT_LIMIT = 80000  # ~20k tokens; still inside frontier windows
+_CORNERSTONE_FINDINGS_PER_SOURCE_LIMIT = 500
+# Documents that nobody marked as cornerstone but whose body is bigger than
+# this still get the cornerstone treatment — the planner's marker is the
+# primary signal, this is a fallback for runs whose plans pre-date #177.
+_CORNERSTONE_FALLBACK_MIN_CHARS = 200_000
+
 
 def _truncate_for_prompt(text: str, limit: int = _EXTRACT_TEXT_LIMIT) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "\n\n[…truncated]"
+
+
+def _normalize_url_for_compare(url: str | None) -> str | None:
+    """Lowercase host + strip trailing slash so URL equality is forgiving.
+
+    The planner emits ``cornerstone_url`` as a literal string; the source
+    row stores whatever URL the fetch resolved. Casing of the host and a
+    trailing slash on the path are the only differences worth tolerating —
+    anything more involved (query reordering, scheme upgrade) would risk
+    aliasing two genuinely different resources.
+    """
+    if not isinstance(url, str) or not url:
+        return None
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return None
+    host = parts.hostname or ""
+    netloc = host.lower()
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    path = parts.path.rstrip("/")
+    return urlunsplit((parts.scheme.lower(), netloc, path, parts.query, ""))
+
+
+def _is_cornerstone_source(job: Job, meta: dict[str, Any], text: str) -> bool:
+    """True when this source is the plan's declared cornerstone document.
+
+    Primary signal: the latest persisted plan's ``cornerstone_url`` matches
+    the source's URL (after light normalization). Fallback: the source's
+    body exceeds :data:`_CORNERSTONE_FALLBACK_MIN_CHARS`, which catches
+    runs whose plans pre-date #177 — better to over-trigger here than to
+    cap a 920-page document at 8 findings because the planner forgot to
+    set the marker.
+    """
+    plan = _load_latest_plan(job)
+    if plan is not None and plan.cornerstone_url:
+        norm_plan = _normalize_url_for_compare(plan.cornerstone_url)
+        norm_src = _normalize_url_for_compare(meta.get("url"))
+        if norm_plan and norm_src and norm_plan == norm_src:
+            return True
+    if isinstance(text, str) and len(text) >= _CORNERSTONE_FALLBACK_MIN_CHARS:
+        return True
+    return False
 
 
 _YAML_FENCE_RE = re.compile(r"```(?:yaml|yml)?\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
@@ -709,13 +923,35 @@ async def _run_extract_findings(
 
     sub_question = payload.get("sub_question") or job.goal
 
-    rendered = load_prompt("researcher", job=job, goal=job.goal)
+    is_cornerstone = _is_cornerstone_source(job, meta, text)
+    if is_cornerstone:
+        prompt_name = "researcher_cornerstone"
+        text_limit = _CORNERSTONE_EXTRACT_TEXT_LIMIT
+        findings_limit = _CORNERSTONE_FINDINGS_PER_SOURCE_LIMIT
+        emit(
+            job,
+            "INFO",
+            "loop",
+            "cornerstone_extract",
+            {
+                "source_id": source_id,
+                "url": meta.get("url"),
+                "prompt": prompt_name,
+                "text_chars": len(text),
+            },
+        )
+    else:
+        prompt_name = "researcher"
+        text_limit = _EXTRACT_TEXT_LIMIT
+        findings_limit = _FINDINGS_PER_SOURCE_LIMIT
+
+    rendered = load_prompt(prompt_name, job=job, goal=job.goal)
     agent = Agent(router.model_for("general"), output_type=str, system_prompt=rendered)
     context = (
         f"Sub-question: {sub_question}\n"
         f"Source URL: {meta.get('url')}\n"
         f"Source title: {meta.get('title')}\n\n"
-        f"Source content:\n{_truncate_for_prompt(text)}"
+        f"Source content:\n{_truncate_for_prompt(text, text_limit)}"
     )
     result = await router.call("general", agent, context)
     raw = result.output if isinstance(result.output, str) else str(result.output)
@@ -741,7 +977,7 @@ async def _run_extract_findings(
 
     written: list[int] = []
     skipped = 0
-    for item in parsed[:_FINDINGS_PER_SOURCE_LIMIT]:
+    for item in parsed[:findings_limit]:
         if not isinstance(item, dict):
             skipped += 1
             continue

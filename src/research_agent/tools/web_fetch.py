@@ -297,6 +297,71 @@ _YOUTUBE_HOSTS = frozenset(
     {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}
 )
 
+# Connector host-dispatch (issue #174). Each set covers the public netlocs
+# its module's ``fetch(url)`` recognises — see the connector's own host-gate
+# for the authoritative list. The planner emits ``site:<domain>`` queries to
+# steer hits onto these hosts; without dispatch, the generic httpx +
+# trafilatura path eats the page and the connector never runs.
+#
+# Search-only connectors (no URL-fetch contract — they expose only API search):
+#   - arxiv_tool: ArXiv abstract fetch lives behind arxiv_fetch tasks, not URL
+#   - news: RSS aggregator, not a per-URL fetcher
+#   - web_search: itself
+# These do not appear here; the planner emits search tasks for them.
+
+_CONGRESS_HOSTS = frozenset({"www.congress.gov", "congress.gov"})
+_FEC_HOSTS = frozenset({"www.fec.gov", "fec.gov"})
+_EDGAR_HOSTS = frozenset({"www.sec.gov", "sec.gov"})
+_FEDREGISTER_HOSTS = frozenset(
+    {"www.federalregister.gov", "federalregister.gov"}
+)
+_COURTLISTENER_HOSTS = frozenset({"courtlistener.com", "www.courtlistener.com"})
+_LDA_HOSTS = frozenset({"lda.senate.gov", "lda.gov", "www.lda.gov"})
+_USASPENDING_HOSTS = frozenset(
+    {"api.usaspending.gov", "usaspending.gov", "www.usaspending.gov"}
+)
+_LITTLESIS_HOSTS = frozenset({"littlesis.org", "www.littlesis.org"})
+_NONPROFITS_HOSTS = frozenset({"projects.propublica.org"})
+_SANCTIONS_HOSTS = frozenset(
+    {
+        "sanctionssearch.ofac.treas.gov",
+        "home.treasury.gov",
+        "www.treasury.gov",
+        "webgate.ec.europa.eu",
+        "ofsistorage.blob.core.windows.net",
+        "www.gov.uk",
+    }
+)
+_CALACCESS_HOSTS = frozenset({"powersearch.sos.ca.gov"})
+# licensing module: CA (CSLB) wired; TX/FL/NY ship as stubs that return None.
+# Including the stubs in dispatch costs nothing (the module already host-gates
+# them) and makes future state wires routing-only.
+_LICENSING_HOSTS = frozenset(
+    {
+        "www.cslb.ca.gov",
+        "cslb.ca.gov",
+        "www.tdlr.texas.gov",
+        "www.myfloridalicense.com",
+        "www.dos.ny.gov",
+    }
+)
+# sos module: CA wired; DE/NV/WY/FL/NY stubs return None. Same dispatch
+# rationale as _LICENSING_HOSTS.
+_SOS_HOSTS = frozenset(
+    {
+        "bizfileonline.sos.ca.gov",
+        "icis.corp.delaware.gov",
+        "esos.nv.gov",
+        "wyobiz.wyo.gov",
+        "search.sunbiz.org",
+        "apps.dos.ny.gov",
+    }
+)
+_BBB_HOSTS = frozenset({"www.bbb.org", "bbb.org"})
+_OPENCORPORATES_HOSTS = frozenset(
+    {"opencorporates.com", "www.opencorporates.com"}
+)
+
 _PDF_CONTENT_TYPE = "application/pdf"
 
 _IMAGE_CONTENT_TYPES: frozenset[str] = frozenset(
@@ -486,11 +551,42 @@ async def fetch(
     Playwright + trafilatura path strips reddit pages to empty content
     (their SPA shell defeats readability extractors), so without this
     dispatch every reddit follow-up would task_failed.
+
+    The connector roster (issue #174) extends the same pattern to the
+    free-tier authoritative-source modules (Congress, FEC, EDGAR,
+    Federal Register, CourtListener, LDA, USAspending, LittleSis,
+    ProPublica nonprofits, OFAC sanctions, Cal-Access, CSLB, CA SoS,
+    BBB, OpenCorporates) so a planner-emitted ``site:<domain>`` query
+    that yields one of those URLs is handled by the connector that
+    knows the page shape rather than being eaten by the generic HTML
+    extractor.
     """
     if not url or not urlparse(url).netloc:
         return None
 
-    netloc = urlparse(url).netloc.lower()
+    # Binary URL shortcuts run BEFORE connector dispatch: a `.pdf` on
+    # ``sec.gov`` (EDGAR exhibits, 10-K appendices, …) must go through the
+    # PDF extractor, not edgar.fetch which expects an HTML index page.
+    # Same logic for `.mp3` / image suffixes on connector-owned hosts.
+    if _is_pdf_url(url):
+        source = await _build_pdf_source(url, status_code=None, content=None)
+        if source is not None:
+            _spawn_archive_task(source)
+        return source
+
+    if _is_audio_url(url):
+        source = await _build_audio_source(url, status_code=None, content=None)
+        if source is not None:
+            _spawn_archive_task(source)
+        return source
+
+    if _is_image_url(url):
+        source = await _build_image_source(url, status_code=None, content=None)
+        if source is not None:
+            _spawn_archive_task(source)
+        return source
+
+    netloc = urlparse(url).netloc.lower().split(":", 1)[0]
     if netloc in _REDDIT_HOSTS:
         from research_agent.tools import reddit
 
@@ -501,39 +597,91 @@ async def fetch(
 
         return await youtube.fetch(url)
 
+    if netloc in _CONGRESS_HOSTS:
+        from research_agent.tools import congress
+
+        return await congress.fetch(url)
+
+    if netloc in _FEC_HOSTS:
+        from research_agent.tools import fec
+
+        return await fec.fetch(url)
+
+    if netloc in _EDGAR_HOSTS:
+        from research_agent.tools import edgar
+
+        return await edgar.fetch(url)
+
+    if netloc in _FEDREGISTER_HOSTS:
+        from research_agent.tools import fedregister
+
+        return await fedregister.fetch(url)
+
+    if netloc in _COURTLISTENER_HOSTS:
+        from research_agent.tools import courtlistener
+
+        return await courtlistener.fetch(url)
+
+    if netloc in _LDA_HOSTS:
+        from research_agent.tools import lda
+
+        return await lda.fetch(url)
+
+    if netloc in _USASPENDING_HOSTS:
+        from research_agent.tools import usaspending
+
+        return await usaspending.fetch(url)
+
+    if netloc in _LITTLESIS_HOSTS:
+        from research_agent.tools import littlesis
+
+        return await littlesis.fetch(url)
+
+    # ``projects.propublica.org`` is a multi-tenant subdomain (Nonprofit
+    # Explorer, Electionland, Dollars for Docs, …). Only the
+    # ``/nonprofits/`` path is owned by this connector — leave other
+    # ProPublica pages on the generic httpx + trafilatura path.
+    if netloc in _NONPROFITS_HOSTS and urlparse(url).path.startswith("/nonprofits/"):
+        from research_agent.tools import nonprofits
+
+        return await nonprofits.fetch(url)
+
+    if netloc in _SANCTIONS_HOSTS:
+        from research_agent.tools import sanctions
+
+        return await sanctions.fetch(url)
+
+    if netloc in _CALACCESS_HOSTS:
+        from research_agent.tools import calaccess
+
+        return await calaccess.fetch(url)
+
+    if netloc in _LICENSING_HOSTS:
+        from research_agent.tools import licensing
+
+        return await licensing.fetch(url)
+
+    if netloc in _SOS_HOSTS:
+        from research_agent.tools import sos
+
+        return await sos.fetch(url)
+
+    if netloc in _BBB_HOSTS:
+        from research_agent.tools import bbb
+
+        return await bbb.fetch(url)
+
+    if netloc in _OPENCORPORATES_HOSTS:
+        from research_agent.tools import opencorporates
+
+        return await opencorporates.fetch(url)
+
     user_agent = _resolve_user_agent()
 
     if not _ignore_robots():
         if not await _robots_allows(url, user_agent):
             logger.info("web_fetch skipped %s — disallowed by robots.txt", url)
             return None
-
-    # Cheap path: a ``.pdf`` URL means we can skip httpx + trafilatura entirely
-    # and let pdf.extract handle the download. Saves a wasted HTML decode and
-    # a 500-page render through readability.
-    if _is_pdf_url(url):
-        source = await _build_pdf_source(url, status_code=None, content=None)
-        if source is not None:
-            _spawn_archive_task(source)
-        return source
-
-    # Same shortcut for ``.mp3`` / ``.m4a`` / ``.wav`` / ``.ogg`` / ``.flac``
-    # URLs — trafilatura would just see binary data, and httpx download +
-    # transcribe gets handled inside the audio module.
-    if _is_audio_url(url):
-        source = await _build_audio_source(url, status_code=None, content=None)
-        if source is not None:
-            _spawn_archive_task(source)
-        return source
-
-    # Same again for ``.png`` / ``.jpg`` / ``.jpeg`` / ``.webp`` / ``.gif``
-    # URLs — screenshots and scanned documents are binary; route through
-    # the OCR pipeline rather than letting trafilatura eat the bytes.
-    if _is_image_url(url):
-        source = await _build_image_source(url, status_code=None, content=None)
-        if source is not None:
-            _spawn_archive_task(source)
-        return source
 
     html: str | None = None
     status_code: int | None = None
