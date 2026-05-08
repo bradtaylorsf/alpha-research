@@ -417,3 +417,147 @@ def test_write_source_persists_embedding_blob(job: Job) -> None:
 
     assert row["embedding"] == blob
     assert len(row["embedding"]) == local_corpus.EMBED_DIM * 4
+
+
+# ---------------------------------------------------------------------------
+# Cornerstone vector index (issue #206)
+# ---------------------------------------------------------------------------
+
+
+def test_index_cornerstone_source_writes_chunk_rows(
+    job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """Each section's chunks land as ``cornerstone_chunk`` rows linked to parent.
+
+    The breadcrumb context is prepended before embedding (Anthropic
+    contextual-retrieval pattern), so the persisted markdown must
+    carry the ``This chunk is from <breadcrumb>.`` prefix.
+    """
+    from research_agent.storage.sources import write_source
+
+    parent_id = write_source(
+        job,
+        url="https://example.test/cornerstone.pdf",
+        title="Cornerstone",
+        raw_content="parent doc body",
+        kind="pdf",
+    )
+
+    _stub_embed(monkeypatch)
+    monkeypatch.setattr(
+        local_corpus,
+        "_resolve_embedding_endpoint",
+        lambda *_a, **_k: ("http://x", "stub"),
+    )
+
+    sections = [
+        {
+            "breadcrumb": "Cornerstone > DOJ chapter (pages 1-10)",
+            "text": "DOJ section body " * 200,
+            "page_start": 1,
+            "page_end": 10,
+            "structured": True,
+        },
+        {
+            "breadcrumb": "Cornerstone > EPA chapter (pages 11-20)",
+            "text": "EPA section body " * 200,
+            "page_start": 11,
+            "page_end": 20,
+            "structured": True,
+        },
+    ]
+
+    summary = local_corpus.index_cornerstone_source(
+        job,
+        parent_id,
+        sections,
+        parent_url="https://example.test/cornerstone.pdf",
+        parent_title="Cornerstone",
+        models_config=stub_models_config,
+    )
+
+    assert summary["chunks_indexed"] >= 2
+    assert summary["embed_dim"] == local_corpus.EMBED_DIM
+
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, kind, title, parent_source_id, embedding"
+            " FROM sources WHERE kind = 'cornerstone_chunk' ORDER BY id ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) >= 2
+    for row in rows:
+        assert row["parent_source_id"] == parent_id
+        assert row["embedding"] is not None
+        assert "Cornerstone" in (row["title"] or "")
+
+
+def test_cornerstone_query_filters_by_parent(
+    job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """``cornerstone_query`` only ranks chunks under the given parent.
+
+    Sources with the same ``cornerstone_chunk`` kind but a different
+    parent must not appear in results so a multi-document run keeps
+    its retrieval scoped to the queried document.
+    """
+    from research_agent.storage.sources import write_source
+
+    parent_a = write_source(
+        job, url="https://x/a.pdf", title="A", raw_content="A doc", kind="pdf"
+    )
+    parent_b = write_source(
+        job, url="https://x/b.pdf", title="B", raw_content="B doc", kind="pdf"
+    )
+
+    _stub_embed(monkeypatch)
+    monkeypatch.setattr(
+        local_corpus,
+        "_resolve_embedding_endpoint",
+        lambda *_a, **_k: ("http://x", "stub"),
+    )
+
+    local_corpus.index_cornerstone_source(
+        job,
+        parent_a,
+        [{"breadcrumb": "A > Intro", "text": "alpha alpha alpha " * 100}],
+        parent_url="https://x/a.pdf",
+        parent_title="A",
+        models_config=stub_models_config,
+    )
+    local_corpus.index_cornerstone_source(
+        job,
+        parent_b,
+        [{"breadcrumb": "B > Intro", "text": "beta beta beta " * 100}],
+        parent_url="https://x/b.pdf",
+        parent_title="B",
+        models_config=stub_models_config,
+    )
+
+    hits_a = local_corpus.cornerstone_query(
+        "alpha", job, parent_a, top_k=5, models_config=stub_models_config
+    )
+    hits_b = local_corpus.cornerstone_query(
+        "beta", job, parent_b, top_k=5, models_config=stub_models_config
+    )
+
+    # Each query must only touch its own parent's chunks.
+    conn = db.connect(job.db_path)
+    try:
+
+        def _parent_of(sid: int) -> int | None:
+            row = conn.execute(
+                "SELECT parent_source_id FROM sources WHERE id = ?", (sid,)
+            ).fetchone()
+            return int(row["parent_source_id"]) if row and row["parent_source_id"] else None
+
+        assert hits_a, "expected at least one hit for parent A"
+        assert hits_b, "expected at least one hit for parent B"
+        for hit in hits_a:
+            assert _parent_of(hit["source_id"]) == parent_a
+        for hit in hits_b:
+            assert _parent_of(hit["source_id"]) == parent_b
+    finally:
+        conn.close()

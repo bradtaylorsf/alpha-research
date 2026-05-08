@@ -75,6 +75,7 @@ def test_task_kind_covers_expected_set() -> None:
         "news_search",
         "reddit_search",
         "local_corpus_query",
+        "cornerstone_query",
         "extract_findings",
         "summarize_source",
         "synthesize",

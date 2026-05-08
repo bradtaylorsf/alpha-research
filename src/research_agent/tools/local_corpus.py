@@ -422,11 +422,174 @@ def search(
     return [item for _, item in scored[:top_k]]
 
 
+def index_cornerstone_source(
+    job: Job,
+    parent_source_id: int,
+    sections: list[dict[str, object]],
+    *,
+    parent_url: str | None = None,
+    parent_title: str | None = None,
+    models_config: dict[str, Any] | None = None,
+) -> dict[str, int]:
+    """Build a per-job vector index over ``sections`` (issue #206).
+
+    Each section is chunked by :func:`_chunk_text`, prepended with a
+    breadcrumb context line (Anthropic Contextual Retrieval pattern), and
+    embedded via the LM Studio ``embeddings`` tier. One ``Source`` row per
+    chunk is written with ``kind='cornerstone_chunk'`` and a back-reference
+    to ``parent_source_id`` so retrieval can filter to chunks of *this*
+    cornerstone document.
+
+    Returns ``{chunks_indexed, chunks_skipped, embed_dim}``. Skips chunks
+    whose sha256 is already present in ``sources`` (cross-job dedup) so a
+    re-run never re-embeds the same content.
+    """
+    if not sections:
+        return {"chunks_indexed": 0, "chunks_skipped": 0, "embed_dim": EMBED_DIM}
+
+    base_url, model_name = _resolve_embedding_endpoint(models_config)
+
+    chunks: list[str] = []
+    contextual_chunks: list[str] = []
+    chunk_meta: list[dict[str, Any]] = []
+    for section in sections:
+        breadcrumb = str(section.get("breadcrumb") or "section")
+        body = section.get("text")
+        if not isinstance(body, str) or not body.strip():
+            continue
+        for chunk in _chunk_text(body):
+            cleaned = clean_content(chunk)
+            if not cleaned:
+                continue
+            contextual = (
+                f"This chunk is from {breadcrumb}. {cleaned}"
+            )
+            chunks.append(cleaned)
+            contextual_chunks.append(contextual)
+            chunk_meta.append({"breadcrumb": breadcrumb})
+
+    if not chunks:
+        return {"chunks_indexed": 0, "chunks_skipped": 0, "embed_dim": EMBED_DIM}
+
+    # Embed contextual_chunks (the breadcrumb-prefixed text) — that is the
+    # vector retrieval will match against. The persisted markdown stores
+    # the same contextual form so :func:`search`-style readers see the
+    # same breadcrumb when a chunk is recalled.
+    chunk_shas = [content_sha256(clean_content(c)) for c in contextual_chunks]
+    existing = _existing_shas(job.db_path, chunk_shas)
+    to_embed_idx = [i for i, sha in enumerate(chunk_shas) if sha not in existing]
+    embed_inputs = [contextual_chunks[i] for i in to_embed_idx]
+
+    if embed_inputs:
+        vectors = _embed_chunks_sync(embed_inputs, base_url, model_name)
+    else:
+        vectors = []
+
+    new_blobs: dict[int, bytes] = {
+        chunk_idx: _pack_embedding(vec)
+        for chunk_idx, vec in zip(to_embed_idx, vectors, strict=True)
+    }
+
+    indexed = 0
+    skipped = 0
+    for i, contextual in enumerate(contextual_chunks):
+        embedding_blob = new_blobs.get(i)
+        if embedding_blob is None:
+            skipped += 1
+        else:
+            indexed += 1
+        write_source(
+            job,
+            url=parent_url,
+            title=(
+                f"{parent_title}: {chunk_meta[i]['breadcrumb']}"
+                if parent_title
+                else chunk_meta[i]["breadcrumb"]
+            ),
+            raw_content=contextual,
+            kind="cornerstone_chunk",
+            embedding=embedding_blob,
+            parent_source_id=parent_source_id,
+        )
+    return {
+        "chunks_indexed": indexed,
+        "chunks_skipped": skipped,
+        "embed_dim": EMBED_DIM,
+    }
+
+
+def cornerstone_query(
+    query: str,
+    job: Job,
+    parent_source_id: int,
+    *,
+    top_k: int = 8,
+    models_config: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Cosine-rank ``cornerstone_chunk`` rows under ``parent_source_id`` (issue #206).
+
+    Mirrors :func:`search` but filters by ``kind='cornerstone_chunk'`` and
+    the parent-document link so retrieval is scoped to one cornerstone
+    document at a time. Returns ``[{source_id, sha256, md_path, score,
+    title}]`` sorted by descending score.
+    """
+    if top_k <= 0:
+        raise ValueError(f"top_k must be positive; got {top_k}")
+
+    base_url, model_name = _resolve_embedding_endpoint(models_config)
+    query_vecs = _embed_chunks_sync([query], base_url, model_name)
+    if not query_vecs:
+        return []
+    qvec = query_vecs[0]
+    qnorm = float(np.linalg.norm(qvec))
+    if qnorm == 0.0:
+        return []
+
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT s.id, s.sha256, s.md_path, s.title, s.embedding"
+            " FROM sources s"
+            " JOIN job_sources js ON js.source_id = s.id"
+            " WHERE js.job_id = ? AND s.kind = 'cornerstone_chunk'"
+            " AND s.parent_source_id = ? AND s.embedding IS NOT NULL",
+            (job.id, parent_source_id),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for row in rows:
+        vec = _unpack_embedding(row["embedding"])
+        if vec.shape[0] != qvec.shape[0]:
+            continue
+        vnorm = float(np.linalg.norm(vec))
+        if vnorm == 0.0:
+            continue
+        score = float(np.dot(qvec, vec) / (qnorm * vnorm))
+        scored.append(
+            (
+                score,
+                {
+                    "source_id": int(row["id"]),
+                    "sha256": row["sha256"],
+                    "md_path": row["md_path"],
+                    "title": row["title"],
+                    "score": score,
+                },
+            )
+        )
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in scored[:top_k]]
+
+
 __all__ = [
     "CHUNK_OVERLAP_TOKENS",
     "CHUNK_TARGET_TOKENS",
     "EMBED_DIM",
+    "cornerstone_query",
     "index",
+    "index_cornerstone_source",
     "search",
 ]
 
