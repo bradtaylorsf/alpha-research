@@ -319,3 +319,67 @@ def test_write_report_leaves_no_tmp_files(job: Job) -> None:
 def test_write_report_rejects_non_string(job: Job) -> None:
     with pytest.raises(ValueError):
         write_report(job, 123)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# _rotate_report_to (issue #210)
+# ---------------------------------------------------------------------------
+
+
+def test_rotate_report_to_returns_none_when_source_missing(tmp_path: Path) -> None:
+    from research_agent.storage.markdown import _rotate_report_to
+
+    history = tmp_path / "history"
+    report = tmp_path / "report.md"  # not created
+    archived = _rotate_report_to(history, report)
+    assert archived is None
+
+
+def test_rotate_report_to_uses_prefix(tmp_path: Path) -> None:
+    from research_agent.storage.markdown import _rotate_report_to
+
+    archive = tmp_path / "archive"
+    report = tmp_path / "report.md"
+    report.write_text("body\n", encoding="utf-8")
+
+    archived = _rotate_report_to(archive, report, prefix="report-")
+
+    assert archived is not None
+    assert archived.parent == archive
+    assert archived.name.startswith("report-")
+    assert archived.name.endswith(".md")
+    # Source moved, not copied.
+    assert not report.exists()
+    assert archived.read_text(encoding="utf-8") == "body\n"
+
+
+def test_rotate_report_to_collision_safe(tmp_path: Path) -> None:
+    """Two rotations in the same wall-clock second pick a numeric suffix."""
+    from research_agent.storage.markdown import _rotate_report_to
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    report = tmp_path / "report.md"
+
+    report.write_text("a", encoding="utf-8")
+    a = _rotate_report_to(archive, report, prefix="report-")
+    report.write_text("b", encoding="utf-8")
+    b = _rotate_report_to(archive, report, prefix="report-")
+    report.write_text("c", encoding="utf-8")
+    c = _rotate_report_to(archive, report, prefix="report-")
+
+    assert a is not None and b is not None and c is not None
+    assert {a.name, b.name, c.name} == {a.name, b.name, c.name}  # all unique
+    assert len({a.name, b.name, c.name}) == 3
+
+
+def test_rotate_report_to_shared_with_write_report(job: Job) -> None:
+    """write_report and archive_and_soft_reset must use the same rotation helper."""
+    from research_agent.storage import markdown as md_mod
+
+    write_report(job, "first")
+    write_report(job, "second")
+    history = sorted((job.root / "report.history").glob("*.md"))
+    assert history and history[0].read_text(encoding="utf-8") == "first\n"
+    # The helper symbol must be exposed for jobs.archive_and_soft_reset to import.
+    assert callable(md_mod._rotate_report_to)

@@ -39,7 +39,18 @@ DEFAULT_JOBS_ROOT = Path("jobs")
 KILL_ESCALATION_SECONDS = 10.0
 KILL_POLL_INTERVAL_SECONDS = 0.5
 
-_SUBDIRS = ("plan", "findings", "sources", "synthesis", "critique", "report.history")
+_SUBDIRS = (
+    "plan",
+    "findings",
+    "sources",
+    "synthesis",
+    "critique",
+    "report.history",
+    "archive",
+)
+# Subdirs that get wiped on a soft reset; ``archive`` is preserved on purpose
+# so prior reports stay around for ``research compare``.
+_RESETTABLE_SUBDIRS = ("plan", "findings", "sources", "synthesis", "critique", "report.history")
 _JOB_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,59}$")
 _SLUG_FORBIDDEN = ("/", "\\", "..")
 
@@ -337,6 +348,175 @@ class Job:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             return
+
+
+    # ---- Archive + soft reset (issue #210) ----------------------------
+
+    def archive_and_soft_reset(self) -> Path | None:
+        """Archive ``report.md`` and clear runtime state without deleting the folder.
+
+        Symmetric counterpart to ``_reset-job`` (which is destructive): a re-run
+        of the same goal preserves the prior report under ``archive/`` so the
+        operator can ``research compare`` the runs, then wipes the per-job DB
+        rows and resettable subfolders, and finally re-inserts the canonical
+        ``jobs`` row from the on-disk ``job.json`` / ``intake.json`` so the
+        daemon can run as if this were a fresh job.
+
+        Returns the path to the archived report, or ``None`` if ``report.md``
+        did not exist.
+        """
+        from research_agent.storage.markdown import _rotate_report_to
+
+        archive_dir = self.root / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        report_path = self.root / "report.md"
+        archived = _rotate_report_to(archive_dir, report_path, prefix="report-")
+
+        # Wipe DB rows. Order matches cli._reset-job to satisfy FK constraints.
+        conn = db.connect(self.db_path)
+        try:
+            with conn:
+                for tbl in (
+                    "job_sources",
+                    "tasks",
+                    "critiques",
+                    "findings",
+                    "events",
+                    "checkpoints",
+                    "syntheses",
+                    "llm_calls",
+                    "plans",
+                ):
+                    conn.execute(f"DELETE FROM {tbl} WHERE job_id = ?", (self.id,))
+                conn.execute(
+                    "DELETE FROM sources WHERE id NOT IN"
+                    " (SELECT source_id FROM job_sources)"
+                )
+                conn.execute("DELETE FROM jobs WHERE id = ?", (self.id,))
+        finally:
+            conn.close()
+
+        # Wipe resettable subfolders, leaving archive/ intact.
+        import shutil
+
+        for sub in _RESETTABLE_SUBDIRS:
+            sub_path = self.root / sub
+            if sub_path.exists():
+                shutil.rmtree(sub_path)
+            sub_path.mkdir()
+
+        # Wipe transient sidecars: events.jsonl, STOP flag, daemon.pid.
+        for sidecar in ("events.jsonl", "STOP", "daemon.pid"):
+            try:
+                (self.root / sidecar).unlink()
+            except FileNotFoundError:
+                pass
+        _atomic_write_text(self.root / "events.jsonl", "")
+
+        # Re-insert jobs row from on-disk metadata.
+        intake = json.loads((self.root / "intake.json").read_text(encoding="utf-8"))
+        meta = json.loads((self.root / "job.json").read_text(encoding="utf-8"))
+
+        now = _now_epoch()
+        new_status = "pending"
+        new_completion_reason: str | None = None
+        domain = meta.get("domain") or intake.get("domain")
+        intake_json = json.dumps(intake, sort_keys=True)
+
+        conn = db.connect(self.db_path)
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO jobs (
+                        id, goal, domain, status, intake_json,
+                        time_cap_hours, budget_cap_usd, aggressiveness,
+                        created_at, last_activity_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self.id,
+                        self.goal,
+                        domain,
+                        new_status,
+                        intake_json,
+                        intake.get("time_cap_hours"),
+                        intake.get("budget_cap_usd"),
+                        intake.get("aggressiveness"),
+                        self.created_at,
+                        now,
+                    ),
+                )
+        finally:
+            conn.close()
+
+        # Mirror reset state into job.json so disk-only consumers see it.
+        meta["status"] = new_status
+        meta["last_activity_at"] = now
+        meta.pop("completion_reason", None)
+        _atomic_write_json(self.root / "job.json", meta)
+
+        self.status = new_status
+        self.completion_reason = new_completion_reason
+        self.intake = intake
+
+        return archived
+
+    @classmethod
+    def find_by_goal_slug(
+        cls,
+        goal: str,
+        *,
+        jobs_root: Path | str = DEFAULT_JOBS_ROOT,
+        db_path: Path | str = db.DEFAULT_DB_PATH,
+    ) -> Job | None:
+        """Resolve ``goal`` to the newest existing job folder with that slug.
+
+        Uses the same ``_slugify`` rule as :meth:`Job.create`. Folder-scans
+        ``jobs_root`` for any ``YYYY-MM-DD-<slug>`` whose slug exactly matches
+        and returns the newest one (by ``created_at`` from its ``job.json``).
+        Returns ``None`` if nothing matches or the jobs root is missing.
+        """
+        if not isinstance(goal, str) or not goal.strip():
+            return None
+        try:
+            slug = _slugify(goal)
+        except ValueError:
+            return None
+
+        jobs_root_p = Path(jobs_root)
+        if not jobs_root_p.is_dir():
+            return None
+
+        candidates: list[tuple[int, str]] = []
+        for child in jobs_root_p.iterdir():
+            if not child.is_dir():
+                continue
+            name = child.name
+            if not _JOB_ID_RE.match(name):
+                continue
+            # Folder name format is YYYY-MM-DD-<slug>.
+            if name[11:] != slug:
+                continue
+            job_json = child / "job.json"
+            if not job_json.exists():
+                continue
+            try:
+                meta = json.loads(job_json.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            created_at = int(meta.get("created_at") or 0)
+            candidates.append((created_at, name))
+
+        if not candidates:
+            return None
+
+        candidates.sort(reverse=True)
+        _, newest_id = candidates[0]
+        try:
+            return cls.load(newest_id, jobs_root=jobs_root_p, db_path=db_path)
+        except (FileNotFoundError, KeyError, ValueError):
+            return None
 
 
 def list_jobs(
