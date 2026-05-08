@@ -462,3 +462,181 @@ def test_kill_raises_when_no_pid_file(sample_intake: dict, jobs_root: Path, db_p
 
 def test_default_jobs_root_is_jobs() -> None:
     assert DEFAULT_JOBS_ROOT == Path("jobs")
+
+
+# ---------------------------------------------------------------------------
+# Job.archive_and_soft_reset (issue #210)
+# ---------------------------------------------------------------------------
+
+
+def test_archive_and_soft_reset_rotates_report_md(
+    sample_intake: dict, jobs_root: Path, db_path: Path
+) -> None:
+    job = Job.create(sample_intake, jobs_root=jobs_root, db_path=db_path)
+    (job.root / "report.md").write_text("first run\n", encoding="utf-8")
+
+    archived = job.archive_and_soft_reset()
+
+    assert archived is not None
+    assert archived.parent == job.root / "archive"
+    assert archived.name.startswith("report-")
+    assert archived.suffix == ".md"
+    assert archived.read_text(encoding="utf-8") == "first run\n"
+    assert not (job.root / "report.md").exists()
+
+
+def test_archive_and_soft_reset_handles_missing_report(
+    sample_intake: dict, jobs_root: Path, db_path: Path
+) -> None:
+    job = Job.create(sample_intake, jobs_root=jobs_root, db_path=db_path)
+    archived = job.archive_and_soft_reset()
+    assert archived is None
+    # archive/ still scaffolded (created by Job.create as a default subdir).
+    assert (job.root / "archive").is_dir()
+
+
+def test_archive_and_soft_reset_preserves_archive_dir(
+    sample_intake: dict, jobs_root: Path, db_path: Path
+) -> None:
+    job = Job.create(sample_intake, jobs_root=jobs_root, db_path=db_path)
+    # Pre-existing archive content from a prior run.
+    (job.root / "archive" / "report-20260501T000000Z.md").write_text("old", encoding="utf-8")
+    (job.root / "report.md").write_text("now", encoding="utf-8")
+
+    job.archive_and_soft_reset()
+
+    archived_files = sorted((job.root / "archive").glob("report-*.md"))
+    assert len(archived_files) == 2
+    # The pre-existing archive entry survived.
+    assert any(f.name == "report-20260501T000000Z.md" for f in archived_files)
+
+
+def test_archive_and_soft_reset_wipes_subfolders_and_db(
+    sample_intake: dict, jobs_root: Path, db_path: Path
+) -> None:
+    job = Job.create(sample_intake, jobs_root=jobs_root, db_path=db_path)
+
+    # Seed runtime artifacts the soft reset is expected to clear.
+    (job.root / "findings" / "000001.md").write_text("x", encoding="utf-8")
+    (job.root / "plan" / "0001.md").write_text("x", encoding="utf-8")
+    (job.root / "synthesis" / "0001.md").write_text("x", encoding="utf-8")
+    (job.root / "report.md").write_text("body", encoding="utf-8")
+    (job.root / "events.jsonl").write_text('{"kind": "x"}\n', encoding="utf-8")
+
+    now = int(time.time())
+    conn = db.connect(db_path)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO findings (job_id, md_path, claim, confidence,"
+                " source_ids, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (job.id, "findings/000001.md", "x", 0.5, "[]", now),
+            )
+            conn.execute(
+                "INSERT INTO plans (job_id, version, payload_json, created_at)"
+                " VALUES (?, ?, ?, ?)",
+                (job.id, 1, "{}", now),
+            )
+            conn.execute(
+                "INSERT INTO events (job_id, ts, level, kind, payload_json)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (job.id, now, "INFO", "drain_replan", "{}"),
+            )
+    finally:
+        conn.close()
+
+    job.archive_and_soft_reset()
+
+    # Files in subfolders gone, but folders remain (and archive/ untouched).
+    assert (job.root / "findings").is_dir()
+    assert list((job.root / "findings").glob("*.md")) == []
+    assert (job.root / "plan").is_dir()
+    assert list((job.root / "plan").glob("*.md")) == []
+    assert (job.root / "synthesis").is_dir()
+    assert list((job.root / "synthesis").glob("*.md")) == []
+
+    # events.jsonl reset to empty.
+    assert (job.root / "events.jsonl").read_text(encoding="utf-8") == ""
+
+    conn = db.connect(db_path)
+    try:
+        finding_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM findings WHERE job_id = ?", (job.id,)
+        ).fetchone()["c"]
+        plan_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM plans WHERE job_id = ?", (job.id,)
+        ).fetchone()["c"]
+        event_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM events WHERE job_id = ?", (job.id,)
+        ).fetchone()["c"]
+        job_row = conn.execute(
+            "SELECT goal, status FROM jobs WHERE id = ?", (job.id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert finding_count == 0
+    assert plan_count == 0
+    assert event_count == 0
+    # jobs row is re-inserted, in 'pending' status.
+    assert job_row is not None
+    assert job_row["goal"] == sample_intake["goal"]
+    assert job_row["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Job.find_by_goal_slug
+# ---------------------------------------------------------------------------
+
+
+def test_find_by_goal_slug_returns_newest_match(jobs_root: Path, db_path: Path) -> None:
+    intake = {"goal": "Investigate Widget Co"}
+    j1 = Job.create(intake, jobs_root=jobs_root, db_path=db_path, today=date(2026, 5, 1))
+    time.sleep(1.05)
+    j2 = Job.create(intake, jobs_root=jobs_root, db_path=db_path, today=date(2026, 5, 2))
+    # Different slug — must be ignored.
+    Job.create(
+        {"goal": "Other target"},
+        jobs_root=jobs_root,
+        db_path=db_path,
+        today=date(2026, 5, 3),
+    )
+
+    found = Job.find_by_goal_slug(
+        "Investigate Widget Co", jobs_root=jobs_root, db_path=db_path
+    )
+    assert found is not None
+    assert found.id == j2.id
+    assert found.id != j1.id
+
+
+def test_find_by_goal_slug_returns_none_when_no_match(
+    jobs_root: Path, db_path: Path
+) -> None:
+    Job.create(
+        {"goal": "alpha target"},
+        jobs_root=jobs_root,
+        db_path=db_path,
+        today=date(2026, 5, 1),
+    )
+    found = Job.find_by_goal_slug(
+        "totally different goal", jobs_root=jobs_root, db_path=db_path
+    )
+    assert found is None
+
+
+def test_find_by_goal_slug_handles_missing_jobs_root(
+    tmp_path: Path, db_path: Path
+) -> None:
+    found = Job.find_by_goal_slug(
+        "some goal", jobs_root=tmp_path / "no-such-dir", db_path=db_path
+    )
+    assert found is None
+
+
+def test_archive_dir_scaffolded_on_create(
+    sample_intake: dict, jobs_root: Path, db_path: Path
+) -> None:
+    """Issue #210: archive/ is created at job-create time so it's always present."""
+    job = Job.create(sample_intake, jobs_root=jobs_root, db_path=db_path)
+    assert (job.root / "archive").is_dir()

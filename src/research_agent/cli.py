@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import sys
 import time
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 import typer
 from rich.console import Console
@@ -14,7 +19,13 @@ from rich.live import Live
 
 from research_agent import __version__, config, daemon, doctor, intake
 from research_agent.storage import db
-from research_agent.storage.jobs import Job, list_jobs
+from research_agent.storage.jobs import (
+    _JOB_ID_RE,
+    DEFAULT_JOBS_ROOT,
+    Job,
+    _atomic_write_json,
+    list_jobs,
+)
 from research_agent.ui import render
 
 _LOADED_ENV_FILES = config.load_env()
@@ -114,6 +125,15 @@ def start_command(
         " Skips the OpenRouter health check and uses config/models.local.yaml."
         " Cost is always $0; useful for validation runs.",
     ),
+    fresh_reset: bool = typer.Option(
+        False,
+        "--fresh-reset",
+        help="Refuse to reuse an existing job folder. Default behavior on a"
+        " collision is to archive the prior report.md into archive/ and soft-"
+        " reset the existing job (DB rows + non-archive subfolders wiped); use"
+        " --fresh-reset to opt out and require a clean slate (which fails with"
+        " FileExistsError if the folder still exists — run _reset-job first).",
+    ),
 ) -> None:
     """Register a new research job and spawn its background daemon."""
     if skip_intake:
@@ -159,7 +179,55 @@ def start_command(
     # Make sure the schema exists so the testing back door is self-bootstrapping.
     db.migrate().close()
 
-    job = Job.create(intake_data)
+    goal_text = str(intake_data.get("goal") or "").strip()
+    existing = (
+        Job.find_by_goal_slug(goal_text)
+        if (goal_text and not fresh_reset)
+        else None
+    )
+    if existing is not None:
+        archived = existing.archive_and_soft_reset()
+        if archived is not None:
+            typer.echo(f"archived prior report to {archived}")
+        else:
+            typer.echo(
+                f"reusing job {existing.id} (no prior report.md to archive)"
+            )
+        # Update intake to reflect the new run's settings — the operator may
+        # have changed --budget-usd / --time-cap / --max-tasks since the prior
+        # run. archive_and_soft_reset preserved the goal slug + folder; we
+        # rewrite intake.json/job.json + the jobs row so the daemon picks up
+        # the new caps.
+        existing.intake = intake_data
+        _atomic_write_json(existing.root / "intake.json", intake_data)
+        meta_path = existing.root / "job.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["intake"] = intake_data
+        meta["domain"] = intake_data.get("domain") or meta.get("domain")
+        _atomic_write_json(meta_path, meta)
+        intake_json = json.dumps(intake_data, sort_keys=True)
+        conn = db.connect(existing.db_path)
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE jobs SET intake_json = ?, time_cap_hours = ?,"
+                    " budget_cap_usd = ?, aggressiveness = ?, domain = ?"
+                    " WHERE id = ?",
+                    (
+                        intake_json,
+                        intake_data.get("time_cap_hours"),
+                        intake_data.get("budget_cap_usd"),
+                        intake_data.get("aggressiveness"),
+                        intake_data.get("domain") or existing.domain,
+                        existing.id,
+                    ),
+                )
+        finally:
+            conn.close()
+        job = existing
+    else:
+        job = Job.create(intake_data)
+
     pid = daemon.spawn_daemon(job.id)
     typer.echo(
         f"Started job {job.id} (daemon pid {pid}). Tail logs with: research logs {job.id} -f"
@@ -627,6 +695,297 @@ def export_command(
     else:
         written = export_md_bundle(job, out_path, include_history=include_history)
     typer.echo(str(written))
+
+
+# ---------------------------------------------------------------------------
+# `research compare` (issue #210)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ComparisonSummary:
+    """Counts + textual deltas for one side of a ``research compare`` run."""
+
+    label: str
+    tasks_done: int = 0
+    findings: int = 0
+    sources: int = 0
+    plan_versions: int = 0
+    drain_replans: int = 0
+    cornerstone_hits: int = 0
+    departments: set[str] = field(default_factory=set)
+    source_hosts: Counter = field(default_factory=Counter)
+    top_cited: list[tuple[int, int]] = field(default_factory=list)
+
+
+# Match either ``[1]`` / ``[1, 2]`` (current synthesizer shape) or ``[S1]``
+# (legacy / issue #210 example) so the comparator survives a citation-format
+# refactor without silent zeroes.
+_INLINE_CITE_RE = re.compile(r"\[S?(\d+(?:,\s*S?\d+)*)\]")
+_H2_RE = re.compile(r"^##\s+(?!Sources\b|References\b|Bibliography\b)(.+?)\s*$", re.MULTILINE)
+_SOURCES_LINE_RE = re.compile(r"^[-*]\s*\[(\d+)\]\s+.*?(https?://\S+)", re.MULTILINE)
+# Synthesizer's plan-version banner — "Plan vN" headings appear in report
+# sections that summarize the plan rollups.
+_PLAN_VERSION_RE = re.compile(r"plan\s*v?(\d+)", re.IGNORECASE)
+
+
+def _parse_inline_citations(text: str) -> Counter:
+    """Return a Counter of source-id -> citation count from inline ``[N]`` markers."""
+    counter: Counter = Counter()
+    for match in _INLINE_CITE_RE.finditer(text):
+        for raw_id in match.group(1).split(","):
+            stripped = raw_id.strip().lstrip("S").lstrip("s")
+            if stripped.isdigit():
+                counter[int(stripped)] += 1
+    return counter
+
+
+def _split_sources_section(text: str) -> str:
+    """Return everything after the first ``## Sources`` heading, or ``""``."""
+    match = re.search(r"^##\s+Sources\s*$", text, re.MULTILINE)
+    if match is None:
+        return ""
+    return text[match.end():]
+
+
+def _parse_report_md(text: str) -> dict:
+    """Pull departments, source hosts, and top-cited tallies out of a report body."""
+    departments = {m.group(1).strip() for m in _H2_RE.finditer(text)}
+
+    sources_section = _split_sources_section(text)
+    source_lines = list(_SOURCES_LINE_RE.finditer(sources_section))
+    source_ids = {int(m.group(1)) for m in source_lines}
+    hosts: Counter = Counter()
+    for m in source_lines:
+        try:
+            host = urlparse(m.group(2)).netloc.lower()
+        except ValueError:
+            continue
+        if host:
+            # Strip a leading port if any (parsed netloc may include it).
+            hosts[host.split(":", 1)[0]] += 1
+
+    body = text[: _split_sources_section_offset(text)] if sources_section else text
+    citations = _parse_inline_citations(body)
+    top_cited = sorted(
+        ((sid, count) for sid, count in citations.items()),
+        key=lambda t: (-t[1], t[0]),
+    )[:10]
+
+    return {
+        "departments": departments,
+        "source_hosts": hosts,
+        "source_ids": source_ids,
+        "top_cited": top_cited,
+        "inline_citation_total": sum(citations.values()),
+    }
+
+
+def _split_sources_section_offset(text: str) -> int:
+    match = re.search(r"^##\s+Sources\s*$", text, re.MULTILINE)
+    return match.start() if match else len(text)
+
+
+def _newest_archive_report(job: Job) -> Path | None:
+    archive_dir = job.root / "archive"
+    if not archive_dir.is_dir():
+        return None
+    candidates = sorted(archive_dir.glob("report-*.md"))
+    return candidates[-1] if candidates else None
+
+
+def _collect_from_db(job: Job, label: str) -> ComparisonSummary:
+    """Build a ``ComparisonSummary`` from live DB counts + (if present) report.md."""
+    summary = ComparisonSummary(label=label)
+    conn = db.connect(job.db_path)
+    try:
+        summary.tasks_done = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM tasks WHERE job_id = ? AND status = 'done'",
+                (job.id,),
+            ).fetchone()["c"]
+        )
+        summary.findings = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM findings WHERE job_id = ?",
+                (job.id,),
+            ).fetchone()["c"]
+        )
+        summary.sources = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM job_sources WHERE job_id = ?",
+                (job.id,),
+            ).fetchone()["c"]
+        )
+        summary.plan_versions = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM plans WHERE job_id = ?",
+                (job.id,),
+            ).fetchone()["c"]
+        )
+        summary.drain_replans = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM events WHERE job_id = ? AND kind = 'drain_replan'",
+                (job.id,),
+            ).fetchone()["c"]
+        )
+        summary.cornerstone_hits = int(
+            conn.execute(
+                "SELECT COUNT(*) AS c FROM events WHERE job_id = ? AND kind LIKE 'cornerstone%'",
+                (job.id,),
+            ).fetchone()["c"]
+        )
+    finally:
+        conn.close()
+
+    report_path = job.root / "report.md"
+    text: str | None = None
+    if report_path.exists():
+        text = report_path.read_text(encoding="utf-8")
+    else:
+        archived = _newest_archive_report(job)
+        if archived is not None:
+            text = archived.read_text(encoding="utf-8")
+    if text:
+        parsed = _parse_report_md(text)
+        summary.departments = parsed["departments"]
+        summary.source_hosts = parsed["source_hosts"]
+        summary.top_cited = parsed["top_cited"]
+    return summary
+
+
+def _collect_from_report_md(path: Path, label: str) -> ComparisonSummary:
+    """Build a ``ComparisonSummary`` purely from a report.md file on disk.
+
+    Used when the comparator is handed a filesystem path (e.g. an archived
+    report from a job whose DB rows have since been wiped). Counts that can't
+    be derived from the text — task/plan/drain-replan totals — stay at 0; the
+    operator gets findings/sources/departments/host counts from the report.
+    """
+    summary = ComparisonSummary(label=label)
+    if not path.exists():
+        raise FileNotFoundError(f"report not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    parsed = _parse_report_md(text)
+    summary.departments = parsed["departments"]
+    summary.source_hosts = parsed["source_hosts"]
+    summary.top_cited = parsed["top_cited"]
+    summary.findings = parsed["inline_citation_total"]
+    summary.sources = len(parsed["source_ids"])
+    return summary
+
+
+def _resolve_compare_ref(ref: str, label: str) -> ComparisonSummary:
+    """Resolve a ``research compare`` argument to a :class:`ComparisonSummary`.
+
+    Tries job-id resolution first (matches ``_JOB_ID_RE`` and a successful
+    ``Job.load``); otherwise treats the value as a filesystem path.
+    """
+    if _JOB_ID_RE.match(ref):
+        try:
+            job = Job.load(ref, jobs_root=DEFAULT_JOBS_ROOT, db_path=db.DEFAULT_DB_PATH)
+        except (FileNotFoundError, KeyError, ValueError):
+            pass
+        else:
+            return _collect_from_db(job, label)
+
+    path = Path(ref)
+    if path.is_dir():
+        # Be helpful: accept a job folder path; pick its report.md or newest archive.
+        candidate = path / "report.md"
+        if not candidate.exists():
+            archive_dir = path / "archive"
+            archives = sorted(archive_dir.glob("report-*.md")) if archive_dir.is_dir() else []
+            if not archives:
+                raise FileNotFoundError(f"no report.md or archive/report-*.md in {path}")
+            candidate = archives[-1]
+        return _collect_from_report_md(candidate, label)
+    return _collect_from_report_md(path, label)
+
+
+@app.command(name="compare")
+def compare_command(
+    ref_a: str = typer.Argument(..., help="Job id OR path to a report.md (or archived copy)."),
+    ref_b: str = typer.Argument(..., help="Job id OR path to a report.md (or archived copy)."),
+    side_by_side: bool = typer.Option(
+        False,
+        "--side-by-side",
+        help="Show a unified diff of report bodies in the configured pager"
+        " (PAGER, falling back to 'less -R').",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit comparison deltas as JSON for downstream tooling.",
+    ),
+) -> None:
+    """Compare two research runs (counts + textual deltas).
+
+    Each argument is either a live job id or a filesystem path. Paths can
+    point at a ``report.md`` directly, at an archived copy under
+    ``jobs/<id>/archive/``, or at a job folder (its ``report.md`` or newest
+    ``archive/report-*.md`` is used).
+    """
+    try:
+        summary_a = _resolve_compare_ref(ref_a, label=ref_a)
+        summary_b = _resolve_compare_ref(ref_b, label=ref_b)
+    except FileNotFoundError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+
+    if side_by_side:
+        import difflib
+
+        text_a = _resolve_report_text(ref_a) or ""
+        text_b = _resolve_report_text(ref_b) or ""
+        diff = "".join(
+            difflib.unified_diff(
+                text_a.splitlines(keepends=True),
+                text_b.splitlines(keepends=True),
+                fromfile=ref_a,
+                tofile=ref_b,
+                n=3,
+            )
+        )
+        pager_cmd = os.environ.get("PAGER") or "less -R"
+        try:
+            subprocess.run(pager_cmd, input=diff, text=True, shell=True, check=False)
+        except OSError:
+            typer.echo(diff)
+        return
+
+    if json_output:
+        typer.echo(render.comparison_summary_to_json(summary_a, summary_b))
+        return
+
+    Console().print(render.render_comparison_summary(summary_a, summary_b))
+
+
+def _resolve_report_text(ref: str) -> str | None:
+    """Pull the report body for a compare ref (job id or path) for diffing."""
+    if _JOB_ID_RE.match(ref):
+        try:
+            job = Job.load(ref, jobs_root=DEFAULT_JOBS_ROOT, db_path=db.DEFAULT_DB_PATH)
+        except (FileNotFoundError, KeyError, ValueError):
+            return None
+        if (job.root / "report.md").exists():
+            return (job.root / "report.md").read_text(encoding="utf-8")
+        archived = _newest_archive_report(job)
+        if archived is not None:
+            return archived.read_text(encoding="utf-8")
+        return None
+    path = Path(ref)
+    if path.is_dir():
+        if (path / "report.md").exists():
+            return (path / "report.md").read_text(encoding="utf-8")
+        archive_dir = path / "archive"
+        archives = sorted(archive_dir.glob("report-*.md")) if archive_dir.is_dir() else []
+        if archives:
+            return archives[-1].read_text(encoding="utf-8")
+        return None
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return None
 
 
 if __name__ == "__main__":
