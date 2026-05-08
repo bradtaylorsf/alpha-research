@@ -66,9 +66,16 @@ _STATE_RECIPES: dict[str, dict[str, Any]] = {
     "CA": {
         "host": "bizfileonline.sos.ca.gov",
         "search_url": "https://bizfileonline.sos.ca.gov/search/business",
-        # Live DOM (verified 2026-05): the search input has placeholder
+        # Live DOM (verified 2026-05-07): the search input has placeholder
         # "Search by name or file number"; the submit control is a button
         # with aria-label="Execute search" and no type attribute.
+        # The page is a React SPA that re-renders the search input shortly
+        # after first paint (a hydration step), so a naive
+        # ``locator(...).fill(...)`` races the re-render and Playwright raises
+        # "element was detached from the DOM". Submission goes through
+        # ``_fill_with_retry`` / ``_click_with_retry`` below, which re-query
+        # the locator on each attempt and fall back to a JS evaluate that
+        # sets ``.value`` and dispatches native ``input`` + ``change`` events.
         "query_input": "input[placeholder*='Search' i]",
         "submit_button": "button[aria-label='Execute search']",
         # Optional: if/when the UI exposes name-vs-number tabs, route here.
@@ -180,6 +187,128 @@ async def _safe_attr(locator: Any, name: str) -> str:
     except Exception:  # noqa: BLE001
         return ""
     return (value or "").strip()
+
+
+# bizfileonline.sos.ca.gov re-renders its React tree shortly after first paint
+# (a hydration step). The locator resolves but Playwright's auto-retry inside
+# ``fill()`` can lose the race and raise "element was detached from the DOM".
+# Detect those errors by message-substring rather than exception type because
+# the surface is shared between Playwright's own ``Error`` and the generic
+# ``RuntimeError`` strings the SDK builds at the call site.
+_DETACHED_ERROR_HINTS = (
+    "detached from the dom",
+    "element is not attached",
+    "not attached to the dom",
+)
+
+# JS injected as the last-ditch fallback when ``fill()`` keeps racing the
+# re-render. React listens for native ``input``/``change`` events on its
+# controlled inputs, so setting ``.value`` directly without dispatching the
+# events leaves the framework state out of sync — the form will appear empty
+# the moment React re-renders. Use the prototype setter so React's
+# ``__valueTracker`` shim sees a real value change.
+_FILL_VIA_EVALUATE_JS = """
+([selector, value]) => {
+    const el = document.querySelector(selector);
+    if (!el) return false;
+    const proto = Object.getPrototypeOf(el);
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && typeof desc.set === 'function') {
+        desc.set.call(el, value);
+    } else {
+        el.value = value;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+}
+"""
+
+
+def _is_detached_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(hint in msg for hint in _DETACHED_ERROR_HINTS)
+
+
+async def _fill_with_retry(
+    page: Any, selector: str, value: str, *, attempts: int = 3
+) -> None:
+    """Fill ``selector`` with ``value``, re-resolving the locator on detach.
+
+    Re-queries ``page.locator(selector).first`` on every attempt so a stale
+    handle from a React re-render is replaced. After ``attempts`` tries falls
+    back to ``page.evaluate`` setting ``.value`` and dispatching native
+    ``input``/``change`` events — the documented escape hatch for SPA forms.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            await page.locator(selector).first.fill(value)
+            return
+        except Exception as exc:  # noqa: BLE001
+            if not _is_detached_error(exc):
+                raise
+            last_exc = exc
+            logger.debug(
+                "sos fill detached on attempt %d/%d (%s): %s",
+                attempt,
+                attempts,
+                selector,
+                exc,
+            )
+    logger.debug(
+        "sos fill falling back to evaluate after %d detached attempts (%s)",
+        attempts,
+        selector,
+    )
+    try:
+        await page.evaluate(_FILL_VIA_EVALUATE_JS, [selector, value])
+    except Exception as exc:  # noqa: BLE001
+        if last_exc is not None:
+            raise last_exc from exc
+        raise
+
+
+async def _click_with_retry(
+    page: Any, selector: str, *, attempts: int = 3
+) -> None:
+    """Click ``selector``, re-resolving the locator on detach.
+
+    Same retry shape as ``_fill_with_retry``; if every attempt loses the race
+    the JS fallback calls ``el.click()`` directly so React's onClick still
+    fires.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            await page.locator(selector).first.click()
+            return
+        except Exception as exc:  # noqa: BLE001
+            if not _is_detached_error(exc):
+                raise
+            last_exc = exc
+            logger.debug(
+                "sos click detached on attempt %d/%d (%s): %s",
+                attempt,
+                attempts,
+                selector,
+                exc,
+            )
+    logger.debug(
+        "sos click falling back to evaluate after %d detached attempts (%s)",
+        attempts,
+        selector,
+    )
+    try:
+        await page.evaluate(
+            "(selector) => { const el = document.querySelector(selector); "
+            "if (el) el.click(); return !!el; }",
+            selector,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if last_exc is not None:
+            raise last_exc from exc
+        raise
 
 
 async def _save_diagnostic_screenshot(page: Any, host: str) -> None:
@@ -333,17 +462,27 @@ async def search(
             try:
                 await browser.navigate(page, search_url)
 
+                # Let the React tree finish hydrating before we acquire any
+                # locators — otherwise the search input handle is detached out
+                # from under us between query and fill (see issue #191).
+                try:
+                    await page.wait_for_load_state(
+                        "networkidle", timeout=10_000
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("sos wait_for_load_state failed: %s", exc)
+
                 if recipe.get("query_kind_selector"):
                     kind = "number" if _looks_like_entity_number(query) else "name"
                     selector = recipe["query_kind_selector"].format(kind=kind)
                     try:
-                        await page.locator(selector).first.click()
+                        await _click_with_retry(page, selector)
                     except Exception as exc:  # noqa: BLE001
                         logger.debug("sos query-kind toggle failed: %s", exc)
 
                 try:
-                    await page.locator(recipe["query_input"]).first.fill(query)
-                    await page.locator(recipe["submit_button"]).first.click()
+                    await _fill_with_retry(page, recipe["query_input"], query)
+                    await _click_with_retry(page, recipe["submit_button"])
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "sos search submit failed for state=%s: %s", code, exc
