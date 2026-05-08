@@ -60,6 +60,7 @@ EventKind = Literal[
     "ocr_vlm_escalation",
     "cornerstone_extract",
     "cornerstone_fallback_triggered",
+    "second_order_fanout",
     "error",
     "warning",
 ]
