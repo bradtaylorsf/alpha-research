@@ -59,6 +59,7 @@ EventKind = Literal[
     "pdf_vlm_escalation",
     "ocr_vlm_escalation",
     "cornerstone_extract",
+    "cornerstone_fallback_triggered",
     "error",
     "warning",
 ]

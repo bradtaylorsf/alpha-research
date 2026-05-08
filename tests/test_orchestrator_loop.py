@@ -16,6 +16,8 @@ from research_agent.orchestrator.loop import (
     RETRY_MAX_ATTEMPTS,
     Handler,
     _expand_search_to_fetches,
+    _is_cornerstone_source,
+    _load_source_text,
     _run_extract_findings,
     default_handlers,
     run_loop,
@@ -1018,7 +1020,7 @@ class _StubRouter:
         return _Result()
 
 
-def _seed_source(job: Job, *, url: str, body: str) -> int:
+def _seed_source(job: Job, *, url: str, body: str, kind: str = "web") -> int:
     from research_agent.storage.sources import write_source
 
     return write_source(
@@ -1026,7 +1028,7 @@ def _seed_source(job: Job, *, url: str, body: str) -> int:
         url=url,
         title="Cornerstone Document",
         raw_content=body,
-        kind="web",
+        kind=kind,
     )
 
 
@@ -1211,3 +1213,151 @@ async def test_extract_findings_non_cornerstone_uses_default_cap(
     assert result["findings_written"] == 8
     assert "researcher" in loaded_prompts
     assert "researcher_cornerstone" not in loaded_prompts
+
+
+def test_is_cornerstone_source_size_fallback_gated_to_pdf(
+    job: Job,
+) -> None:
+    """Issue #189: size-fallback only fires for ``source_kind == "pdf"``.
+
+    Three cases — all share the same 250k-char body, only ``source_kind``
+    and the planner marker differ:
+
+    * HTML, no planner match → ``(False, False)`` — long-form HTML must
+      not be promoted to cornerstone, or #177's report-padding regression
+      comes back.
+    * PDF, no planner match  → ``(True, True)`` — the second flag tells
+      the call site to emit ``cornerstone_fallback_triggered``.
+    * Planner-marked URL     → ``(True, False)`` — primary signal wins,
+      no fallback event regardless of kind/size.
+    """
+    # Bodies must differ — sources dedupe by content sha256 across kinds.
+    html_id = _seed_source(
+        job,
+        url="https://example.test/long-article.html",
+        body="H" * 250_000,
+        kind="html",
+    )
+    pdf_id = _seed_source(
+        job,
+        url="https://example.test/big-doc.pdf",
+        body="P" * 250_000,
+        kind="pdf",
+    )
+    marked_id = _seed_source(
+        job,
+        url="https://example.test/marked.html",
+        body="short body",
+        kind="html",
+    )
+
+    _persist_plan_with_cornerstone(job, "https://example.test/marked.html")
+
+    html_loaded = _load_source_text(job, html_id)
+    pdf_loaded = _load_source_text(job, pdf_id)
+    marked_loaded = _load_source_text(job, marked_id)
+    assert html_loaded is not None
+    assert pdf_loaded is not None
+    assert marked_loaded is not None
+
+    html_text, html_meta = html_loaded
+    pdf_text, pdf_meta = pdf_loaded
+    marked_text, marked_meta = marked_loaded
+
+    assert _is_cornerstone_source(job, html_meta, html_text) == (False, False)
+    assert _is_cornerstone_source(job, pdf_meta, pdf_text) == (True, True)
+    assert _is_cornerstone_source(job, marked_meta, marked_text) == (True, False)
+
+
+@pytest.mark.asyncio
+async def test_extract_findings_pdf_fallback_emits_event(
+    job: Job,
+    db_path: Path,
+) -> None:
+    """PDF size-fallback path emits ``cornerstone_fallback_triggered`` (WARN).
+
+    The planner did not mark this URL; only the PDF size-fallback path
+    routes the source through the cornerstone prompt, so the operator-
+    visible WARN event must fire alongside the existing INFO
+    ``cornerstone_extract`` event.
+    """
+    url = "https://example.test/forgot-to-mark.pdf"
+    _persist_plan_with_cornerstone(job, "https://example.test/something-else.pdf")
+    source_id = _seed_source(job, url=url, body="P" * 250_000, kind="pdf")
+
+    router = _StubRouter("```yaml\n[]\n```\n")
+    task = {"payload": {"source_id": source_id, "sub_question": "What?"}}
+
+    await _run_extract_findings(job, task, router=router)
+
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT level, kind, payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'cornerstone_fallback_triggered'",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0]["level"] == "WARN"
+    import json as _json
+
+    payload = _json.loads(rows[0]["payload_json"])
+    assert payload["source_id"] == source_id
+    assert payload["url"] == url
+    assert payload["source_kind"] == "pdf"
+    # md_path is written as ``cleaned + "\n"`` so the read-back text adds
+    # one byte to the body length; tolerate that without fixing the value.
+    assert payload["cleaned_chars"] >= 250_000
+
+    # Both the fallback WARN and the standard cornerstone_extract INFO must fire.
+    kinds = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_fallback_triggered" in kinds
+    assert "cornerstone_extract" in kinds
+
+
+@pytest.mark.asyncio
+async def test_extract_findings_html_size_does_not_emit_fallback(
+    job: Job,
+    db_path: Path,
+) -> None:
+    """A 250k-char HTML source must NOT trigger the size fallback.
+
+    Long-form HTML (Wikipedia, archive.org transcripts) frequently
+    crosses the 200k-char threshold without being investigation
+    cornerstones — the gate must keep them on the regular extraction
+    path with the 8-finding cap intact.
+    """
+    url = "https://example.test/very-long.html"
+    _persist_plan_with_cornerstone(job, "https://example.test/something-else.pdf")
+    source_id = _seed_source(job, url=url, body="H" * 250_000, kind="html")
+
+    router = _StubRouter("```yaml\n[]\n```\n")
+    task = {"payload": {"source_id": source_id, "sub_question": "What?"}}
+
+    await _run_extract_findings(job, task, router=router)
+
+    kinds = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_fallback_triggered" not in kinds
+    assert "cornerstone_extract" not in kinds
+
+
+@pytest.mark.asyncio
+async def test_extract_findings_planner_marker_does_not_emit_fallback(
+    job: Job,
+    db_path: Path,
+) -> None:
+    """Planner-marked cornerstone never emits the fallback WARN event."""
+    url = "https://example.test/policy.md"
+    _persist_plan_with_cornerstone(job, url)
+    source_id = _seed_source(job, url=url, body=_CORNERSTONE_BODY)
+
+    router = _StubRouter("```yaml\n[]\n```\n")
+    task = {"payload": {"source_id": source_id, "sub_question": "What?"}}
+
+    await _run_extract_findings(job, task, router=router)
+
+    kinds = _read_event_kinds(db_path, job.id)
+    assert "cornerstone_extract" in kinds
+    assert "cornerstone_fallback_triggered" not in kinds
