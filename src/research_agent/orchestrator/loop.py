@@ -99,8 +99,11 @@ async def _not_implemented_handler(job: Job, task: dict[str, Any]) -> dict[str, 
 # API. Search payloads pass ``query`` plus any of these well-known kwargs
 # through to the underlying ``search()`` call — most connectors take a
 # ``kind`` switch (e.g. congress: bill/member/hearing) and a few take
-# ``state``/``since``/``form_type``. Unknown payload keys are ignored so
-# planner drift doesn't break the call.
+# ``state``/``since``/``form_type``. The set is the *union* across all
+# connectors; ``_filter_kwargs_for`` then narrows to what each connector
+# actually accepts, so planner drift (e.g. emitting ``kind`` for
+# ``edgar_search``, which takes ``form_type`` instead) doesn't surface as
+# a TypeError that bypasses the documented FatalError path.
 _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
     {
         "kind",
@@ -114,6 +117,40 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
         "language",
     }
 )
+
+
+def _filter_kwargs_for(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Drop kwargs the callable doesn't accept.
+
+    Connectors have heterogeneous signatures — congress takes ``kind``,
+    edgar takes ``form_type``, fedregister takes ``since``/``agencies``.
+    The handler's passthrough whitelist is the union; this narrows it to
+    what ``fn`` actually accepts so a planner-drift kwarg like ``kind``
+    on ``edgar_search`` is silently dropped instead of crashing the call.
+    Falls back to the unfiltered dict when introspection fails (e.g.
+    C-implemented or wrapped callables).
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return kwargs
+    accepts_var_kw = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if accepts_var_kw:
+        return kwargs
+    accepted = {
+        name
+        for name, p in sig.parameters.items()
+        if p.kind
+        in (
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    }
+    return {k: v for k, v in kwargs.items() if k in accepted}
 
 
 def _make_connector_search_handler(module_name: str) -> Handler:
@@ -135,6 +172,7 @@ def _make_connector_search_handler(module_name: str) -> Handler:
         kwargs = {
             k: v for k, v in payload.items() if k in _CONNECTOR_SEARCH_PASSTHROUGH
         }
+        kwargs = _filter_kwargs_for(mod.search, kwargs)
         try:
             results = await mod.search(payload.get("query", ""), **kwargs)
         except RuntimeError as exc:

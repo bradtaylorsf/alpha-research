@@ -592,6 +592,56 @@ async def test_connector_fetch_handler_wraps_runtime_error_as_fatal(
 
 
 @pytest.mark.asyncio
+async def test_connector_search_handler_drops_kwargs_connector_does_not_accept(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Planner drift: a passthrough kwarg the target connector doesn't accept
+    must be dropped, not raised as a TypeError that bypasses the documented
+    FatalError path. ``edgar.search`` takes ``form_type`` (not ``kind``); a
+    plan that emits ``kind`` for ``edgar_search`` must still produce a clean
+    call rather than crashing.
+    """
+    from research_agent.tools import edgar
+
+    captured: dict[str, Any] = {}
+
+    async def fake_search(
+        query: str,
+        *,
+        form_type: Any = None,
+        max_results: int = 20,
+        timeout: float = 15.0,
+    ) -> list[SearchResult]:
+        captured["query"] = query
+        captured["form_type"] = form_type
+        captured["max_results"] = max_results
+        return []
+
+    monkeypatch.setattr(edgar, "search", fake_search)
+
+    handler = default_handlers(router=None)["edgar_search"]
+    out = await handler(
+        job,
+        {
+            "kind": "edgar_search",
+            "payload": {
+                "query": "cybersecurity",
+                "kind": "should-be-dropped",  # edgar takes form_type, not kind
+                "form_type": "8-K",
+                "max_results": 5,
+            },
+        },
+    )
+    assert captured == {
+        "query": "cybersecurity",
+        "form_type": "8-K",
+        "max_results": 5,
+    }
+    assert isinstance(out, dict)
+    assert out["results"] == []
+
+
+@pytest.mark.asyncio
 async def test_run_loop_loads_plan_from_db_when_not_provided(
     job: Job, db_path: Path, plan: Plan
 ) -> None:
