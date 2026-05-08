@@ -1,0 +1,82 @@
+name: Epic
+description: A multi-issue initiative with a sub-issue checklist that alpha-loop can walk in order
+title: "epic: "
+labels: ["epic"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for epics that bundle several `ready`-labelled
+        sub-issues. `alpha-loop run --epic <N>` walks the checklist in order
+        and ships one sub-issue per PR.
+
+        **Critical:** sub-issue checklist lines must use the bare format
+        `- [ ] #211 — title` — alpha-loop's parser does NOT match
+        emphasised numbers (`**#211**`, `_#211_`, `[#211](...)`) and will
+        report "no sub-issues in checklist" if any line is decorated.
+
+  - type: textarea
+    id: vision
+    attributes:
+      label: Vision
+      description: What this epic exists to achieve. Why now.
+      placeholder: |
+        The 2026-05-08 overnight run revealed X. The orchestration layer
+        works; what remains is Y. This epic targets Z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnosis
+    attributes:
+      label: Diagnosis
+      description: What concrete observations motivate this epic — symptoms mapped to issues
+      placeholder: |
+        | Symptom | Issue |
+        |---|---|
+        | Mandate PDF read at ~10% coverage | #206 |
+        | Congress.gov returns 110th-Congress bills | #211/#212 |
+    validations:
+      required: true
+
+  - type: textarea
+    id: subissues
+    attributes:
+      label: Sub-issues — sequenced for impact
+      description: |
+        The checklist alpha-loop walks. **Use bare format only:**
+        `- [ ] #211 — feat: skills loader`
+        Do NOT bold, italicise, or link the issue number.
+        Group with `### Stage N — ...` headings to convey ordering.
+      value: |
+        ### Stage 1 — <theme>
+
+        - [ ] #XXX — <one-line title>
+
+        ### Stage 2 — <theme>
+
+        - [ ] #YYY — <one-line title>
+        - [ ] #ZZZ — <one-line title>
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification — what "fixed" looks like
+      description: Concrete, measurable outcomes. The next overnight should produce X.
+      placeholder: |
+        - Findings count > 250 (was 84)
+        - Departmental tracker covers all 13 departments with findings
+        - 100% of inline-cited source IDs appear in the bottom Sources list
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Skip-conditions / out of scope
+      description: What this epic does NOT address. Forward-pointers to follow-up epics.
+      placeholder: |
+        - Connector skills 6-18 — separate issue
+        - LLM scaling — orthogonal
