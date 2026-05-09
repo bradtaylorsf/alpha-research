@@ -132,6 +132,28 @@ def test_active_strategies_field_default_is_empty(isolated_skills_dir: Path) -> 
     assert plan.active_strategies == []
 
 
+def test_planner_md_documents_active_strategies_in_schema() -> None:
+    """Regression for the empty-active_strategies-on-plan_created bug:
+    planner.md must list ``active_strategies`` in the formal Schema bullet
+    list, not just mention it in the prose intro. Models follow the schema
+    section literally and skip prose-only fields, leaving the field empty
+    even when strategies are obviously relevant. Discovered on a 60-min
+    Project 2025 smoke: scope_class=broad fired correctly, but
+    active_strategies stayed [] despite the goal being a textbook fit for
+    modern-policy-era-filtering + cornerstone-extraction."""
+    body = (
+        Path(__file__).resolve().parent.parent
+        / "src/research_agent/prompts/planner.md"
+    ).read_text()
+    schema_section = body.split("### Schema", 1)[-1].split("###", 1)[0]
+    assert "`active_strategies`" in schema_section, (
+        "planner.md schema bullets must include `active_strategies` so the "
+        "planner emits the field in its YAML output"
+    )
+    # Concrete guidance — without it the model can't decide when to populate.
+    assert "modern-policy-era-filtering" in schema_section
+
+
 def test_active_strategies_threaded_into_payload_on_enqueue(
     isolated_skills_dir: Path, job: Job
 ) -> None:

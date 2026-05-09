@@ -1,5 +1,5 @@
 ---
-version: "3"
+version: "4"
 model_tier: reasoner
 description: System prompt for the planner. Emits a YAML research plan inside a fenced code block.
 ---
@@ -79,6 +79,17 @@ the schema below.
   whenever you also emit a cornerstone `web_fetch` task — see the
   **Cornerstone-document pattern** section below. Omit for normal
   search-driven plans.
+- `active_strategies` (optional): list of strategy-skill names from the
+  **Strategy skills available** section above. The orchestrator deep-loads
+  each named strategy at task-emit time so the relevant connector picks up
+  cross-cutting guidance (e.g. era filtering, triangulation). Default is
+  `[]`. Populate when the goal benefits from one or more strategies — e.g.
+  any goal asking about *current* federal policy should include
+  `modern-policy-era-filtering`; goals anchored on a single primary
+  document should include `cornerstone-extraction`; multi-source
+  verification questions should include `triangulation`. Use the strategy
+  `name` field exactly as listed in the index, e.g.
+  `active_strategies: [modern-policy-era-filtering, cornerstone-extraction]`.
 
 ### Task pipeline guidance — important
 
