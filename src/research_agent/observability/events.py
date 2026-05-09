@@ -73,6 +73,8 @@ EventKind = Literal[
     "cornerstone_followups_emitted",
     "second_order_fanout",
     "source_list_reconciled",
+    "synth_status_from_prose",
+    "synth_status_missing",
     "error",
     "warning",
 ]

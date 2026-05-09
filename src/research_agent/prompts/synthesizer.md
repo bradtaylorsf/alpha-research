@@ -44,10 +44,10 @@ source.
   short ones into a catch-all. When the list is empty, omit the tracker
   section entirely.
 
-## Output format — RAW markdown + a trailing JSON block
+## Output format — RAW markdown report
 
-Return the report as **raw markdown text**, immediately followed by a single
-fenced ```json block carrying subgoal status. Nothing else.
+Return the report as **raw markdown text**. The final mandatory instruction at
+the end of this prompt defines the machine-readable subgoal status trailer.
 
 - Do **not** wrap the markdown body in JSON (no `{"report_markdown": "..."}`).
 - Do **not** wrap the markdown body in a code fence (no ```` ```markdown ```` ).
@@ -61,13 +61,9 @@ fenced ```json block carrying subgoal status. Nothing else.
   the critique flagged at least one paid opportunity. Omit the section
   heading entirely when the critique's `paid_opportunities` list is
   empty.
-- After the **Sources** section emit exactly one fenced ```json block whose
-  body is `{"subgoal_status": {"<id>": "confirmed"|"refuted"|"inconclusive"}}`
-  covering every subgoal id you were given. No other JSON fences anywhere
-  else in the response.
 
-The orchestrator strips the trailing JSON fence before writing `report.md`,
-so the visible report only contains the markdown body.
+The orchestrator stores only the markdown report body for readers; the
+machine-readable trailer at the end is stripped before `report.md` is written.
 
 ### Subgoal status mapping
 
@@ -307,6 +303,25 @@ union of inline citations, not a curated subset.)
 {"subgoal_status": {"1": "confirmed", "2": "inconclusive"}}
 ```
 
-(The example above is shown inside a code block for readability — your
-actual markdown report should NOT be inside any fence, but the trailing
-`subgoal_status` block IS the one ```json fence the orchestrator expects.)
+The example above is shown inside a code block for readability. Your actual
+markdown report should NOT be inside any fence.
+
+## Final mandatory subgoal-status trailer
+
+At the very end of every response, after the **Sources** section, emit exactly
+one fenced ```json block whose body is:
+
+```json
+{"subgoal_status": {"<id>": "confirmed"|"refuted"|"inconclusive"}}
+```
+
+This trailer MUST cover every subgoal id you were given.
+
+This trailer MUST be emitted on every synthesis pass, even when all subgoals
+are inconclusive.
+
+The orchestrator strips this trailing JSON fence before writing `report.md`,
+so the visible report only contains the markdown body.
+
+Do not emit any other JSON fences anywhere in the response. Do not put any
+text after the closing fence.
