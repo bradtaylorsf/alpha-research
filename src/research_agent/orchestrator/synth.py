@@ -31,6 +31,7 @@ import json
 import logging
 import re
 import sqlite3
+import traceback
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -46,7 +47,7 @@ from research_agent.storage import db
 from research_agent.storage.markdown import (
     write_report,
     write_synthesis,
-    write_synthesis_partial,
+    write_synthesis_failed,
 )
 
 if TYPE_CHECKING:
@@ -876,12 +877,18 @@ def _write_failed_output(
     """Persist whatever content we managed to assemble + emit ``synthesis_failed``.
 
     The current call path is non-streaming so ``partial_content`` is "" — the
-    file is still written so the next attempt can spot it as prior context.
+    failed file still records the traceback for post-run debugging.
     Returns a degraded :class:`SynthesisOutput` (``model='synthesis_failed'``,
     ``truncated=True``) so callers don't have to thread an exception type.
     """
-    partial_version = write_synthesis_partial(job, partial_content, model="synthesis_failed")
-    partial_path = job.root / f"synthesis/{partial_version:04d}.partial.md"
+    traceback_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    failed_version = write_synthesis_failed(
+        job,
+        partial_content,
+        model="synthesis_failed",
+        traceback_text=traceback_text,
+    )
+    failed_path = job.root / f"synthesis/{failed_version:04d}.failed.md"
     emit(
         job,
         "ERROR",
@@ -891,15 +898,16 @@ def _write_failed_output(
             "tier": tier,
             "reason": str(exc),
             "attempt_count": attempt_count,
-            "partial_path": str(partial_path),
+            "failed_path": str(failed_path),
+            "traceback": traceback_text,
         },
     )
     return SynthesisOutput(
-        version=partial_version,
+        version=failed_version,
         content=partial_content,
         model="synthesis_failed",
         cost_usd=None,
-        report_path=str(partial_path),
+        report_path=str(failed_path),
         truncated=True,
     )
 

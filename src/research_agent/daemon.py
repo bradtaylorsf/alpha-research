@@ -331,6 +331,9 @@ DEFAULT_DISK_CAP_GB = 10.0
 # Foreground progress bar (issue #41). 2 s matches `research status --watch`
 # so the operator's two views advance in lockstep.
 FOREGROUND_PROGRESS_INTERVAL_S = 2.0
+ORPHAN_ARTIFACT_MAX_AGE_S = 300.0
+_ORPHAN_ARTIFACT_DIRS = ("plan", "synthesis", "critique")
+_ORPHAN_ARTIFACT_PATTERNS = ("*.partial.md", "*.tmp")
 
 
 def _build_router(job: Job) -> Any:
@@ -350,6 +353,83 @@ def _build_router(job: Job) -> Any:
 
     budget = BudgetTracker(job.id, cap_usd, pricing=pricing, db_path=job.db_path)
     return Router(config, budget, job=job, db_path=job.db_path)
+
+
+def _sweep_orphan_artifacts(
+    job: Job,
+    *,
+    older_than_s: float = ORPHAN_ARTIFACT_MAX_AGE_S,
+    now: float | None = None,
+) -> list[Path]:
+    """Remove stale partial/temporary artifacts left by interrupted writers."""
+    now_ts = time.time() if now is None else now
+    cleaned: list[Path] = []
+    try:
+        for dirname in _ORPHAN_ARTIFACT_DIRS:
+            root = job.root / dirname
+            if not root.is_dir():
+                continue
+            for pattern in _ORPHAN_ARTIFACT_PATTERNS:
+                for path in root.glob(pattern):
+                    try:
+                        if not path.is_file():
+                            continue
+                        stat = path.stat()
+                        age_s = max(0.0, now_ts - stat.st_mtime)
+                        if age_s < older_than_s:
+                            continue
+                        path.unlink()
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        logger.warning(
+                            "daemon: failed to clean orphan artifact %s: %s", path, exc
+                        )
+                        try:
+                            emit(
+                                job,
+                                "WARN",
+                                "daemon",
+                                "warning",
+                                {
+                                    "stage": "orphan_artifact_sweep",
+                                    "path": str(path),
+                                    "error": str(exc),
+                                },
+                            )
+                        except Exception:
+                            pass
+                        continue
+
+                    cleaned.append(path)
+                    try:
+                        emit(
+                            job,
+                            "INFO",
+                            "daemon",
+                            "orphan_artifact_cleaned",
+                            {
+                                "path": str(path.relative_to(job.root)),
+                                "age_seconds": round(age_s, 3),
+                            },
+                        )
+                    except Exception:
+                        logger.exception(
+                            "daemon: failed to emit orphan cleanup event for %s", path
+                        )
+    except Exception as exc:  # noqa: BLE001 — startup cleanup must be best-effort
+        logger.exception("daemon: orphan artifact sweep failed for job %s", job.id)
+        try:
+            emit(
+                job,
+                "WARN",
+                "daemon",
+                "warning",
+                {"stage": "orphan_artifact_sweep", "error": str(exc)},
+            )
+        except Exception:
+            pass
+    return cleaned
 
 
 def _resolve_db_path() -> Path | None:
@@ -667,6 +747,8 @@ async def run_daemon(
     except (FileNotFoundError, KeyError, ValueError) as exc:
         logger.error("daemon: cannot load job %r: %s", job_id, exc)
         return 1
+
+    _sweep_orphan_artifacts(job)
 
     try:
         router = _build_router(job)

@@ -260,29 +260,76 @@ def write_synthesis(
     return version
 
 
-def write_synthesis_partial(job: Job, content: str, model: str) -> int:
-    """Write ``synthesis/<next_version>.partial.md`` for a failed synthesis.
+def _render_failed_synthesis_md(
+    *,
+    version: int,
+    partial_content: str,
+    model: str,
+    traceback_text: str,
+    created_at: int,
+) -> str:
+    partial = partial_content.strip() or "_No partial output captured._"
+    tb = traceback_text.strip() or "No traceback captured."
+    return (
+        f"# Failed Synthesis v{version:04d}\n"
+        f"\n"
+        f"Created: {datetime.fromtimestamp(created_at, UTC).isoformat()}\n"
+        f"Model: {model}\n"
+        f"\n"
+        f"## Partial Output\n"
+        f"\n"
+        f"{partial}\n"
+        f"\n"
+        f"## Traceback\n"
+        f"\n"
+        f"```text\n"
+        f"{tb}\n"
+        f"```\n"
+    )
 
-    Used when a synthesis call exhausts retries: the (possibly empty) partial
-    output is salvaged so the next attempt can include it as context. No DB
-    row and no JSON sidecar are written — the partial file lives outside the
-    canonical ``syntheses`` table on purpose so a future successful run can
-    claim the same version number.
+
+def write_synthesis_failed(
+    job: Job,
+    partial_content: str,
+    *,
+    model: str,
+    traceback_text: str,
+) -> int:
+    """Write ``synthesis/<next_version>.failed.md`` for a failed synthesis.
+
+    Failed artifacts stay out of the canonical ``syntheses`` table and do not
+    get JSON sidecars. The next successful synthesis can still claim the same
+    DB version number while the failure remains on disk for debugging.
     """
-    if not isinstance(content, str):
-        raise ValueError(f"content must be a string; got {type(content).__name__}")
+    if not isinstance(partial_content, str):
+        raise ValueError(
+            f"partial_content must be a string; got {type(partial_content).__name__}"
+        )
     if not isinstance(model, str) or not model:
         raise ValueError("model must be a non-empty string")
+    if not isinstance(traceback_text, str):
+        raise ValueError(
+            f"traceback_text must be a string; got {type(traceback_text).__name__}"
+        )
 
+    now = _now_epoch()
     conn = db.connect(job.db_path)
     try:
         version = _next_version(conn, "syntheses", job.id)
     finally:
         conn.close()
 
-    md_rel = f"synthesis/{version:04d}.partial.md"
-    md_body = content if (not content or content.endswith("\n")) else content + "\n"
-    _atomic_write_text(job.root / md_rel, md_body)
+    md_rel = f"synthesis/{version:04d}.failed.md"
+    _atomic_write_text(
+        job.root / md_rel,
+        _render_failed_synthesis_md(
+            version=version,
+            partial_content=partial_content,
+            model=model,
+            traceback_text=traceback_text,
+            created_at=now,
+        ),
+    )
     return version
 
 
@@ -403,5 +450,5 @@ __all__ = [
     "write_plan",
     "write_report",
     "write_synthesis",
-    "write_synthesis_partial",
+    "write_synthesis_failed",
 ]
