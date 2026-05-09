@@ -58,9 +58,10 @@ the schema below.
     `congress_search`, `fec_search`, `edgar_search`,
     `courtlistener_search`, `fedregister_search`, `lda_search`,
     `usaspending_search`, `gdelt_search`, `littlesis_search`,
-    `nonprofits_search`, `opencorporates_search`, `sanctions_search`,
-    `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`,
-    `scholar_search`, `linkedin_search`. **One narrow exception:
+    `loc_search`, `nonprofits_search`, `opencorporates_search`,
+    `sanctions_search`, `bbb_search`, `licensing_search`,
+    `sos_search`, `calaccess_search`, `scholar_search`,
+    `linkedin_search`. **One narrow exception:
     `web_fetch` is allowed only as the cornerstone-document fetch — see
     the "Cornerstone-document pattern" section below.**
     Do **not** emit any other kind. `*_fetch`, `extract_findings`,
@@ -184,6 +185,7 @@ it does for `web_search`.
 | `usaspending_search` | Federal contracts, grants, loans (award-level detail, no auth) | `award_type: contracts\|grants\|loans` | `"Heritage Foundation" contract` |
 | `gdelt_search` | GDELT — Global news event aggregator, no `site:` operator (no auth) | `since: YYYY-MM-DD`, `language: english` | `Project 2025 mainstream coverage` |
 | `littlesis_search` | Power-mapping database — entities, donations, board seats, family ties (lead, not evidence) | `kind: entities\|relationships` | `"Peter Thiel"` |
+| `loc_search` | Library of Congress digital collections (search across all surfaces, or scope via `collection`); Chronicling America OCR for US newspapers 1690–1963 (no auth) | `collection: chronicling-america\|prints\|manuscripts\|recordings\|maps`, `page: <int>` | `"battle of algiers"` |
 | `nonprofits_search` | ProPublica Nonprofit Explorer (Form 990 filings, no auth) | — | `"Heritage Foundation"` |
 | `opencorporates_search` | Global company registry — requires `OPENCORPORATES_API_KEY` | `jurisdiction: us_ca\|gb\|...` | `"Acme Holdings"` |
 | `sanctions_search` | OFAC SDN + UK sanctions lists (local index, no auth) | — | `"Wagner Group"` |
@@ -218,6 +220,7 @@ connector module on the fetch side.
 | `site:cslb.ca.gov` | `licensing_search` (state: CA) | `site:cslb.ca.gov "SBI Builders"` |
 | `site:bizfileonline.sos.ca.gov` | `sos_search` (state: CA) | `site:bizfileonline.sos.ca.gov "Acme Corp"` |
 | `site:bbb.org` | `bbb_search` | `site:bbb.org "SBI Builders"` |
+| `site:loc.gov` | `loc_search` | `site:loc.gov "battle of algiers"` |
 
 ### Payload shapes
 
@@ -227,7 +230,7 @@ connector module on the fetch side.
 - `arxiv_search`: `{ query: "…", sub_question: "…", max_results: 10 }`
 - `local_corpus_query`: `{ query: "…", sub_question: "…", top_k: 10 }`
 - `cornerstone_query`: `{ sub_question: "…", cornerstone_url: "<URL>", top_k: 8 }` (replans only — the index does not exist on the initial plan)
-- direct connector kinds (`congress_search`, `fec_search`, `edgar_search`, `courtlistener_search`, `fedregister_search`, `lda_search`, `usaspending_search`, `gdelt_search`, `littlesis_search`, `nonprofits_search`, `opencorporates_search`, `sanctions_search`, `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`, `scholar_search`, `linkedin_search`): `{ query: "…", sub_question: "…" }` plus the optional knobs noted in the **Direct connector kinds** table above (e.g. `kind`, `state`, `since`, `max_results`).
+- direct connector kinds (`congress_search`, `fec_search`, `edgar_search`, `courtlistener_search`, `fedregister_search`, `lda_search`, `usaspending_search`, `gdelt_search`, `littlesis_search`, `loc_search`, `nonprofits_search`, `opencorporates_search`, `sanctions_search`, `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`, `scholar_search`, `linkedin_search`): `{ query: "…", sub_question: "…" }` plus the optional knobs noted in the **Direct connector kinds** table above (e.g. `kind`, `state`, `since`, `max_results`).
 
 ### When to use each search
 
@@ -589,9 +592,10 @@ or by sub-policy is `broad` or `comprehensive`.
   `fec_search`, `edgar_search`,
   `courtlistener_search`, `fedregister_search`, `lda_search`,
   `usaspending_search`, `gdelt_search`, `littlesis_search`,
-  `nonprofits_search`, `opencorporates_search`, `sanctions_search`,
-  `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`,
-  `scholar_search`, `linkedin_search`). The single exception is
+  `loc_search`, `nonprofits_search`, `opencorporates_search`,
+  `sanctions_search`, `bbb_search`, `licensing_search`, `sos_search`,
+  `calaccess_search`, `scholar_search`, `linkedin_search`).
+  The single exception is
   `web_fetch`, allowed only as the cornerstone-document fetch when
   `cornerstone_url` is also set — see the **Cornerstone-document
   pattern** section.

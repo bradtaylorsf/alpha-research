@@ -1,0 +1,252 @@
+{
+  "pagination": {
+    "current": 1,
+    "first": null,
+    "from": 1,
+    "last": "https://www.loc.gov/photos/?c=2&fo=json&q=civil+war+lincoln&sp=4",
+    "next": "https://www.loc.gov/photos/?c=2&fo=json&q=civil+war+lincoln&sp=2",
+    "of": 668,
+    "page_list": [
+      {
+        "number": 1,
+        "url": null
+      },
+      {
+        "number": 2,
+        "url": "https://www.loc.gov/photos/?c=2&fo=json&q=civil+war+lincoln&sp=2"
+      },
+      {
+        "number": 3,
+        "url": "https://www.loc.gov/photos/?c=2&fo=json&q=civil+war+lincoln&sp=3"
+      },
+      {
+        "number": "...",
+        "url": "https://www.loc.gov/photos/?c=2&fo=json&q=civil+war+lincoln&sp=4"
+      }
+    ],
+    "perpage": 2,
+    "perpage_options": [
+      25,
+      50,
+      100,
+      150
+    ],
+    "previous": null,
+    "results": "1 - 2",
+    "to": 2,
+    "total": 334
+  },
+  "results": [
+    {
+      "access_restricted": false,
+      "aka": [
+        "http://lccn.loc.gov/2010716926",
+        "http://www.loc.gov/item/2010716926/",
+        "https://search.catalog.loc.gov/instances/7e96f6fd-498d-57b4-b60a-8cb731528a2b",
+        "https://hdl.loc.gov/loc.pnp/cai.2a13607",
+        "http://www.loc.gov/resource/cai.2a13607/",
+        "https://www.loc.gov/pictures/item/2010716926/",
+        "http://www.loc.gov/pictures/item/2010716926/",
+        "https://www.loc.gov/pictures/collection/cai/item/2010716926/",
+        "http://www.loc.gov/pictures/collection/cai/item/2010716926/",
+        "https://hdl.loc.gov/loc.pnp/cai.2a13607"
+      ],
+      "campaigns": [],
+      "contributor": [
+        "jacobs, william leroy"
+      ],
+      "date": "1890",
+      "dates": [
+        "1890"
+      ],
+      "description": [
+        "Title devised by cataloger. No publication information. (DLC/PP-1938:0086). Forms part of: Cabinet of American illustration (Library of Congress)."
+      ],
+      "digitized": true,
+      "extract_timestamp": "2026-02-07T20:14:31.479Z",
+      "group": [
+        "catalog-split-02",
+        "catalog",
+        "cai",
+        "main-catalog-split-02",
+        "cabinet-of-american-illustration"
+      ],
+      "hassegments": false,
+      "id": "http://www.loc.gov/item/2010716926/",
+      "image_url": [
+        "https://tile.loc.gov/storage-services/service/pnp/cai/2a13000/2a13600/2a13607_150px.jpg#h=71&w=150",
+        "https://tile.loc.gov/storage-services/service/pnp/cai/2a13000/2a13600/2a13607t.gif#h=71&w=150",
+        "https://tile.loc.gov/storage-services/service/pnp/cai/2a13000/2a13600/2a13607r.jpg#h=304&w=640"
+      ],
+      "index": 1,
+      "language": [
+        "english"
+      ],
+      "location": [
+        "united states"
+      ],
+      "mime_type": [
+        "image/gif",
+        "image/jpg",
+        "image/tif"
+      ],
+      "number": [
+        "2026-01-28t18:04:01.500000",
+        "http://www.loc.gov/item/cai1996002128/pp",
+        "online resource",
+        "2010716926",
+        "sheet",
+        "http://www.loc.gov/item/2010716926"
+      ],
+      "number_carrier_type": [
+        "sheet",
+        "online resource"
+      ],
+      "number_former_id": [
+        "http://www.loc.gov/item/2010716926",
+        "http://www.loc.gov/item/cai1996002128/pp"
+      ],
+      "number_lccn": [
+        "2010716926"
+      ],
+      "number_source_modified": [
+        "2026-01-28t18:04:01.500000"
+      ],
+      "online_format": [
+        "image"
+      ],
+      "original_format": [
+        "photo, print, drawing"
+      ],
+      "partof": [
+        "civil war",
+        "catalog",
+        "cabinet of american illustration",
+        "prints and photographs division"
+      ],
+      "resources": [
+        {
+          "caption": "digital file from intermediary roll film copy",
+          "files": 1,
+          "image": "https://tile.loc.gov/storage-services/service/pnp/cai/2a13000/2a13600/2a13607_150px.jpg",
+          "url": "https://www.loc.gov/resource/cai.2a13607/"
+        }
+      ],
+      "shelf_id": "CAI - Jacobs, no. 76",
+      "site": [
+        "catalog",
+        "pictures"
+      ],
+      "subject": [
+        "drawings",
+        "history",
+        "color",
+        "illustrations",
+        "civil war",
+        "military inspections",
+        "united states"
+      ],
+      "timestamp": "2026-02-07T20:53:45.353Z",
+      "title": "[Man, possibly Abraham Lincoln, talking to Civil War officer and troops]",
+      "type": [
+        "still image"
+      ],
+      "url": "https://www.loc.gov/item/2010716926/"
+    },
+    {
+      "access_restricted": false,
+      "aka": [
+        "https://www.loc.gov/pictures/item/2004667046/",
+        "http://www.loc.gov/item/2004667046/",
+        "http://www.loc.gov/pictures/item/2004667046/",
+        "https://www.loc.gov/pictures/collection/coll/item/2004667046/",
+        "http://www.loc.gov/pictures/collection/coll/item/2004667046/",
+        "http://lcweb2.loc.gov/pp/cphquery.html",
+        "http://lccn.loc.gov/2004667046"
+      ],
+      "campaigns": [],
+      "contributor": [
+        "brady, mathew b."
+      ],
+      "date": "1861",
+      "dates": [
+        "1861"
+      ],
+      "description": [
+        "ca. 30 sheets (ca. 150 pictures) : halftone photomechanical prints. | Reproductions of Civil War photographs by Mathew Brady. Advertising matter for Francis Trevelyan Miller, Photographic History of the Civil War and Portrait Life of Lincoln, in which the Brady images were used."
+      ],
+      "digitized": true,
+      "extract_timestamp": "2026-01-17T14:22:52.041Z",
+      "group": [
+        "coll",
+        "catalog-split-03",
+        "catalog",
+        "groups-of-images",
+        "main-catalog-split-03"
+      ],
+      "hassegments": false,
+      "id": "http://www.loc.gov/item/2004667046/",
+      "image_url": [
+        "https://www.loc.gov/static/images/original-format/group-of-images.svg"
+      ],
+      "index": 2,
+      "language": [
+        "english"
+      ],
+      "location": [
+        "united states"
+      ],
+      "number": [
+        "http://www.loc.gov/item/13486680",
+        "2013-05-29t13:21:36",
+        "2004667046"
+      ],
+      "number_former_id": [
+        "http://www.loc.gov/item/13486680"
+      ],
+      "number_lccn": [
+        "2004667046"
+      ],
+      "number_source_modified": [
+        "2013-05-29t13:21:36"
+      ],
+      "original_format": [
+        "photo, print, drawing",
+        "collection"
+      ],
+      "partof": [
+        "lot 5703",
+        "prints and photographs division",
+        "groups of images (lots)",
+        "catalog"
+      ],
+      "related": {
+        "lot_link": "https://www.loc.gov/pictures/search/?q=LOT 5703&fi=number&op=PHRASE&va=exact&co!=coll&sg=true&st=gallery",
+        "neighbors": "https://www.loc.gov/pictures/related/?&co=coll&pk=2004667046&st=gallery&sb=call_number#focus"
+      },
+      "resources": [],
+      "shelf_id": "LOT 5703 (G) [P&P]",
+      "site": [
+        "pictures",
+        "catalog"
+      ],
+      "subject": [
+        "photographic history of the civil war",
+        "history",
+        "halftone photomechanical prints",
+        "reproductions",
+        "civil war",
+        "advertisements",
+        "united states",
+        "miller, francis trevelyan"
+      ],
+      "timestamp": "2026-01-17T14:29:44.147Z",
+      "title": "Reproductions of Civil War photographs by Mathew B. Brady",
+      "type": [
+        "still image"
+      ],
+      "unrestricted": true,
+      "url": "//lccn.loc.gov/2004667046"
+    }
+  ]
+}

@@ -42,6 +42,7 @@ EXPECTED_SOURCE_KINDS = (
     "calaccess",
     "scholar",
     "linkedin",
+    "loc",
 )
 
 

@@ -338,6 +338,7 @@ _CONNECTOR_KINDS: tuple[str, ...] = (
     "usaspending",
     "gdelt",
     "littlesis",
+    "loc",
     "nonprofits",
     "opencorporates",
     "sanctions",

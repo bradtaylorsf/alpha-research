@@ -1,0 +1,367 @@
+{
+  "pagination": {
+    "current": 1,
+    "first": null,
+    "from": 1,
+    "last": "https://www.loc.gov/collections/chronicling-america/?c=3&dl=page&fo=json&q=pullman+strike&sp=4",
+    "next": "https://www.loc.gov/collections/chronicling-america/?c=3&dl=page&fo=json&q=pullman+strike&sp=2",
+    "of": 274403,
+    "page_list": [
+      {
+        "number": 1,
+        "url": null
+      },
+      {
+        "number": 2,
+        "url": "https://www.loc.gov/collections/chronicling-america/?c=3&dl=page&fo=json&q=pullman+strike&sp=2"
+      },
+      {
+        "number": 3,
+        "url": "https://www.loc.gov/collections/chronicling-america/?c=3&dl=page&fo=json&q=pullman+strike&sp=3"
+      },
+      {
+        "number": "...",
+        "url": "https://www.loc.gov/collections/chronicling-america/?c=3&dl=page&fo=json&q=pullman+strike&sp=4"
+      }
+    ],
+    "perpage": 3,
+    "perpage_options": [
+      20,
+      40,
+      80,
+      160
+    ],
+    "previous": null,
+    "results": "1 - 3",
+    "to": 3,
+    "total": 91468
+  },
+  "results": [
+    {
+      "access_restricted": false,
+      "aka": [
+        "http://www.loc.gov/resource/sn2001063112/1894-08-24/ed-1/?sp=7"
+      ],
+      "batch": [
+        "sdhi_goshawk_ver03"
+      ],
+      "campaigns": [],
+      "composite_location": [
+        "0/united states/",
+        "1/united states/south dakota/",
+        "2/united states/south dakota/davison/",
+        "3/united states/south dakota/davison/mitchell/"
+      ],
+      "contributor": [
+        "south dakota state historical society \u2013 state archives"
+      ],
+      "date": "1894-08-24",
+      "dates": [
+        "1894-08-24"
+      ],
+      "description": [
+        "r MITCHELL CAPITAL PAGES 5 TO 8 PHI DAY AUGUST 24 1894 CUKRENT COMMENT Of course the Populist party has no sympathy with anarchy in spite of is endorsement of Debs and Altgeld and Waite but Senator Kyle ovidently leans that way to judge by the follow ing extract from a recent debate in the senate Mr IlillAs a general proposition the world over an anarchist is a bad person and should be deported from any civilized society That as a gen eral proposition is true is it not Mr KyleOf a violent anarchist yes Mr Hi 11Of la violent an arch isiP Mr KyleIf a man wants to hold such a theory as that of a high state of society where people can live without law let him hold his theory but I do not believe in anarchy Mr HillI have no objection to his belief in his theory but no must hold it in somo other country than ours Tho Sioux Falls Forum thinks Karl Gerner is a statesman and a scholar since he joined the Pop party but it makes the following bitter observations about a Kansas man who has Hopped the other way Ben Clover of"
+      ],
+      "digitized": true,
+      "extract_timestamp": "2023-06-25T23:47:36.842Z",
+      "group": [
+        "ndnp/sdhi",
+        "south-dakota-state-historical-society-state-archives-awardee"
+      ],
+      "hassegments": false,
+      "id": "http://www.loc.gov/resource/sn2001063112/1894-08-24/ed-1/?sp=7",
+      "image_url": [
+        "https://tile.loc.gov/image-services/iiif/service:ndnp:sdhi:batch_sdhi_goshawk_ver03:data:sn2001063112:00415624645:1894082401:0091/full/pct:6.25/0/default.jpg#h=471&w=323",
+        "https://tile.loc.gov/image-services/iiif/service:ndnp:sdhi:batch_sdhi_goshawk_ver03:data:sn2001063112:00415624645:1894082401:0091/full/pct:12.5/0/default.jpg#h=942&w=646",
+        "https://tile.loc.gov/text-services/word-coordinates-service?segment=/service/ndnp/sdhi/batch_sdhi_goshawk_ver03/data/sn2001063112/00415624645/1894082401/0091.xml&format=alto_xml"
+      ],
+      "index": 1,
+      "language": [
+        "english"
+      ],
+      "location": [
+        "davison county",
+        "south dakota",
+        "mitchell",
+        "united states",
+        "davison"
+      ],
+      "location_city": [
+        "mitchell"
+      ],
+      "location_country": [
+        "united states"
+      ],
+      "location_county": [
+        "davison"
+      ],
+      "location_state": [
+        "south dakota"
+      ],
+      "mime_type": [
+        "image/jp2",
+        "application/pdf",
+        "text/xml",
+        "image/jpeg",
+        "image/jpeg",
+        "application/json",
+        "text/plain"
+      ],
+      "number": [
+        "6",
+        "1",
+        "4",
+        "sn2001063112",
+        "2",
+        "5",
+        "0",
+        "0000000007"
+      ],
+      "number_edition": [
+        "1"
+      ],
+      "number_lccn": [
+        "sn2001063112"
+      ],
+      "number_page": [
+        "0000000007"
+      ],
+      "number_reel": [
+        "0",
+        "0",
+        "4",
+        "1",
+        "5",
+        "6",
+        "2",
+        "4",
+        "6",
+        "4",
+        "5"
+      ],
+      "online_format": [
+        "image",
+        "pdf",
+        "online text"
+      ],
+      "original_format": [
+        "newspaper"
+      ],
+      "page_id": "sn2001063112-1894-08-24-ed-1-0091",
+      "partof": [
+        "the mitchell capital (mitchell, dakota [s.d.]) 1879-1918",
+        "chronicling america",
+        "serial and government publications division"
+      ],
+      "partof_collection": [
+        "chronicling america"
+      ],
+      "partof_division": [
+        "serial and government publications division"
+      ],
+      "partof_title": [
+        "the mitchell capital (mitchell, dakota [s.d.]) 1879-1918"
+      ],
+      "publication_frequency": [
+        "weekly"
+      ],
+      "resources": [
+        {
+          "files": 1,
+          "url": "https://www.loc.gov/resource/sn2001063112/1894-08-24/ed-1/?sp=7"
+        }
+      ],
+      "segmentof": [
+        "http://www.loc.gov/resource/sn2001063112/1894-08-24/ed-1/"
+      ],
+      "shelf_id": "07",
+      "site": [
+        "chroniclingamerica"
+      ],
+      "subject": [
+        "davison county (s.d.)",
+        "davison",
+        "mitchell (s.d.)",
+        "davison county",
+        "south dakota",
+        "mitchell",
+        "united states",
+        "newspapers"
+      ],
+      "timestamp": "2023-06-26T07:47:05.865Z",
+      "title": "Image 7 of The Mitchell capital (Mitchell, Dakota [S.D.]), August 24, 1894",
+      "type": [
+        "segment"
+      ],
+      "url": "https://www.loc.gov/resource/sn2001063112/1894-08-24/ed-1/?sp=7&q=pullman+strike",
+      "word_coordinates_url": "https://tile.loc.gov/text-services/word-coordinates-service?format=alto_xml&segment=%2Fservice%2Fndnp%2Fsdhi%2Fbatch_sdhi_goshawk_ver03%2Fdata%2Fsn2001063112%2F00415624645%2F1894082401%2F0091.xml&q=pullman+strike&relevant_snippet=1"
+    },
+    {
+      "access_restricted": false,
+      "aka": [
+        "http://www.loc.gov/resource/sn83030214/1917-03-18/ed-2/?sp=38"
+      ],
+      "batch": [
+        "dlc_thompson_ver02"
+      ],
+      "campaigns": [],
+      "composite_location": [
+        "0/united states/",
+        "1/united states/new york/",
+        "2/united states/new york/new york/",
+        "3/united states/new york/new york/new york/"
+      ],
+      "contributor": [
+        "library of congress, washington, dc"
+      ],
+      "date": "1917-03-18",
+      "dates": [
+        "1917-03-18"
+      ],
+      "description": [
+        "THE MENACE OF THE NATIONWIDE STRIKE By JOHN J LBARY JR NOT very long ago the presic of a road notorious for wrc made numerous changes perating rules Soon after he ted upon by brotherhood offiei who notified him that the men had ike because of hardsh worked by the changes We would like an early answe said the spokesman i can have it now replied tive Strike and be hanged The public will oppose any grc of men striking for the privilege killing the public Before you mi that strike order effective recall tl there never was a railroad strike w in which the strikers had public op ion opposed to them lory was repeated by a studf of labor matters last week when wi the threat of a nationwide strike t n was asked as to the proba successs of such a strike he Great Railroad Strikes of IS and IS4 lie opinion will not support strike that threatens to embarrass country on the edge of war said th observer and if that is not enough strike that threatens to starve the cil zen and at the same time deprive tl farmers of the West of a chance"
+      ],
+      "digitized": true,
+      "extract_timestamp": "2024-12-09T13:45:27.221Z",
+      "group": [
+        "ndnp/dlc-2009_2010",
+        "library-of-congress-washington-dc-awardee-3"
+      ],
+      "hassegments": false,
+      "id": "http://www.loc.gov/resource/sn83030214/1917-03-18/ed-2/?sp=38",
+      "image_url": [
+        "https://tile.loc.gov/image-services/iiif/service:ndnp:dlc:batch_dlc_thompson_ver02:data:sn83030214:00206532129:1917031802:0369/full/pct:3.125/0/default.jpg#h=261&w=196",
+        "https://tile.loc.gov/image-services/iiif/service:ndnp:dlc:batch_dlc_thompson_ver02:data:sn83030214:00206532129:1917031802:0369/full/pct:6.25/0/default.jpg#h=522&w=392",
+        "https://tile.loc.gov/image-services/iiif/service:ndnp:dlc:batch_dlc_thompson_ver02:data:sn83030214:00206532129:1917031802:0369/full/pct:12.5/0/default.jpg#h=1045&w=785",
+        "https://tile.loc.gov/text-services/word-coordinates-service?segment=/service/ndnp/dlc/batch_dlc_thompson_ver02/data/sn83030214/00206532129/1917031802/0369.xml&format=alto_xml"
+      ],
+      "index": 2,
+      "language": [
+        "english"
+      ],
+      "location": [
+        "new york city",
+        "new york county",
+        "new york",
+        "united states"
+      ],
+      "location_city": [
+        "new york"
+      ],
+      "location_country": [
+        "united states"
+      ],
+      "location_county": [
+        "new york"
+      ],
+      "location_state": [
+        "new york"
+      ],
+      "mime_type": [
+        "image/jp2",
+        "application/pdf",
+        "text/xml",
+        "image/jpeg",
+        "image/jpeg",
+        "image/jpeg",
+        "application/json",
+        "text/plain"
+      ],
+      "number": [
+        "6",
+        "3",
+        "1",
+        "9",
+        "sn83030214",
+        "2",
+        "0000000038",
+        "0",
+        "5"
+      ],
+      "number_edition": [
+        "2"
+      ],
+      "number_lccn": [
+        "sn83030214"
+      ],
+      "number_page": [
+        "0000000038"
+      ],
+      "number_reel": [
+        "0",
+        "0",
+        "2",
+        "0",
+        "6",
+        "5",
+        "3",
+        "2",
+        "1",
+        "2",
+        "9"
+      ],
+      "online_format": [
+        "image",
+        "pdf",
+        "online text"
+      ],
+      "original_format": [
+        "newspaper"
+      ],
+      "other_title": [
+        "Due to strike, published jointly with other newspapers as: Combined New York morning newspapers",
+        "Combined New York Sunday newspapers",
+        "New-York daily tribune"
+      ],
+      "page_id": "sn83030214-1917-03-18-ed-2-0369",
+      "partof": [
+        "chronicling america",
+        "serial and government publications division",
+        "new-york tribune (new york [n.y.]) 1866-1924"
+      ],
+      "partof_collection": [
+        "chronicling america"
+      ],
+      "partof_division": [
+        "serial and government publications division"
+      ],
+      "partof_title": [
+        "new-york tribune (new york [n.y.]) 1866-1924"
+      ],
+      "publication_frequency": [
+        "daily"
+      ],
+      "resources": [
+        {
+          "files": 1,
+          "url": "https://www.loc.gov/resource/sn83030214/1917-03-18/ed-2/?sp=38"
+        }
+      ],
+      "segmentof": [
+        "http://www.loc.gov/resource/sn83030214/1917-03-18/ed-2/"
+      ],
+      "shelf_id": "38",
+      "site": [
+        "chroniclingamerica"
+      ],
+      "subject": [
+        "https://id.oclc.org/worldcat/entity/e39qbtfrvqh7864jh4rdgbfdwc",
+        "united states",
+        "new york county (n.y.)",
+        "new york county",
+        "new york (n.y.)",
+        "new york",
+        "https://id.oclc.org/worldcat/entity/e39pbjpj8ktvrv6gp6v6tp7pwc",
+        "new york (state)",
+        "newspapers"
+      ],
+      "timestamp": "2024-12-10T14:23:20.406Z",
+      "title": "Image 38 of New-York tribune (New York [N.Y.]), March 18, 1917",
+      "type": [
+        "segment"
+      ],
+      "url": "https://www.loc.gov/resource/sn83030214/1917-03-18/ed-2/?sp=38&q=pullman+strike",
+      "word_coordinates_url": "https://tile.loc.gov/text-services/word-coordinates-service?format=alto_xml&segment=%2Fservice%2Fndnp%2Fdlc%2Fbatch_dlc_thompson_ver02%2Fdata%2Fsn83030214%2F00206532129%2F1917031802%2F0369.xml&q=pullman+strike&relevant_snippet=1"
+    }
+  ]
+}
