@@ -389,6 +389,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "calaccess",
     "scholar",
     "linkedin",
+    "iarchive",
 )
 
 # Connector module name → ``source_kind`` Literal value. Most connectors

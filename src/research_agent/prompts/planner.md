@@ -60,7 +60,7 @@ the schema below.
     `usaspending_search`, `gdelt_search`, `littlesis_search`,
     `nonprofits_search`, `opencorporates_search`, `sanctions_search`,
     `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`,
-    `scholar_search`, `linkedin_search`. **One narrow exception:
+    `scholar_search`, `linkedin_search`, `iarchive_search`. **One narrow exception:
     `web_fetch` is allowed only as the cornerstone-document fetch — see
     the "Cornerstone-document pattern" section below.**
     Do **not** emit any other kind. `*_fetch`, `extract_findings`,
@@ -193,6 +193,7 @@ it does for `web_search`.
 | `calaccess_search` | California Cal-Access campaign finance (Playwright) | `kind: contributions\|independent_expenditures` | `"Newsom"` |
 | `scholar_search` | Google Scholar via SerpAPI — requires `SERPAPI_KEY` | `kind: case_law\|articles` | `"Section 230" appellate` |
 | `linkedin_search` | LinkedIn person/company lookup via Proxycurl or Lix — requires broker key | `kind: person\|company` | `"Sundar Pichai"` |
+| `iarchive_search` | Internet Archive (texts/audio/movies/web) — advancedsearch.php (no auth) | `mediatype: texts\|audio\|movies\|web` | `"Pullman Strike"` |
 
 #### `site:`-scoped fallback (when a direct kind doesn't apply)
 
@@ -218,6 +219,7 @@ connector module on the fetch side.
 | `site:cslb.ca.gov` | `licensing_search` (state: CA) | `site:cslb.ca.gov "SBI Builders"` |
 | `site:bizfileonline.sos.ca.gov` | `sos_search` (state: CA) | `site:bizfileonline.sos.ca.gov "Acme Corp"` |
 | `site:bbb.org` | `bbb_search` | `site:bbb.org "SBI Builders"` |
+| `site:archive.org/details` | `iarchive_search` | `site:archive.org/details "Pullman Strike"` |
 
 ### Payload shapes
 
@@ -227,7 +229,7 @@ connector module on the fetch side.
 - `arxiv_search`: `{ query: "…", sub_question: "…", max_results: 10 }`
 - `local_corpus_query`: `{ query: "…", sub_question: "…", top_k: 10 }`
 - `cornerstone_query`: `{ sub_question: "…", cornerstone_url: "<URL>", top_k: 8 }` (replans only — the index does not exist on the initial plan)
-- direct connector kinds (`congress_search`, `fec_search`, `edgar_search`, `courtlistener_search`, `fedregister_search`, `lda_search`, `usaspending_search`, `gdelt_search`, `littlesis_search`, `nonprofits_search`, `opencorporates_search`, `sanctions_search`, `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`, `scholar_search`, `linkedin_search`): `{ query: "…", sub_question: "…" }` plus the optional knobs noted in the **Direct connector kinds** table above (e.g. `kind`, `state`, `since`, `max_results`).
+- direct connector kinds (`congress_search`, `fec_search`, `edgar_search`, `courtlistener_search`, `fedregister_search`, `lda_search`, `usaspending_search`, `gdelt_search`, `littlesis_search`, `nonprofits_search`, `opencorporates_search`, `sanctions_search`, `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`, `scholar_search`, `linkedin_search`, `iarchive_search`): `{ query: "…", sub_question: "…" }` plus the optional knobs noted in the **Direct connector kinds** table above (e.g. `kind`, `state`, `since`, `max_results`, `mediatype`).
 
 ### When to use each search
 
@@ -591,7 +593,7 @@ or by sub-policy is `broad` or `comprehensive`.
   `usaspending_search`, `gdelt_search`, `littlesis_search`,
   `nonprofits_search`, `opencorporates_search`, `sanctions_search`,
   `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`,
-  `scholar_search`, `linkedin_search`). The single exception is
+  `scholar_search`, `linkedin_search`, `iarchive_search`). The single exception is
   `web_fetch`, allowed only as the cornerstone-document fetch when
   `cornerstone_url` is also set — see the **Cornerstone-document
   pattern** section.

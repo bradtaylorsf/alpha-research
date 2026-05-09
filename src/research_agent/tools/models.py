@@ -48,6 +48,7 @@ SourceKind = Literal[
     "calaccess",
     "scholar",
     "linkedin",
+    "iarchive",
 ]
 
 

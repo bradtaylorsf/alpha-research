@@ -295,6 +295,39 @@ def _smoke_nonprofits(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_iarchive(query: str) -> str:
+    """Smoke wrapper: Internet Archive advancedsearch returning the top-5 hits.
+
+    Per AC: ``research _smoke-tool iarchive_search "Pullman Strike"`` should
+    surface IA items with title, identifier, mediatype, downloads, permalink,
+    and a short snippet so an operator can eyeball whether the public API
+    is reachable.
+    """
+    from research_agent.tools import iarchive
+
+    async def _run() -> str:
+        results = await iarchive.search(query, max_results=5)
+        if not results:
+            return f"iarchive search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            identifier = hit.extras.get("identifier") or "?"
+            mediatype = hit.extras.get("mediatype") or "?"
+            downloads = hit.extras.get("downloads")
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {identifier} — {mediatype} —"
+                f" downloads={downloads}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_linkedin(query: str) -> str:
     """Smoke wrapper: LinkedIn person search + top-hit profile rollup.
 
@@ -1192,6 +1225,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "scholar": _smoke_scholar,
     "linkedin": _smoke_linkedin,
     "fedregister": _smoke_fedregister,
+    "iarchive_search": _smoke_iarchive,
     "nonprofits": _smoke_nonprofits,
     "fec": _smoke_fec,
     "congress": _smoke_congress,

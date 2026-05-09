@@ -192,6 +192,7 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
         "jurisdiction",
         "award_type",
         "language",
+        "mediatype",
     }
 )
 
@@ -347,6 +348,7 @@ _CONNECTOR_KINDS: tuple[str, ...] = (
     "calaccess",
     "scholar",
     "linkedin",
+    "iarchive",
 )
 
 

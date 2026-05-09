@@ -373,6 +373,11 @@ _BBB_HOSTS = frozenset({"www.bbb.org", "bbb.org"})
 _OPENCORPORATES_HOSTS = frozenset(
     {"opencorporates.com", "www.opencorporates.com"}
 )
+# ``archive.org`` is a multi-tenant host (details/, download/, web/, …).
+# Only the ``/details/<identifier>`` path is owned by the iarchive
+# connector — leave web.archive.org Wayback URLs and bare downloads on the
+# generic httpx + trafilatura path.
+_IARCHIVE_HOSTS = frozenset({"archive.org", "www.archive.org"})
 
 _PDF_CONTENT_TYPE = "application/pdf"
 
@@ -693,6 +698,11 @@ async def fetch(
         from research_agent.tools import opencorporates
 
         return await opencorporates.fetch(url)
+
+    if netloc in _IARCHIVE_HOSTS and urlparse(url).path.startswith("/details/"):
+        from research_agent.tools import iarchive
+
+        return await iarchive.fetch(url)
 
     user_agent = _resolve_user_agent()
 
