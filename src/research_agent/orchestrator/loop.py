@@ -35,6 +35,7 @@ import asyncio
 import logging
 import re
 import time
+import traceback
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -520,6 +521,8 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         "synthesize": _synthesize,
         "critique": _critique,
     }
+    _annotate_heuristic_handler(_synthesize, tier="frontier", router=router)
+    _annotate_heuristic_handler(_critique, tier="frontier_alt", router=router)
     for name in _CONNECTOR_KINDS:
         registry[f"{name}_search"] = _make_connector_search_handler(name)
         registry[f"{name}_fetch"] = _make_connector_fetch_handler(name)
@@ -559,6 +562,57 @@ def _should_critique(plan: Plan, tasks_done: int) -> bool:
     """
     n = HEURISTIC_CHECK_EVERY_N * CRITIQUE_CADENCE_MULTIPLIER
     return tasks_done > 0 and tasks_done % n == 0
+
+
+def _configured_model_name(router: Any, tier: str) -> str | None:
+    tiers = getattr(router, "tiers", None)
+    if not isinstance(tiers, dict):
+        return None
+    spec = tiers.get(tier)
+    if not isinstance(spec, dict):
+        return None
+    model = spec.get("model")
+    return model if isinstance(model, str) and model else None
+
+
+def _annotate_heuristic_handler(handler: Handler, *, tier: str, router: Any) -> None:
+    """Attach static LLM context so best-effort heuristic failures are debuggable."""
+    handler._heuristic_tier = tier  # type: ignore[attr-defined]
+    model = _configured_model_name(router, tier)
+    if model is not None:
+        handler._heuristic_model = model  # type: ignore[attr-defined]
+    if router is not None:
+        handler._heuristic_router = router  # type: ignore[attr-defined]
+
+
+def _heuristic_failure_payload(
+    heuristic: str,
+    exc: Exception,
+    handler: Handler,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "heuristic": heuristic,
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+        "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+    }
+    tier = getattr(handler, "_heuristic_tier", None)
+    if isinstance(tier, str) and tier:
+        payload["tier"] = tier
+    model = getattr(handler, "_heuristic_model", None)
+    if isinstance(model, str) and model:
+        payload["model"] = model
+
+    router = getattr(handler, "_heuristic_router", None)
+    last_call = getattr(router, "last_call_metadata", None)
+    if isinstance(last_call, dict):
+        last_tier = last_call.get("tier")
+        last_model = last_call.get("model")
+        if isinstance(last_tier, str) and last_tier:
+            payload["last_llm_tier"] = last_tier
+        if isinstance(last_model, str) and last_model:
+            payload["last_llm_model"] = last_model
+    return payload
 
 
 def _load_latest_plan(job: Job) -> Plan | None:
@@ -2655,7 +2709,7 @@ async def _maybe_run_heuristic(
                     "WARN",
                     "loop",
                     "warning",
-                    {"heuristic": "synthesize", "error": str(exc)},
+                    _heuristic_failure_payload("synthesize", exc, synth),
                 )
             else:
                 checkpoint(
@@ -2674,7 +2728,7 @@ async def _maybe_run_heuristic(
                     "WARN",
                     "loop",
                     "warning",
-                    {"heuristic": "critique", "error": str(exc)},
+                    _heuristic_failure_payload("critique", exc, crit),
                 )
             else:
                 checkpoint(
