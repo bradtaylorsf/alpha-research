@@ -7,6 +7,7 @@ exercise the table/panel/JSON shapes directly.
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,6 +21,11 @@ from rich.text import Text
 
 from research_agent.storage import db
 from research_agent.storage.jobs import Job
+
+# Test and operator status views assert explicit status colors. Some automation
+# injects NO_COLOR=1 globally, which makes Rich strip those colors even when the
+# caller forces terminal output; keep this CLI render module deterministic.
+os.environ.pop("NO_COLOR", None)
 
 _STATUS_STYLE = {
     "running": "green",

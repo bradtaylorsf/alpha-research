@@ -101,6 +101,8 @@ TaskKind = Literal[
     "scholar_fetch",
     "linkedin_search",
     "linkedin_fetch",
+    "trove_search",
+    "trove_fetch",
 ]
 
 ScopeClass = Literal["narrow", "medium", "broad", "comprehensive"]

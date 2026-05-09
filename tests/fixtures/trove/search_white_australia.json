@@ -1,0 +1,57 @@
+{
+  "query": "White Australia Policy",
+  "category": [
+    {
+      "code": "newspaper",
+      "records": {
+        "total": "1",
+        "article": [
+          {
+            "id": "18342701",
+            "heading": "White Australia Policy",
+            "title": {
+              "title": "The Argus"
+            },
+            "date": "1901-12-20",
+            "snippet": [
+              "A metadata-only search result about the White Australia Policy."
+            ],
+            "url": "https://trove.nla.gov.au/newspaper/article/18342701",
+            "trovePageUrl": "https://nla.gov.au/nla.news-article18342701"
+          }
+        ]
+      }
+    },
+    {
+      "code": "book",
+      "records": {
+        "total": "1",
+        "work": [
+          {
+            "id": "37757621",
+            "title": "The White Australia policy",
+            "issued": "1975",
+            "contributor": [
+              "Australian historian"
+            ],
+            "troveUrl": "https://trove.nla.gov.au/work/37757621",
+            "snippet": "Metadata only book hit.",
+            "identifier": [
+              {
+                "type": "url",
+                "linktype": "fulltext",
+                "value": "https://example.org/fulltext/white-australia-policy"
+              }
+            ],
+            "holding": [
+              {
+                "nuc": "ANL",
+                "name": "National Library of Australia"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -373,6 +373,15 @@ _BBB_HOSTS = frozenset({"www.bbb.org", "bbb.org"})
 _OPENCORPORATES_HOSTS = frozenset(
     {"opencorporates.com", "www.opencorporates.com"}
 )
+_TROVE_HOSTS = frozenset(
+    {
+        "trove.nla.gov.au",
+        "www.trove.nla.gov.au",
+        "api.trove.nla.gov.au",
+        "nla.gov.au",
+        "www.nla.gov.au",
+    }
+)
 
 _PDF_CONTENT_TYPE = "application/pdf"
 
@@ -693,6 +702,11 @@ async def fetch(
         from research_agent.tools import opencorporates
 
         return await opencorporates.fetch(url)
+
+    if netloc in _TROVE_HOSTS:
+        from research_agent.tools import trove
+
+        return await trove.fetch(url)
 
     user_agent = _resolve_user_agent()
 

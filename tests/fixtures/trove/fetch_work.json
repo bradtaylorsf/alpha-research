@@ -1,0 +1,28 @@
+{
+  "work": {
+    "id": "37757621",
+    "title": "The White Australia policy",
+    "issued": "1975",
+    "type": [
+      "Book"
+    ],
+    "troveUrl": "https://trove.nla.gov.au/work/37757621",
+    "identifier": [
+      {
+        "type": "url",
+        "linktype": "fulltext",
+        "value": "https://example.org/fulltext/white-australia-policy"
+      }
+    ],
+    "holding": [
+      {
+        "nuc": "ANL",
+        "name": "National Library of Australia"
+      },
+      {
+        "nuc": "VSL",
+        "name": "State Library Victoria"
+      }
+    ]
+  }
+}

@@ -212,6 +212,32 @@ def check_serpapi_cost_note() -> CheckResult:
     )
 
 
+def check_trove_api_note() -> CheckResult:
+    """Surface Trove renewal and metadata-only constraints in doctor output."""
+    name = "trove_api_note"
+    raw = os.environ.get("TROVE_API_KEY")
+    if not raw:
+        return CheckResult(
+            name,
+            "skip",
+            required=False,
+            detail=(
+                "TROVE_API_KEY unset - trove_search disabled; keys expire after"
+                " 12 months; connector is metadata-only to avoid full-text key"
+                " revocation risk"
+            ),
+        )
+    return CheckResult(
+        name,
+        "ok",
+        required=False,
+        detail=(
+            f"present ({mask_secret(raw)}); renew annually; metadata-only default,"
+            " no automatic full-text fetching"
+        ),
+    )
+
+
 def check_models_yaml(path: Path) -> CheckResult:
     """Parse ``config/models.yaml`` — fail if missing or invalid YAML."""
     name = "models_yaml"
@@ -339,6 +365,7 @@ def run_all_checks(
     results.append(check_models_yaml(root / "config" / "models.yaml"))
     results.append(check_tesseract())
     results.append(check_serpapi_cost_note())
+    results.append(check_trove_api_note())
     results.extend(check_sanctions_refresh())
     return results
 
