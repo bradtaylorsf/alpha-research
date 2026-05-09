@@ -5,7 +5,41 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
+from research_agent.tools._registry import (
+    BaseSearchPayload,
+    KindEntry,
+    iter_kinds,
+    register_kind,
+)
 from research_agent.tools.models import SearchResult, Source, SourceKind
+
+# Import every direct-connector module so its module-level `register_kind`
+# call runs and the kind shows up in `iter_kinds()`. The import order is
+# alphabetical for readability, but the registry sorts on read so output
+# stays deterministic regardless of import order. Issue #223: this is the
+# single source of truth — the planner prompt, the orchestrator dispatcher,
+# the README table, and `research doctor` all walk this list.
+from research_agent.tools import (  # noqa: F401, E402 — side-effecting registration
+    bbb,
+    calaccess,
+    congress,
+    courtlistener,
+    edgar,
+    fec,
+    fedregister,
+    gdelt,
+    lda,
+    licensing,
+    linkedin,
+    littlesis,
+    nonprofits,
+    opencorporates,
+    sanctions,
+    scholar,
+    sos,
+    trove,
+    usaspending,
+)
 
 
 def _smoke_web_search(query: str) -> str:
@@ -1250,4 +1284,13 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "youtube": _smoke_youtube,
 }
 
-__all__ = ["TOOL_REGISTRY", "SearchResult", "Source", "SourceKind"]
+__all__ = [
+    "BaseSearchPayload",
+    "KindEntry",
+    "SearchResult",
+    "Source",
+    "SourceKind",
+    "TOOL_REGISTRY",
+    "iter_kinds",
+    "register_kind",
+]

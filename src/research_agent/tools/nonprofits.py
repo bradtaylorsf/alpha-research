@@ -31,6 +31,10 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from research_agent import config
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -539,4 +543,25 @@ def reset_for_tests() -> None:
     _rate_lock = asyncio.Lock()
 
 
-__all__ = ["fetch", "reset_for_tests", "search"]
+KIND = "nonprofits_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=("projects.propublica.org",),
+    skill_name=None,
+    description="ProPublica Nonprofit Explorer (Form 990 filings, no auth)",
+    optional_payload_knobs="—",
+    example_query="Heritage Foundation",
+    module_name="nonprofits",
+)
+
+
+__all__ = ["KIND", "fetch", "reset_for_tests", "search"]

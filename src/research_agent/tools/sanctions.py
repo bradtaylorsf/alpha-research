@@ -59,6 +59,10 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from research_agent import config
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -1086,7 +1090,33 @@ def reset_for_tests() -> None:
     _eu_disabled_logged = False
 
 
+KIND = "sanctions_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=(
+        "sanctionssearch.ofac.treas.gov",
+        "home.treasury.gov",
+        "webgate.ec.europa.eu",
+    ),
+    skill_name=None,
+    description="OFAC SDN + UK sanctions lists (local index, no auth)",
+    optional_payload_knobs="—",
+    example_query="Wagner Group",
+    module_name="sanctions",
+)
+
+
 __all__ = [
+    "KIND",
     "fetch",
     "get_last_refresh",
     "is_list_disabled",

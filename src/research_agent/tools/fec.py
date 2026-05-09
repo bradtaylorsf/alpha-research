@@ -38,6 +38,10 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from research_agent import config
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -895,4 +899,27 @@ def reset_for_tests() -> None:
     _rate_lock = asyncio.Lock()
 
 
-__all__ = ["fetch", "reset_for_tests", "search"]
+KIND = "fec_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    kind: str | None = None
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=("fec.gov", "www.fec.gov", "api.open.fec.gov"),
+    description="Candidates, committees, schedule A/E filings (OpenFEC)",
+    optional_payload_knobs=(
+        "`kind: candidates\\|committees\\|schedules/schedule_a\\|schedules/schedule_e`"
+    ),
+    example_query="Trump 2024 committee",
+    module_name="fec",
+)
+
+
+__all__ = ["KIND", "fetch", "reset_for_tests", "search"]

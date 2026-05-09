@@ -32,6 +32,10 @@ import httpx
 import trafilatura
 
 from research_agent import config
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -435,4 +439,29 @@ def reset_for_tests() -> None:
     _rate_lock = asyncio.Lock()
 
 
-__all__ = ["fetch", "reset_for_tests", "search"]
+KIND = "fedregister_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    since: str | None = None
+    agencies: list[str] | None = None
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=("federalregister.gov", "www.federalregister.gov"),
+    description=(
+        "Federal Register rules, proposed rules, agency notices since 1994"
+        " (no auth)"
+    ),
+    optional_payload_knobs="`since: YYYY-MM-DD`, `agencies: [...]`",
+    example_query="Schedule F",
+    module_name="fedregister",
+)
+
+
+__all__ = ["KIND", "fetch", "reset_for_tests", "search"]

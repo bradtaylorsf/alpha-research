@@ -31,6 +31,10 @@ import httpx
 
 from research_agent import config
 from research_agent.tools._errors import MissingCredentialError
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -722,6 +726,29 @@ async def fetch(url: str, timeout: float = 30.0) -> Source | None:
 def reset_for_tests() -> None:
     global _last_call_monotonic
     _last_call_monotonic = None
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    max_results: int | None = None
+    category: str | list[str] | None = None
+    zone: str | list[str] | None = None
+    sortby: str | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=("trove.nla.gov.au", "api.trove.nla.gov.au"),
+    description=(
+        "Trove / National Library of Australia metadata for newspapers, books,"
+        " photos, magazines, oral histories; metadata-only default"
+    ),
+    optional_payload_knobs="`category`, `zone`, `sortby`",
+    example_query="White Australia Policy 1901",
+    module_name="trove",
+)
 
 
 __all__ = ["KIND", "fetch", "reset_for_tests", "search"]
