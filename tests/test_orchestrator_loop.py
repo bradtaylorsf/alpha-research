@@ -926,6 +926,44 @@ async def test_connector_search_handler_drops_kwargs_connector_does_not_accept(
 
 
 @pytest.mark.asyncio
+async def test_loc_search_handler_passes_collection_and_page_through(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loc connector's ``collection`` and ``page`` knobs must reach
+    ``loc.search`` from a planner-emitted payload — without them the
+    Chronicling America OCR routing path is dead end-to-end.
+    """
+    from research_agent.tools import loc
+
+    captured: dict[str, Any] = {}
+
+    async def fake_search(query: str, **kwargs: Any) -> list[SearchResult]:
+        captured["query"] = query
+        captured["kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(loc, "search", fake_search)
+
+    handler = default_handlers(router=None)["loc_search"]
+    await handler(
+        job,
+        {
+            "kind": "loc_search",
+            "payload": {
+                "query": "pullman strike",
+                "collection": "chronicling-america",
+                "page": 2,
+                "max_results": 5,
+            },
+        },
+    )
+    assert captured["query"] == "pullman strike"
+    assert captured["kwargs"].get("collection") == "chronicling-america"
+    assert captured["kwargs"].get("page") == 2
+    assert captured["kwargs"].get("max_results") == 5
+
+
+@pytest.mark.asyncio
 async def test_run_loop_loads_plan_from_db_when_not_provided(
     job: Job, db_path: Path, plan: Plan
 ) -> None:
