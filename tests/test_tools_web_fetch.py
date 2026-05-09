@@ -551,6 +551,8 @@ def test_browser_module_imported_lazily(monkeypatch):
             "sos",
         ),
         ("https://www.bbb.org/us/ca/santa-clara/profile/general-contractor/sbi", "bbb"),
+        ("https://trove.nla.gov.au/newspaper/article/18342701", "trove"),
+        ("https://nla.gov.au/nla.news-article18342701", "trove"),
     ],
 )
 async def test_fetch_dispatches_to_connector_by_host(monkeypatch, url, module_name):

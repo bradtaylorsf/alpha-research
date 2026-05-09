@@ -547,6 +547,45 @@ def _smoke_opencorporates(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_trove_search(query: str) -> str:
+    """Smoke wrapper: Trove metadata search, skipping when no API key is set."""
+    from research_agent import config
+
+    if not (config.get("TROVE_API_KEY") or "").strip():
+        return (
+            "_smoke-tool trove_search: skipped; would need TROVE_API_KEY "
+            "(keys expire after 12 months; connector is metadata-only)"
+        )
+
+    from research_agent.tools import trove
+
+    async def _run() -> str:
+        results = await trove.search(query, max_results=5)
+        if not results:
+            raise RuntimeError(
+                f"_smoke-tool trove_search: search({query!r}) returned 0 results"
+            )
+        lines: list[str] = [
+            f"trove_search metadata-only: returned {len(results)} hits"
+        ]
+        for hit in results:
+            trove_id = hit.extras.get("trove_id") or "?"
+            zone = hit.extras.get("zone") or "?"
+            pub_date = hit.extras.get("pub_date") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 180:
+                snippet = snippet[:180] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  trove_id: {trove_id} | zone: {zone} | pub_date: {pub_date}\n"
+                f"  snippet: {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_sos(query: str) -> str:
     """Smoke wrapper: California Secretary of State business registry.
 
@@ -1198,6 +1237,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "lda": _smoke_lda,
     "littlesis": _smoke_littlesis,
     "opencorporates": _smoke_opencorporates,
+    "trove_search": _smoke_trove_search,
     "sos": _smoke_sos,
     "licensing": _smoke_licensing,
     "sanctions": _smoke_sanctions,

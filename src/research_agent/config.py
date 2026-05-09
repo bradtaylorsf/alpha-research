@@ -135,6 +135,16 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         ),
     ),
     EnvKey(
+        name="TROVE_API_KEY",
+        required=False,
+        description=(
+            "Trove API key for tools/trove.py (National Library of"
+            " Australia). Keys expire after 12 months. Sent as X-API-KEY;"
+            " connector stays metadata-only because NLA has revoked keys"
+            " for default full-text downloading."
+        ),
+    ),
+    EnvKey(
         name="SERPAPI_KEY",
         required=False,
         description=(

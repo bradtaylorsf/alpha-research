@@ -191,6 +191,7 @@ that list, so there is no drift.
 | `DATA_GOV_API_KEY` | no | api.data.gov key (free w/ signup at <https://api.data.gov/signup/>) — used by `tools/fec.py` (OpenFEC). Authenticated tier is 1,000 req/hr; falls back to `DEMO_KEY` (~40 req/hr per IP) when unset. |
 | `LDA_API_KEY` | no | Senate Lobbying Disclosure Act API key (free, optional, register at <https://lda.senate.gov/api/register/>) — used by `tools/lda.py`. Anonymous works for low-volume; authenticated raises rate limits. Sent via `Authorization: Token <key>`. |
 | `OPENCORPORATES_API_KEY` | no | OpenCorporates API token — used by `tools/opencorporates.py`. **Required for any live request:** anonymous v0.4 access is now gated (returns HTTP 401), so without a key the connector returns no results and smoke skips cleanly. Token rides as `?api_token=<key>`. Public-benefit access by emailing service desk; commercial pricing £2,250–£12,000/yr. |
+| `TROVE_API_KEY` | no | Trove/National Library of Australia API key — used by `tools/trove.py`. Keys expire after 12 months and require renewal by email. Sent as `X-API-KEY`, not a URL parameter. Connector defaults to metadata-only; no automatic full-text downloads. |
 | `SERPAPI_KEY` | no | SERPAPI key — required by `tools/scholar.py` (Google Scholar engine, case law + academic). Plans start at $75/mo for 5k searches across all engines; per-query ≈ $0.015. Sign up at <https://serpapi.com/>. |
 | `LINKEDIN_DATA_API_KEY` | no | LinkedIn data-broker key (default broker: Proxycurl) — required by `tools/linkedin.py`. Per-lookup ≈ $0.01–$0.05; gate fetches behind explicit planner tasks. Sign up at <https://nubela.co/proxycurl/>. |
 | `LINKEDIN_BROKER` | no | Broker recipe used by `tools/linkedin.py`. `proxycurl` (default) or `lix`; switching to `lix` consults `LIX_API_KEY` instead of `LINKEDIN_DATA_API_KEY`. |
@@ -696,6 +697,7 @@ research _smoke-tool web_search "alpha research project"
 research _smoke-tool web_fetch "https://example.com/article"
 research _smoke-tool arxiv "transformer interpretability"
 research _smoke-tool news "federal reserve"
+research _smoke-tool trove_search "White Australia Policy"
 ```
 
 `web_fetch` prints the resolved title, the path that served the fetch

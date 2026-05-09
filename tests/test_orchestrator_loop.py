@@ -389,12 +389,14 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "calaccess",
     "scholar",
     "linkedin",
+    "trove",
 )
 
 # Connector module name → ``source_kind`` Literal value. Most connectors
 # match by name; ``edgar`` is the SEC connector so its source_kind is "sec".
 _CONNECTOR_SOURCE_KIND: dict[str, str] = {p: p for p in CONNECTOR_KIND_PREFIXES}
 _CONNECTOR_SOURCE_KIND["edgar"] = "sec"
+_CONNECTOR_SOURCE_KIND["trove"] = "trove_search"
 
 
 def test_default_handlers_covers_every_task_kind() -> None:

@@ -42,6 +42,7 @@ EXPECTED_SOURCE_KINDS = (
     "calaccess",
     "scholar",
     "linkedin",
+    "trove_search",
 )
 
 
