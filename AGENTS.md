@@ -2,68 +2,73 @@
 # Alpha Research
 
 ## Overview
-Repo for an **autonomous overnight investigative research agent** that runs on a Mac, uses LM Studio for local model work and OpenRouter for cloud synthesis, and persists everything as markdown + SQLite. The Python package (`research_agent`, CLI `research`) is scaffolded under `src/` and is being filled in issue-by-issue via alpha-loop. The top-level `*.md` playbooks remain the strategic source of truth and are themselves project deliverables. Output of this work feeds the broader `Alpha*` agent ecosystem.
+Repo for an **autonomous overnight investigative research agent** that runs on a Mac workstation, uses LM Studio for local model work and OpenRouter for cloud synthesis, and persists research as markdown + SQLite. The Python package (`research_agent`, CLI `research`) now has a functional v1 CLI/daemon baseline: intake, job lifecycle, planner loop, connector dispatch, synthesis/critique, search, export, and compare are in-tree. Connector depth and long-run quality are still being expanded issue-by-issue via alpha-loop. The top-level `*.md` playbooks remain strategic source material and project deliverables. Output of this work feeds the broader `Alpha*` agent ecosystem.
 
 ## Tech Stack
 - Language: **Python 3.12+** (typed, async-first; no TypeScript at the core)
 - Agent framework: **Pydantic AI** + a thin custom orchestrator (no LangGraph in v1)
-- CLI: **Typer** (commands) + **Rich** (live progress) + **Questionary** (interactive intake); entry point `research = "research_agent.cli:app"` and `python -m research_agent` via `__main__.py`
-- Storage: **SQLite** (WAL mode) at `data/index.sqlite` for the cross-job index/queue/checkpoints/events; **markdown + JSON sidecars** for per-job content; auxiliary cached datasets (e.g. `data/sanctions.sqlite`) live alongside, gitignored
-- Model providers: **LM Studio** at `http://localhost:1234/v1` (local, MLX) and **OpenRouter** at `https://openrouter.ai/api/v1` (cloud synthesis)
-- Sources (in-tree connectors, all free / public): **Playwright**-driven web search and per-source recipes (`tools/browser.py`); `httpx` + `trafilatura` + `readability-lxml` (`web_fetch`); `arxiv` + `feedparser` (`arxiv_tool`, `news`); `waybackpy` (`archive`); local PDFs/notes via `pypdf` + `pdfplumber` + `unstructured` (`local_corpus`, `pdf`, `ocr`); audio via `pywhispercpp` / `mlx-whisper` (`audio`); GitHub via the operator's `gh` CLI; plus public-records and disclosure connectors (EDGAR, FEC, USASpending, FedRegister, Congress, CourtListener, GDELT, Scholar, OpenCorporates, Sanctions, LDA, SoS, BBB, Nonprofits, LittleSis, CalAccess, Licensing, LinkedIn-via-browser, Reddit-via-browser, YouTube)
-- Package manager: **uv** (lockfile committed; `.venv/`, ruff/mypy caches gitignored). `uv sync` installs the `dev` group automatically (PEP 735); tests run via `uv run pytest` (wrapped by `scripts/test.sh` for alpha-loop preflight tolerance)
+- CLI: **Typer** commands, **Rich** status/progress rendering, **Questionary** interactive intake; entry point `research = "research_agent.cli:app"` and `python -m research_agent` via `__main__.py`
+- Storage: **SQLite** in WAL mode at `data/index.sqlite` for jobs, tasks, plans, checkpoints, events, sources, findings, FTS5, embeddings, and LLM call ledger; separate `data/llm_cache.sqlite` for wipeable LLM cache; markdown + JSON sidecars for per-job content
+- Model providers: **LM Studio** at `http://localhost:1234/v1` for local tiers and embeddings; **OpenRouter** at `https://openrouter.ai/api/v1` for cloud tiers. Logical tiers are `fast`, `general`, `reasoner`, `vision`, `embeddings`, `frontier`, `frontier_alt`, and `frontier_speed`; `config/models.local.yaml` maps every tier to LM Studio for `--local` runs.
+- Sources/connectors: public-first in-tree connectors using `tools/models.py` (`SearchResult`, `Source`), including Playwright/DDG/Google/Brave web search, `web_fetch` via `httpx` + `trafilatura` + `readability-lxml`, Wayback + archive.today archival, arXiv, RSS/news, local corpus, PDF/OCR/audio/YouTube, Reddit, and the public-records/disclosure family (EDGAR, FEC, Congress, FedRegister, CourtListener, LDA, USAspending, GDELT, LittleSis, Nonprofits, OpenCorporates, Sanctions, BBB, SoS, Licensing, CalAccess, Scholar, LinkedIn)
+- Browser automation: shared Playwright session in `tools/browser.py`, reused by search/fetch and scrape connectors with host-level rate limits and diagnostics under `data/diagnostics/`
+- Package manager: **uv** with committed `uv.lock`; `.venv/`, caches, runtime DBs, logs, jobs, and large artifacts stay gitignored
 
 ## Directory Structure
-- `ai-agent-investigation-playbook.md` — investigative patterns (the "what to do" library)
-- `ai-agent-research-setup.md` — strategic architecture and agent roster
-- `research-agent-implementation-guide.md` — **the v1 build spec; treat as source of truth for code structure and decisions**
-- `CLAUDE.md` — how alpha-loop drives planning/build/PR flow in this repo
-- `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` — public-facing docs (the repo is open-source)
-- `.alpha-loop.yaml` — loop config (repo, label, base branch, test/dev/setup commands)
-- `pyproject.toml`, `uv.lock` — Python project + locked deps
+- `ai-agent-investigation-playbook.md` - investigative patterns and source taxonomy
+- `ai-agent-research-setup.md` - strategic architecture, model routing, and operator setup context
+- `research-agent-implementation-guide.md` - **the v1 build spec; treat as source of truth for architecture and contracts**
+- `OPEN_ARCHIVES_AND_MCP_HANDOFF.md` - transient handoff for future open-archives/MCP issues; convert to issues, then delete or move under `.alpha-loop/handoffs/`
+- `CLAUDE.md` - alpha-loop planning/build/PR conventions for this repo
+- `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE`, `.env.example` - public-facing docs and operator template files
+- `.alpha-loop.yaml`, `.alpha-loop/`, `.agents/skills/` - alpha-loop config, local loop state, and repo-specific Codex skills
+- `.github/ISSUE_TEMPLATE/` - issue templates for agent-ready work, bugs, and epics
+- `pyproject.toml`, `uv.lock` - Python package metadata, scripts, dependencies, package data, and lockfile
 - `src/research_agent/`
-  - `cli.py`, `daemon.py`, `intake.py`, `doctor.py`, `config.py`, `__main__.py` — top-level CLI surface and process entry points
-  - `orchestrator/` — `loop.py`, `plan.py`, `synth.py`, `critique.py`, `checkpoint.py`, `errors.py`
-  - `llm/` — `router.py` (tier→provider), `budgets.py` (cost cap), `cache.py`, `smoke.py`
-  - `tools/` — `browser.py`, `web_search.py`, `web_fetch.py`, plus per-source connectors (`news`, `reddit`, `arxiv_tool`, `archive`, `local_corpus`, `models`, `pdf`, `ocr`, `audio`, `youtube`, `linkedin`, `scholar`, `gdelt`, and the public-records/disclosure family: `edgar`, `fec`, `usaspending`, `fedregister`, `congress`, `courtlistener`, `opencorporates`, `sanctions`, `lda`, `sos`, `bbb`, `nonprofits`, `littlesis`, `calaccess`, `licensing`); shared error helpers in `_errors.py`
-  - `storage/` — `db.py`, `jobs.py`, `markdown.py`, `sources.py`, `tasks.py`, `search.py`, `export.py`, `disk_cap.py`
-  - `observability/events.py` — JSONL + SQLite event mirror
-  - `ui/render.py` — Rich live-progress rendering (TUI/web UI deferred)
-  - `prompts/` — agent-persona templates as markdown (`planner.md`, `researcher.md`, `researcher_cornerstone.md`, `critic.md`, `synthesizer.md`, `intake_followup.md`, `followup_recipes.md`, `paid_unblock_recipes.md`); loaded via `prompts/loader.py`, packaged via `[tool.setuptools.package-data]`
-  - `skills/` — Markdown skill files with YAML frontmatter, two categories: `connectors/<name>.md` (per-connector query/knob/output guidance) and `strategies/<name>.md` (cross-cutting guidance like `triangulation`, `cornerstone-extraction`, `modern-policy-era-filtering`); the planner sees only the frontmatter `description` (its routing index) and the orchestrator deep-loads the body when the connector is about to fire — keeps the system prompt small. Loaded via `skills/loader.py`, packaged via `[tool.setuptools.package-data]`.
-- `config/` — `default.yaml`, `models.yaml` (tier→model routing), `models.local.yaml` (local override), `sources.yaml`, `url_blocklist.yaml`
-- `tests/` — mirrors `src/research_agent/` layout; `tests/fixtures/`, `tests/integration/`
-- `docs/API_KEYS.md` — operator setup notes for model/data provider keys
-- `scripts/test.sh` — tolerant `uv run pytest` wrapper used by alpha-loop preflight
-- `tools/smoke_1hour.sh` — repo-level 1-hour smoke runner (separate from the in-tree `src/research_agent/tools/` connector package)
-- `corpus/` — local research corpus (PDFs, notes); content lives here, gitignored if large
-- `jobs/<job-id>/` — per-job folders (see Code Style); **gitignored**
-- `data/index.sqlite`, `data/sanctions.sqlite`, `data/diagnostics/` — cross-job index, cached datasets, tool diagnostics dumps; **gitignored**
-- `.alpha-loop/`, `.worktrees/`, `runs/`, `logs/`, `sessions/`, `.venv/` — machine-local, **gitignored**
+  - `cli.py`, `daemon.py`, `intake.py`, `doctor.py`, `config.py`, `__main__.py` - CLI, lifecycle, env loading, and process entry points
+  - `orchestrator/` - planner/task loop, synthesis, critique, checkpointing, retry/error boundaries
+  - `llm/` - tier router, budget ledger, cache, and LLM smoke helpers
+  - `tools/` - connector modules plus shared browser, models, and error helpers
+  - `storage/` - SQLite schema/migrations, job folders, markdown/JSON writers, sources, tasks, search, export, disk cap
+  - `observability/events.py` - append-only `events.jsonl` writer plus SQLite event mirror
+  - `ui/render.py` - Rich renderers for jobs, status, logs, search results, and comparisons
+  - `prompts/` - packaged markdown prompts loaded via `prompts.loader`
+  - `skills/` - packaged connector/strategy guidance with YAML frontmatter loaded via `skills.loader`
+- `config/` - `models.yaml`, `models.local.yaml`, `sources.yaml`, `url_blocklist.yaml`, and placeholder `default.yaml`
+- `docs/API_KEYS.md` - operator notes for model and connector credentials
+- `tests/` - mirrors `src/research_agent/`, with fixtures and integration templates
+- `corpus/` - local research corpus root; contents are gitignored
+- `jobs/<job-id>/` - per-job folders; gitignored
+- `data/index.sqlite`, `data/llm_cache.sqlite`, `data/sanctions.sqlite`, `data/diagnostics/` - runtime indexes, caches, and diagnostics; gitignored
+- `.worktrees/`, `runs/`, `logs/`, `sessions/`, `.venv/`, `models/` - machine-local runtime/build artifacts; gitignored
 
 ## Code Style
-- **Read the implementation guide before designing anything new.** `research-agent-implementation-guide.md` already locks the v1 calls (Pydantic AI, SQLite queue, per-job folder, Typer, model routing). Don't re-litigate those decisions in code; if you genuinely need to deviate, raise it in the issue first.
-- **Per-job folder is self-contained.** A job lives entirely under `jobs/<job-id>/` (`job.json`, `intake.json`, `goal.md`, `plan/`, `findings/`, `sources/`, `synthesis/`, `critique/`, `report.md`, `report.history`, `events.jsonl`, `daemon.pid`, `daemon.{out,err}.log`). Cross-job state goes in `data/index.sqlite`. Do not scatter job state elsewhere.
-- **Markdown for content, JSON sidecars for metadata.** Every finding/source/synthesis pass is one `.md` file readable by humans plus one `.json` with the structured fields a UI or indexer needs.
-- **Type structured outputs with Pydantic AI** (`output_type=MySchema`); rely on its retry-on-schema-violation. Don't hand-parse model output.
-- **Prompts live in `src/research_agent/prompts/*.md`**, not as inline string literals. Add new agent personas (or reusable recipe libraries like `followup_recipes.md`) as a new markdown file and load via `prompts.loader`. Editing a persona's behavior means editing the markdown, not the Python.
-- **Skills (connector/strategy guidance) live in `src/research_agent/skills/{connectors,strategies}/*.md`** with required YAML frontmatter (at minimum `description:`, which is the routing signal the planner sees). The body is deep-loaded only when the connector fires — keep it focused on knobs, output shape, and pitfalls so the system prompt stays small. Add new connector skills alongside the connector module; load via `skills.loader`, never inline strings.
-- **Model routing is config-driven.** Pick a *tier* (`fast_local`, `accurate_local`, `synth_cloud`, etc.) in code; `config/models.yaml` (with `models.local.yaml` overlay) decides which model serves it. Never hardcode model names in business logic.
-- **Cost cap is enforced in `llm/budgets.py`** at the OpenRouter wrapper layer — every cloud call passes through it.
-- **Every state transition is checkpointed** via `orchestrator/checkpoint.py`. A daemon killed mid-run must be resumable from the last checkpoint with `research resume <job-id>`.
-- **Observability:** every tool call, model call, and decision emits a structured event to `jobs/<job-id>/events.jsonl` *and* mirrors into the SQLite `events` table via `observability/events.py`. JSONL is the surface a future TUI/web UI tails — don't print-and-forget.
-- **Sources stay deduped and archived.** A fetched URL is hashed (sha256), stored once under `sources/<sha256>.{md,json}`, and a Wayback save is attempted on first fetch.
-- **Disk usage is capped.** New writers under `jobs/`/`data/` go through `storage/disk_cap.py` so a runaway crawl can't fill the disk; respect the cap rather than bypassing it.
-- **Naming:** snake_case modules, PascalCase Pydantic models, verb-on-noun for CLI subcommands (`research start`, `research view`, `research doctor`, `research resume`), mirroring `git`'s shape. CLI subcommand groups use a Typer sub-app (e.g. `research config cache-clear`).
-- **No planning docs as ad-hoc files in the repo root.** Plans go in the GitHub issue body or comments; long-form research goes in the existing top-level `*.md` playbooks (and links from issues). Don't create scratch `NOTES.md` / `PLAN.md` files.
-- **Tests live in `tests/`** mirroring `src/research_agent/` layout; fixtures under `tests/fixtures/`, slow/network-touching integration tests under `tests/integration/`.
+- **Read the implementation guide before designing anything new.** `research-agent-implementation-guide.md` locks the v1 decisions: Pydantic AI, SQLite queue, per-job folders, Typer CLI, model tiers, and source/sidecar contracts.
+- **Per-job folder is self-contained.** A job lives under `jobs/<job-id>/` with `job.json`, `intake.json`, `goal.md`, `plan/`, `findings/`, `sources/`, `synthesis/`, `critique/`, `report.md`, `report.history/`, `archive/`, `events.jsonl`, `daemon.pid`, `daemon.{out,err}.log`, and optional `STOP`.
+- **Job IDs are deterministic and safe.** They use `YYYY-MM-DD-<slug>` from the goal, with slug validation in `storage/jobs.py`; do not bypass that constructor.
+- **Markdown for content, JSON sidecars for metadata.** Findings, plans, sources, syntheses, critiques, and reports must remain human-readable on disk and machine-indexable in SQLite.
+- **Use atomic file writes.** Project writers use `*.tmp` + `os.replace`; new writers under job/data paths should follow the same pattern.
+- **Type structured model outputs with Pydantic AI** (`output_type=MySchema`) and rely on schema retries rather than hand-parsing model text.
+- **Prompts live in `src/research_agent/prompts/*.md`.** Persona or recipe behavior belongs in markdown and is loaded through `prompts.loader`, not embedded as Python string literals.
+- **Skills live in `src/research_agent/skills/{connectors,strategies}/*.md`.** Each skill needs YAML frontmatter with at least `description:`; planner sees descriptions, and the orchestrator deep-loads bodies only when relevant.
+- **Connector modules expose async `search()` and `fetch()`.** Use `SearchResult`/`Source`, stash connector-specific structure in `.extras`/`.metadata`, enforce polite rate limits, and wire new task kinds through `TaskKind`, planner prompt allowlists, loop dispatch, and smoke registry as applicable.
+- **Model routing is config-driven.** Business logic selects tiers (`general`, `frontier`, etc.); `config/models.yaml` and `config/models.local.yaml` decide providers/models. Do not hardcode model names outside routing/config-specific code.
+- **Cloud spend is explicit.** Normal LLM calls go through `Router` and `BudgetTracker` in `llm/budgets.py`; the PDF/OCR VLM escalation paths are the rare direct OpenRouter exceptions and must stay env-gated with WARN events before the call.
+- **Checkpoint every state transition.** The daemon must be resumable with `research resume <job-id>` from the latest checkpoint after a crash or kill.
+- **Emit structured observability.** Tool calls, model calls, decisions, warnings, and checkpoints append to `events.jsonl` and mirror into SQLite via `observability/events.py`.
+- **Sources are deduped by content hash in SQLite and materialized per job.** `storage/sources.py` hashes cleaned content, links via `job_sources`, writes `sources/<sha256>.{md,json}` into the active job, and rehydrates pruned files when refetched.
+- **Archive first-fetch URLs best-effort.** `web_fetch` spawns Wayback Save Page Now and falls back to archive.today; archive failures should warn, not fail the fetch.
+- **Respect disk caps.** Writers under `jobs/` and `data/` must work with `storage/disk_cap.py`; pruning removes low-relevance source markdown but keeps audit rows.
+- **Env vars are centrally registered.** New runtime keys belong in `config.py:EXPECTED_ENV_KEYS`, `.env.example`, README/API key docs as applicable, and should be read through `research_agent.config.get()`.
+- **Naming:** snake_case modules, PascalCase Pydantic models, and verb-on-noun CLI subcommands mirroring `git` shape (`research start`, `research view`, `research config cache-clear`).
+- **No root scratch docs.** Plans belong in GitHub issues/comments; long-form research belongs in the existing top-level playbooks. Do not add ad-hoc `NOTES.md`, `PLAN.md`, or similar files in the repo root.
 
 ## Non-Negotiables
-- **GitHub Issues are the source of truth.** No work without an issue; PRs must close their issue (`Closes #N`). See `CLAUDE.md` for the alpha-loop workflow — don't bypass it.
-- **Never commit secrets or large artifacts.** `.env*` files, API keys (OpenRouter, GitHub, etc.), `*.gguf`/`*.safetensors`/`*.pt` model weights, and the contents of `data/`, `jobs/`, `runs/`, `logs/`, `sessions/`, `models/`, `.worktrees/` are gitignored — keep it that way. If a publishable artifact must be tracked, promote it to a curated dir and `git add -f` deliberately. The repo is public, so treat every diff as if it will be read by strangers.
-- **Outbound actions go through the judge gate.** Any task with `outbound: true` (email, FOIA, web form, voice) is held for the judge agent / human review queue — never let the planner or a worker dispatch outbound side-effects directly. v1 keeps outbound out of scope; if you're adding it, you're adding the gate at the same time.
-- **SQLite uses WAL mode.** Don't disable it; concurrent reader (UI/CLI) + long-running writer (daemon) depends on it.
-- **Local vs. cloud routing is not optional.** Cheap/iterative work (query rewriting, source filtering, per-source extraction) goes to LM Studio. Synthesis, planning rewrites, and gap analysis go to OpenRouter. Don't run cheap loops against the cloud — the cost cap will trip and the run will halt.
-- **Don't break the per-job folder contract.** External tools (`research view`, `research export`, future UIs) read `jobs/<job-id>/` by convention. Renaming files or skipping sidecars silently breaks them.
-- **Research playbooks are content, not scratch.** `ai-agent-investigation-playbook.md`, `ai-agent-research-setup.md`, and `research-agent-implementation-guide.md` are the project's deliverables-in-progress. Edit them deliberately (via an issue), not as a side effect of unrelated work.
-- **No paid third-party data APIs.** All web search, news, and social scraping go through Playwright against public sites via the shared session manager in `tools/browser.py`. Free public APIs that don't require app registration (or only require a free, no-cost key) are OK — arXiv, Wayback, GitHub via the operator's already-authenticated `gh` CLI, and the public-records family already wired up (EDGAR, FEC, USASpending, FedRegister, Congress, CourtListener, GDELT, etc.). The only paid third party in v1 is **OpenRouter** for cloud LLM synthesis. **Do not add** Tavily, Brave Search, NewsCatcher, Reddit OAuth/PRAW, SerpAPI, or similar — add a Playwright recipe instead. (Note: `reddit.py` and `linkedin.py` are Playwright/public-endpoint connectors, not OAuth SDKs — keep them that way.)
+- **GitHub Issues are the source of truth.** No work without an issue; PRs must close their issue (`Closes #N`). See `CLAUDE.md` for the alpha-loop workflow.
+- **Never commit secrets or large artifacts.** `.env*` files except `.env.example`, API keys, model weights, `data/`, `jobs/`, `runs/`, `logs/`, `sessions/`, `models/`, `.worktrees/`, and local corpus contents stay out of git unless deliberately promoted.
+- **Outbound actions go through the judge gate.** Any task with `outbound: true` (email, FOIA, web form, voice) must wait for judge/human review; planner and workers must not dispatch outbound side effects directly.
+- **SQLite uses WAL mode.** Do not disable WAL or foreign-key enforcement on the main index; concurrent CLI/UI readers and daemon writers depend on it.
+- **No silent paid reroutes.** Cheap iterative work should stay on local tiers by default; any cloud fallback must be configured, visible in events, and budget-tracked. `--local` means all tiers use LM Studio and cloud health checks are skipped.
+- **Do not break the per-job folder contract.** CLI commands, exports, comparisons, search, and future UIs read `jobs/<job-id>/` by convention.
+- **Research playbooks are deliverables, not scratch.** Edit `ai-agent-investigation-playbook.md`, `ai-agent-research-setup.md`, and `research-agent-implementation-guide.md` only when the issue is about those artifacts.
+- **No unapproved paid data APIs.** Prefer public/free APIs or Playwright recipes. Existing explicit paid/gated exceptions are OpenRouter, Scholar via SerpAPI, and LinkedIn via Proxycurl/Lix; keep them documented, env-gated, and used only through explicit planner tasks.
