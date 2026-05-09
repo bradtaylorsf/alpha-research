@@ -42,6 +42,7 @@ EventKind = Literal[
     "synthesis_done",
     "synthesis_written",
     "synthesis_failed",
+    "orphan_artifact_cleaned",
     "critique_done",
     "critique_written",
     "drain_replan",

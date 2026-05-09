@@ -363,6 +363,57 @@ async def test_run_daemon_stops_on_stop_flag(
 
 
 @pytest.mark.asyncio
+async def test_run_daemon_sweeps_stale_orphan_artifacts_on_startup(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_partial = seeded_job.root / "synthesis" / "0004.partial.md"
+    old_tmp = seeded_job.root / "critique" / "0002.md.tmp"
+    young_partial = seeded_job.root / "plan" / "0003.partial.md"
+    old_partial.write_text("", encoding="utf-8")
+    old_tmp.write_text("half-written critique", encoding="utf-8")
+    young_partial.write_text("still being written", encoding="utf-8")
+
+    now = time.time()
+    old_mtime = now - daemon.ORPHAN_ARTIFACT_MAX_AGE_S - 1
+    os.utime(old_partial, (old_mtime, old_mtime))
+    os.utime(old_tmp, (old_mtime, old_mtime))
+    os.utime(young_partial, (now, now))
+
+    async def _instant_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"tasks_done": 0, "stopped": True, "completed": False, "cap_hit": False}
+
+    _patch_run_daemon_for_in_process(monkeypatch, run_loop_impl=_instant_run_loop)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+
+    assert exit_code == 0
+    assert not old_partial.exists()
+    assert not old_tmp.exists()
+    assert young_partial.exists()
+
+    conn = db.connect(seeded_job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'orphan_artifact_cleaned'"
+            " ORDER BY id ASC",
+            (seeded_job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    cleaned_paths = {json.loads(row["payload_json"])["path"] for row in rows}
+    assert cleaned_paths == {"synthesis/0004.partial.md", "critique/0002.md.tmp"}
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        assert payload["age_seconds"] >= daemon.ORPHAN_ARTIFACT_MAX_AGE_S
+
+
+@pytest.mark.asyncio
 async def test_run_daemon_sigterm_routes_through_same_graceful_path(
     seeded_job: Job, monkeypatch: pytest.MonkeyPatch
 ) -> None:
