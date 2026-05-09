@@ -196,6 +196,7 @@ connector module on the fetch side.
 | `site:bizfileonline.sos.ca.gov` | `sos_search` (state: CA) | `site:bizfileonline.sos.ca.gov "Acme Corp"` |
 | `site:bbb.org` | `bbb_search` | `site:bbb.org "SBI Builders"` |
 | `site:loc.gov` | `loc_search` | `site:loc.gov "battle of algiers"` |
+| `site:archive.org/details` | `iarchive_search` | `site:archive.org/details "Pullman Strike"` |
 
 ### Payload shapes
 

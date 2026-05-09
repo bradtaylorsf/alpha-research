@@ -382,6 +382,11 @@ _TROVE_HOSTS = frozenset(
         "www.nla.gov.au",
     }
 )
+# ``archive.org`` is a multi-tenant host (details/, download/, web/, …).
+# Only the ``/details/<identifier>`` path is owned by the iarchive
+# connector — leave web.archive.org Wayback URLs and bare downloads on the
+# generic httpx + trafilatura path.
+_IARCHIVE_HOSTS = frozenset({"archive.org", "www.archive.org"})
 
 _PDF_CONTENT_TYPE = "application/pdf"
 
@@ -707,6 +712,11 @@ async def fetch(
         from research_agent.tools import trove
 
         return await trove.fetch(url)
+
+    if netloc in _IARCHIVE_HOSTS and urlparse(url).path.startswith("/details/"):
+        from research_agent.tools import iarchive
+
+        return await iarchive.fetch(url)
 
     user_agent = _resolve_user_agent()
 

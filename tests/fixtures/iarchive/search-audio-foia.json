@@ -1,0 +1,38 @@
+{
+  "responseHeader": {
+    "status": 0,
+    "QTime": 21,
+    "params": {
+      "q": "FOIA AND mediatype:audio",
+      "rows": "20",
+      "start": 0,
+      "wt": "json"
+    }
+  },
+  "response": {
+    "numFound": 47,
+    "start": 0,
+    "docs": [
+      {
+        "identifier": "foia_oral_history_1974",
+        "title": "FOIA oral history: amendments of 1974",
+        "creator": "National Security Archive",
+        "date": "1995-03-14",
+        "description": "Oral-history panel with congressional staff who drafted the 1974 FOIA amendments.",
+        "mediatype": "audio",
+        "downloads": 318,
+        "publicdate": "2012-04-21T16:00:00Z"
+      },
+      {
+        "identifier": "wnyc_foia_panel_2003",
+        "title": "WNYC: FOIA at 35 — accountability journalism panel",
+        "creator": "WNYC Radio",
+        "date": "2003-07-05",
+        "description": "Studio panel on the role of FOIA in post-9/11 accountability journalism.",
+        "mediatype": "audio",
+        "downloads": 124,
+        "publicdate": "2016-08-09T11:18:33Z"
+      }
+    ]
+  }
+}

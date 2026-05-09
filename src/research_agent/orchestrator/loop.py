@@ -199,6 +199,7 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
         "sortby",
         "collection",
         "page",
+        "mediatype",
     }
 )
 
