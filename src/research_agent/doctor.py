@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -321,6 +322,149 @@ def check_sanctions_refresh() -> list[CheckResult]:
     return results
 
 
+def check_planner_allowlist_coherence() -> CheckResult:
+    """Assert the planner prompt + the connector registry agree on kinds.
+
+    Issue #223: the registry is the single source of truth and the planner
+    prompt is rendered from it. Drift between (a) registered kinds and the
+    Hard-rules allowlist, (b) the allowlist and the registry, or (c) the
+    Direct kinds table row count is a structural failure — it means a
+    planner that has fanned out to a connector kind the orchestrator can't
+    dispatch (or, more often, a kind that ships in the orchestrator but
+    the planner doesn't know about).
+
+    Required check: a registered kind missing from the allowlist would
+    leave the planner unable to use a shipped connector; an orphan
+    allowlist entry would let the planner emit a kind no handler exists
+    for. Either is a hard fail.
+    """
+    name = "planner_allowlist_coherence"
+    try:
+        from research_agent.prompts.loader import _render_registry_vars
+        from research_agent.tools._registry import iter_kinds
+
+        registered = {entry.name for entry in iter_kinds()}
+        # Render against the registry without touching the prompt cache —
+        # ``load_prompt_meta`` would emit ``prompt_loaded`` to stdout and
+        # contaminate ``doctor --json`` output for downstream consumers.
+        rendered = _render_registry_vars()
+        # The Hard-rules sentence carries the allowlist. We pull every
+        # backticked ``<x>_search`` token from the rendered allowlist and
+        # compare to the registry. The sentence-level rendering is what
+        # the model actually reads, so we validate against that.
+        allowlist_text = rendered["kinds_allowlist"]
+        listed = set(re.findall(r"`([a-z_]+_search)`", allowlist_text))
+        registered_missing = registered - listed
+        orphan = listed - registered
+        # The Direct kinds table must contain exactly one row per kind.
+        # Each rendered row begins with ``| `<x>_search` ``.
+        table_text = rendered["direct_kinds_table"]
+        table_kinds = re.findall(r"\|\s*`([a-z_]+_search)`\s*\|", table_text)
+        table_set = set(table_kinds)
+        table_dupes = [k for k in table_kinds if table_kinds.count(k) > 1]
+        table_missing = registered - table_set
+        problems: list[str] = []
+        if registered_missing:
+            problems.append(
+                f"registered but not in allowlist: {sorted(registered_missing)}"
+            )
+        if orphan:
+            problems.append(f"in allowlist but not registered: {sorted(orphan)}")
+        if table_missing:
+            problems.append(
+                f"registered but no Direct-kinds-table row: {sorted(table_missing)}"
+            )
+        if table_dupes:
+            problems.append(f"duplicate table rows: {sorted(set(table_dupes))}")
+        if problems:
+            return CheckResult(
+                name,
+                "fail",
+                required=True,
+                detail="; ".join(problems),
+            )
+        return CheckResult(
+            name,
+            "ok",
+            required=True,
+            detail=(
+                f"{len(registered)} kinds round-trip through allowlist + table"
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — surface every failure mode
+        return CheckResult(
+            name,
+            "fail",
+            required=True,
+            detail=f"coherence check raised {type(exc).__name__}: {exc}",
+        )
+
+
+def check_registry_skill_coherence() -> list[CheckResult]:
+    """Assert each registered kind's skill file exists and parses.
+
+    Issue #223: every connector PR ships a ``skills/connectors/<name>.md``
+    file (per #211/#212). Kinds with ``skill_name=None`` are grandfathered
+    from the existing-connector skills backfill — they ``skip`` rather than
+    fail. Kinds whose ``skill_name`` is set but the file is missing are a
+    hard ``fail`` (the planner would fall back to a description-only path).
+    """
+    from research_agent.skills.loader import SkillParseError, _parse, _skills_dir
+    from research_agent.tools._registry import iter_kinds
+
+    results: list[CheckResult] = []
+    for entry in iter_kinds():
+        row = f"registry_skill:{entry.name}"
+        if entry.skill_name is None:
+            results.append(
+                CheckResult(
+                    row,
+                    "skip",
+                    required=False,
+                    detail=(
+                        f"{entry.name} grandfathered (skill_name=None);"
+                        " backfill pending"
+                    ),
+                )
+            )
+            continue
+        path = _skills_dir("connectors") / f"{entry.skill_name}.md"
+        if not path.exists():
+            results.append(
+                CheckResult(
+                    row,
+                    "fail",
+                    required=True,
+                    detail=(
+                        f"missing skills/connectors/{entry.skill_name}.md"
+                        f" for kind {entry.name}"
+                    ),
+                )
+            )
+            continue
+        try:
+            _parse("connectors", entry.skill_name, path)
+        except SkillParseError as exc:
+            results.append(
+                CheckResult(
+                    row,
+                    "fail",
+                    required=True,
+                    detail=f"{path}: {exc}",
+                )
+            )
+            continue
+        results.append(
+            CheckResult(
+                row,
+                "ok",
+                required=True,
+                detail=f"skills/connectors/{entry.skill_name}.md parses",
+            )
+        )
+    return results
+
+
 def run_all_checks(
     loaded_env_files: list[Path],
     *,
@@ -340,6 +484,8 @@ def run_all_checks(
     results.append(check_tesseract())
     results.append(check_serpapi_cost_note())
     results.extend(check_sanctions_refresh())
+    results.append(check_planner_allowlist_coherence())
+    results.extend(check_registry_skill_coherence())
     return results
 
 

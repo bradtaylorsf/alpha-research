@@ -73,6 +73,40 @@ Blue = local LM Studio tiers (free at the wallet). Orange = OpenRouter
 cloud tiers (priced — see [Costs](#costs)). The full tier roster lives in
 [`config/models.yaml`](config/models.yaml).
 
+## Direct connector kinds
+
+The planner can dispatch directly to any of the connectors below instead
+of falling back to `web_search` with a `site:` operator. Each row here
+mirrors what the planner sees in its system prompt — same description,
+same optional payload knobs, same example query. The table is generated
+from `src/research_agent/tools/_registry.py` via
+`scripts/regen_readme_kinds.py`; do not hand-edit between the sentinels.
+
+<!-- BEGIN: direct-connector-kinds (auto-generated) -->
+
+| Kind | What it covers | Optional payload knobs | Example query |
+|---|---|---|---|
+| `bbb_search` | Better Business Bureau profiles + ratings (Playwright, no auth) | — | `SBI Builders` |
+| `calaccess_search` | California Cal-Access campaign finance (Playwright) | `kind: contributions\|independent_expenditures` | `Newsom` |
+| `congress_search` | Bills, members, committees, hearings, congressional record (Congress.gov v3 API) | `kind: bill\|member\|committee\|hearing\|congressional-record` | `Inflation Reduction Act` |
+| `courtlistener_search` | Federal & state court opinions, dockets (RECAP), oral arguments — requires `COURTLISTENER_API_TOKEN` | `kind: opinions\|dockets\|oral_arguments` | `Schedule F appellate` |
+| `edgar_search` | SEC filings (10-K, 10-Q, 8-K, Form 4) — requires `RESEARCH_USER_AGENT` w/ contact email | `form_type: 10-K\|8-K\|...` | `Cisco cybersecurity` |
+| `fec_search` | Candidates, committees, schedule A/E filings (OpenFEC) | `kind: candidates\|committees\|schedules/schedule_a\|schedules/schedule_e` | `Trump 2024 committee` |
+| `fedregister_search` | Federal Register rules, proposed rules, agency notices since 1994 (no auth) | `since: YYYY-MM-DD`, `agencies: [...]` | `Schedule F` |
+| `gdelt_search` | GDELT — Global news event aggregator, no `site:` operator (no auth) | `since: YYYY-MM-DD`, `language: english` | `Project 2025 mainstream coverage` |
+| `lda_search` | Senate Lobbying Disclosure Act filings (registrants, contributions) | `kind: filings\|registrants\|contributions` | `Heritage Foundation` |
+| `licensing_search` | State contractor / licensing-board lookups (Playwright; CA wired, others stubs) | `state: CA\|TX\|FL\|NY` | `SBI Builders` |
+| `linkedin_search` | LinkedIn person/company lookup via Proxycurl or Lix — requires broker key | `kind: person\|company` | `Sundar Pichai` |
+| `littlesis_search` | Power-mapping database — entities, donations, board seats, family ties (lead, not evidence) | `kind: entities\|relationships` | `Peter Thiel` |
+| `nonprofits_search` | ProPublica Nonprofit Explorer (Form 990 filings, no auth) | — | `Heritage Foundation` |
+| `opencorporates_search` | Global company registry — requires `OPENCORPORATES_API_KEY` | `jurisdiction: us_ca\|gb\|...` | `Acme Holdings` |
+| `sanctions_search` | OFAC SDN + UK sanctions lists (local index, no auth) | — | `Wagner Group` |
+| `scholar_search` | Google Scholar via SerpAPI — requires `SERPAPI_KEY` | `kind: case_law\|articles` | `Section 230 appellate` |
+| `sos_search` | State Secretary-of-State business entity filings (Playwright; CA wired, others stubs) | `state: CA\|DE\|NV\|...` | `Acme Corp` |
+| `usaspending_search` | Federal contracts, grants, loans (award-level detail, no auth) | `award_type: contracts\|grants\|loans` | `Heritage Foundation contract` |
+
+<!-- END: direct-connector-kinds -->
+
 ## What does the output actually look like?
 
 Every job ends with a `jobs/<job-id>/report.md` — markdown with inline

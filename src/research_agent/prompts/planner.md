@@ -55,12 +55,7 @@ the schema below.
     `web_search`, `news_search`, `reddit_search`, `arxiv_search`,
     `local_corpus_query`, `cornerstone_query` (replans only — see
     below), plus the **direct connector kinds**:
-    `congress_search`, `fec_search`, `edgar_search`,
-    `courtlistener_search`, `fedregister_search`, `lda_search`,
-    `usaspending_search`, `gdelt_search`, `littlesis_search`,
-    `nonprofits_search`, `opencorporates_search`, `sanctions_search`,
-    `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`,
-    `scholar_search`, `linkedin_search`. **One narrow exception:
+    {{kinds_allowlist}}. **One narrow exception:
     `web_fetch` is allowed only as the cornerstone-document fetch — see
     the "Cornerstone-document pattern" section below.**
     Do **not** emit any other kind. `*_fetch`, `extract_findings`,
@@ -173,26 +168,7 @@ optional `kind`, `state`, `since`, or `max_results` knobs (noted
 below). The loop turns top hits into `web_fetch` follow-ups exactly as
 it does for `web_search`.
 
-| Kind | What it covers | Optional payload knobs | Example query |
-|---|---|---|---|
-| `congress_search` | Bills, members, committees, hearings, congressional record (Congress.gov v3 API) | `kind: bill\|member\|committee\|hearing\|congressional-record` | `"Inflation Reduction Act"` |
-| `fec_search` | Candidates, committees, schedule A/E filings (OpenFEC) | `kind: candidates\|committees\|schedules/schedule_a\|schedules/schedule_e` | `"Trump 2024" committee` |
-| `edgar_search` | SEC filings (10-K, 10-Q, 8-K, Form 4) — requires `RESEARCH_USER_AGENT` w/ contact email | `form_type: 10-K\|8-K\|...` | `"Cisco" cybersecurity` |
-| `courtlistener_search` | Federal & state court opinions, dockets (RECAP), oral arguments — requires `COURTLISTENER_API_TOKEN` | `kind: opinions\|dockets\|oral_arguments` | `"Schedule F" appellate` |
-| `fedregister_search` | Federal Register rules, proposed rules, agency notices since 1994 (no auth) | `since: YYYY-MM-DD`, `agencies: [...]` | `"Schedule F"` |
-| `lda_search` | Senate Lobbying Disclosure Act filings (registrants, contributions) | `kind: filings\|registrants\|contributions` | `"Heritage Foundation"` |
-| `usaspending_search` | Federal contracts, grants, loans (award-level detail, no auth) | `award_type: contracts\|grants\|loans` | `"Heritage Foundation" contract` |
-| `gdelt_search` | GDELT — Global news event aggregator, no `site:` operator (no auth) | `since: YYYY-MM-DD`, `language: english` | `Project 2025 mainstream coverage` |
-| `littlesis_search` | Power-mapping database — entities, donations, board seats, family ties (lead, not evidence) | `kind: entities\|relationships` | `"Peter Thiel"` |
-| `nonprofits_search` | ProPublica Nonprofit Explorer (Form 990 filings, no auth) | — | `"Heritage Foundation"` |
-| `opencorporates_search` | Global company registry — requires `OPENCORPORATES_API_KEY` | `jurisdiction: us_ca\|gb\|...` | `"Acme Holdings"` |
-| `sanctions_search` | OFAC SDN + UK sanctions lists (local index, no auth) | — | `"Wagner Group"` |
-| `bbb_search` | Better Business Bureau profiles + ratings (Playwright, no auth) | — | `"SBI Builders"` |
-| `licensing_search` | State contractor / licensing-board lookups (Playwright; CA wired, others stubs) | `state: CA\|TX\|FL\|NY` | `"SBI Builders"` |
-| `sos_search` | State Secretary-of-State business entity filings (Playwright; CA wired, others stubs) | `state: CA\|DE\|NV\|...` | `"Acme Corp"` |
-| `calaccess_search` | California Cal-Access campaign finance (Playwright) | `kind: contributions\|independent_expenditures` | `"Newsom"` |
-| `scholar_search` | Google Scholar via SerpAPI — requires `SERPAPI_KEY` | `kind: case_law\|articles` | `"Section 230" appellate` |
-| `linkedin_search` | LinkedIn person/company lookup via Proxycurl or Lix — requires broker key | `kind: person\|company` | `"Sundar Pichai"` |
+{{direct_kinds_table}}
 
 #### `site:`-scoped fallback (when a direct kind doesn't apply)
 
@@ -227,7 +203,7 @@ connector module on the fetch side.
 - `arxiv_search`: `{ query: "…", sub_question: "…", max_results: 10 }`
 - `local_corpus_query`: `{ query: "…", sub_question: "…", top_k: 10 }`
 - `cornerstone_query`: `{ sub_question: "…", cornerstone_url: "<URL>", top_k: 8 }` (replans only — the index does not exist on the initial plan)
-- direct connector kinds (`congress_search`, `fec_search`, `edgar_search`, `courtlistener_search`, `fedregister_search`, `lda_search`, `usaspending_search`, `gdelt_search`, `littlesis_search`, `nonprofits_search`, `opencorporates_search`, `sanctions_search`, `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`, `scholar_search`, `linkedin_search`): `{ query: "…", sub_question: "…" }` plus the optional knobs noted in the **Direct connector kinds** table above (e.g. `kind`, `state`, `since`, `max_results`).
+- direct connector kinds ({{kinds_allowlist}}): `{ query: "…", sub_question: "…" }` plus the optional knobs noted in the **Direct connector kinds** table above (e.g. `kind`, `state`, `since`, `max_results`).
 
 ### When to use each search
 
@@ -374,12 +350,9 @@ so you can convert high-confidence claims into per-proposal follow-ups.
    `sub_question` MUST mention the specific name verbatim (e.g.
    `"What is the comment-period status of the WOTUS rulemaking?"`, not
    `"What EPA rules are pending?"`). Prefer the **direct connector kind**
-   when one matches the subject's shape (e.g. `fedregister_search`,
-   `courtlistener_search`, `congress_search`, `edgar_search`,
-   `nonprofits_search`, `fec_search`, `lda_search`, `usaspending_search`,
-   `littlesis_search`, `sanctions_search`) — one round trip, structured
-   JSON. Fall back to `site:`-scoped `web_search` only when no direct
-   kind covers the case.
+   when one matches the subject's shape (any of: {{tactical_replan_kinds}})
+   — one round trip, structured JSON. Fall back to `site:`-scoped
+   `web_search` only when no direct kind covers the case.
 3. **Forbidden in replans:** generic umbrella queries that retread v1's
    territory. If the findings already name `WOTUS rulemaking` and
    `Schedule F`, do **NOT** emit `Project 2025 EPA` or `Project 2025
@@ -585,16 +558,10 @@ or by sub-policy is `broad` or `comprehensive`.
 - Output ONLY the fenced YAML block. No prose, no preamble, no postscript.
 - Every `kind` MUST be one of: `web_search`, `news_search`, `reddit_search`,
   `arxiv_search`, `local_corpus_query`, `cornerstone_query` (replans
-  only), or one of the direct connector kinds (`congress_search`,
-  `fec_search`, `edgar_search`,
-  `courtlistener_search`, `fedregister_search`, `lda_search`,
-  `usaspending_search`, `gdelt_search`, `littlesis_search`,
-  `nonprofits_search`, `opencorporates_search`, `sanctions_search`,
-  `bbb_search`, `licensing_search`, `sos_search`, `calaccess_search`,
-  `scholar_search`, `linkedin_search`). The single exception is
-  `web_fetch`, allowed only as the cornerstone-document fetch when
-  `cornerstone_url` is also set — see the **Cornerstone-document
-  pattern** section.
+  only), or one of the direct connector kinds ({{kinds_allowlist}}).
+  The single exception is `web_fetch`, allowed only as the
+  cornerstone-document fetch when `cornerstone_url` is also set — see
+  the **Cornerstone-document pattern** section.
 - Every payload MUST include a `sub_question` describing what the
   downstream extract should look for.
 - Always include a top-level `scope_class` field. Size `task_template`

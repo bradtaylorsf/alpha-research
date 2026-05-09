@@ -46,6 +46,10 @@ from urllib.parse import urlparse
 import playwright.async_api
 
 from research_agent.tools import browser
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -422,4 +426,26 @@ def reset_for_tests() -> None:
     _register_host_rate()
 
 
-__all__ = ["fetch", "reset_for_tests", "search"]
+KIND = "calaccess_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    kind: str | None = None
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=("powersearch.sos.ca.gov",),
+    skill_name=None,
+    description="California Cal-Access campaign finance (Playwright)",
+    optional_payload_knobs="`kind: contributions\\|independent_expenditures`",
+    example_query="Newsom",
+    module_name="calaccess",
+)
+
+
+__all__ = ["KIND", "fetch", "reset_for_tests", "search"]

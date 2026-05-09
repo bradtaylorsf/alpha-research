@@ -36,6 +36,10 @@ import trafilatura
 
 from research_agent import config
 from research_agent.tools._errors import MissingCredentialError
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -588,4 +592,28 @@ def reset_for_tests() -> None:
     _rate_lock = asyncio.Lock()
 
 
-__all__ = ["fetch", "reset_for_tests", "search"]
+KIND = "edgar_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    form_type: str | None = None
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=("sec.gov", "www.sec.gov", "efts.sec.gov"),
+    description=(
+        "SEC filings (10-K, 10-Q, 8-K, Form 4) — requires"
+        " `RESEARCH_USER_AGENT` w/ contact email"
+    ),
+    optional_payload_knobs="`form_type: 10-K\\|8-K\\|...`",
+    example_query="Cisco cybersecurity",
+    module_name="edgar",
+)
+
+
+__all__ = ["KIND", "fetch", "reset_for_tests", "search"]

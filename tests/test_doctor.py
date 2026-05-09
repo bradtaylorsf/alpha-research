@@ -333,3 +333,119 @@ def test_run_all_checks_includes_sanctions_refresh(tmp_path):
     results = doctor.run_all_checks([], repo_root=tmp_path)
     names = {r.name for r in results}
     assert {"sanctions:SDN", "sanctions:EU", "sanctions:UK"}.issubset(names)
+
+
+# ---------------------------------------------------------------------------
+# Issue #223 — registry coherence checks.
+# ---------------------------------------------------------------------------
+
+
+def test_check_planner_allowlist_coherence_passes_for_live_registry() -> None:
+    """The shipping registry + planner prompt must round-trip cleanly."""
+    result = doctor.check_planner_allowlist_coherence()
+    assert result.status == "ok", result.detail
+    assert result.required is True
+
+
+def test_check_planner_allowlist_coherence_flags_orphan(monkeypatch) -> None:
+    """A kind in the allowlist that isn't registered is a hard fail.
+
+    The rendered allowlist is the source of truth for the model — if it
+    contains a kind the registry doesn't know about, the planner can emit
+    a task the orchestrator can't dispatch. We patch the renderer to
+    inject a synthetic orphan and confirm the check raises ``fail``.
+    """
+    from research_agent.prompts import loader as prompts_loader
+
+    real = prompts_loader._render_registry_vars
+
+    def _orphan_render() -> dict[str, str]:
+        out = real()
+        out["kinds_allowlist"] = out["kinds_allowlist"] + ", `phantom_search`"
+        return out
+
+    monkeypatch.setattr(prompts_loader, "_render_registry_vars", _orphan_render)
+    result = doctor.check_planner_allowlist_coherence()
+
+    assert result.status == "fail"
+    assert "in allowlist but not registered" in result.detail
+    assert "phantom_search" in result.detail
+
+
+def test_check_planner_allowlist_coherence_flags_missing_table_row(monkeypatch) -> None:
+    """A registered kind missing from the Direct kinds table fails."""
+    from research_agent.prompts import loader as prompts_loader
+
+    real = prompts_loader._render_registry_vars
+
+    def _truncated() -> dict[str, str]:
+        out = real()
+        out["direct_kinds_table"] = (
+            "| Kind | What it covers | Optional payload knobs | Example query |\n"
+            "|---|---|---|---|"
+        )  # header only, zero rows
+        return out
+
+    monkeypatch.setattr(prompts_loader, "_render_registry_vars", _truncated)
+    result = doctor.check_planner_allowlist_coherence()
+
+    assert result.status == "fail"
+    assert "no Direct-kinds-table row" in result.detail
+
+
+def test_check_registry_skill_coherence_skips_grandfathered() -> None:
+    """Kinds with ``skill_name=None`` produce ``skip`` rows, not ``fail``."""
+    rows = doctor.check_registry_skill_coherence()
+    by_name = {r.name: r for r in rows}
+    # ``bbb_search`` is grandfathered (skill_name=None in the live registry).
+    skipped = by_name["registry_skill:bbb_search"]
+    assert skipped.status == "skip"
+    assert "grandfathered" in skipped.detail
+    # ``congress_search`` ships a skill — must be ok.
+    ok_row = by_name["registry_skill:congress_search"]
+    assert ok_row.status == "ok"
+
+
+def test_check_registry_skill_coherence_fails_when_skill_file_missing(
+    monkeypatch, tmp_path
+) -> None:
+    """A registered kind with skill_name pointing at a missing file fails."""
+    from research_agent.skills import loader as skills_loader
+    from research_agent.tools import _registry
+
+    fake_dir = tmp_path / "skills" / "connectors"
+    fake_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        skills_loader, "_skills_dir", lambda category: tmp_path / "skills" / category
+    )
+
+    fake_entry = _registry.KindEntry(
+        name="ghost_search",
+        payload_schema=_registry.BaseSearchPayload,
+        search_fn=lambda *a, **kw: None,
+        fetch_fn=None,
+        host_patterns=(),
+        skill_name="ghost",
+        description="",
+        optional_payload_knobs="",
+        example_query="",
+        module_name="ghost",
+    )
+    monkeypatch.setattr(_registry, "iter_kinds", lambda: [fake_entry])
+
+    rows = doctor.check_registry_skill_coherence()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.status == "fail"
+    assert row.required is True
+    assert "missing skills/connectors/ghost.md" in row.detail
+
+
+def test_run_all_checks_includes_registry_coherence(tmp_path) -> None:
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.yaml").write_text("tiers: {}\n", encoding="utf-8")
+    results = doctor.run_all_checks([], repo_root=tmp_path)
+    names = {r.name for r in results}
+    assert "planner_allowlist_coherence" in names
+    assert any(n.startswith("registry_skill:") for n in names)

@@ -328,26 +328,16 @@ def _make_connector_fetch_handler(module_name: str) -> Handler:
     return _handler
 
 
-_CONNECTOR_KINDS: tuple[str, ...] = (
-    "congress",
-    "fec",
-    "edgar",
-    "courtlistener",
-    "fedregister",
-    "lda",
-    "usaspending",
-    "gdelt",
-    "littlesis",
-    "nonprofits",
-    "opencorporates",
-    "sanctions",
-    "bbb",
-    "licensing",
-    "sos",
-    "calaccess",
-    "scholar",
-    "linkedin",
-)
+def _registered_connector_module_names() -> tuple[str, ...]:
+    """Return the connector ``module_name`` for every registered direct kind.
+
+    Replaces the hand-maintained ``_CONNECTOR_KINDS`` tuple. The order is
+    deterministic (alphabetical) per :func:`iter_kinds`. Used by the handler
+    registry below to wire one ``<x>_search``/``<x>_fetch`` pair per kind.
+    """
+    from research_agent.tools._registry import iter_kinds
+
+    return tuple(entry.short_name for entry in iter_kinds())
 
 
 def default_handlers(router: Any) -> dict[str, Handler]:
@@ -519,7 +509,7 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         "synthesize": _synthesize,
         "critique": _critique,
     }
-    for name in _CONNECTOR_KINDS:
+    for name in _registered_connector_module_names():
         registry[f"{name}_search"] = _make_connector_search_handler(name)
         registry[f"{name}_fetch"] = _make_connector_fetch_handler(name)
     return registry
