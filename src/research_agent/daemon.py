@@ -551,6 +551,40 @@ async def _foreground_progress_task(
         return
 
 
+async def _cancel_with_timeout(
+    task: asyncio.Task,
+    name: str,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    """Cancel ``task`` and await its termination, bounded by ``timeout`` seconds.
+
+    Without the timeout, a misbehaving watcher that ignores cancellation
+    (e.g. a stale event-loop reference, a CancelledError swallowed in a
+    too-broad except, or a synchronous I/O call blocking the loop) hangs
+    daemon teardown forever. We log a warning and abandon the task on
+    timeout — process exit will reap it.
+
+    Uses :func:`asyncio.wait` (not :func:`asyncio.wait_for`) so the timeout
+    fires regardless of whether the task responds to ``cancel()``. Critical
+    for ``run_daemon``'s post-loop finally block.
+    """
+    if task.done():
+        return
+    task.cancel()
+    try:
+        _done, pending = await asyncio.wait({task}, timeout=timeout)
+    except Exception:  # noqa: BLE001 — never let teardown raise
+        logger.exception("daemon: %s raised on cancel/await", name)
+        return
+    if pending:
+        logger.warning(
+            "daemon: %s did not cancel within %.1fs; abandoning (process exit will reap)",
+            name,
+            timeout,
+        )
+
+
 async def _stop_flag_watcher(
     job: Job,
     should_stop: asyncio.Event,
@@ -812,21 +846,15 @@ async def run_daemon(
         except Exception:
             logger.exception("daemon: failed to write final status for job %s", job.id)
     finally:
-        watcher_task.cancel()
-        try:
-            await watcher_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        disk_cap_task.cancel()
-        try:
-            await disk_cap_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        progress_task.cancel()
-        try:
-            await progress_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        # Cancel each background task with a bounded timeout. Without the
+        # timeout, a misbehaving watcher whose cancel doesn't propagate (e.g.
+        # blocked in a synchronous I/O call inside its loop body) hangs the
+        # whole daemon indefinitely after run_loop completes. Observed in the
+        # wild: a 60-min Project 2025 run that hit max_tasks cap, fired final
+        # synth, then sat idle for 48 min in this finally block.
+        await _cancel_with_timeout(watcher_task, "stop_flag_watcher", timeout=5.0)
+        await _cancel_with_timeout(disk_cap_task, "disk_cap_watcher", timeout=5.0)
+        await _cancel_with_timeout(progress_task, "foreground_progress_task", timeout=5.0)
         if signals_installed:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 try:
