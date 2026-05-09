@@ -239,22 +239,48 @@ phase_audit() {
 
   hdr "Per-feature event counts (epic #214 fixes)"
 
-  local n_idx n_skill n_cs_walk n_cs_query n_recon n_drain n_cap_diag n_uncaught
-  n_idx=$(grep -c '"kind":"index_loaded"' "$events" 2>/dev/null || echo 0)
-  n_skill=$(grep -c '"kind":"skill_loaded"' "$events" 2>/dev/null || echo 0)
-  n_cs_walk=$(grep -c 'cornerstone_section_walk\|"kind":"section_walk"' "$events" 2>/dev/null || echo 0)
-  n_cs_query=$(grep -c '"kind":"cornerstone_query"' "$events" 2>/dev/null || echo 0)
-  n_recon=$(grep -c 'source_list_reconciled' "$events" 2>/dev/null || echo 0)
-  n_drain=$(grep -c '"kind":"drain_replan"' "$events" 2>/dev/null || echo 0)
-  n_cap_diag=$(grep -c '"kind":"cap_diagnostic"' "$events" 2>/dev/null || echo 0)
-  n_uncaught=$(grep -c '"actor":"daemon","kind":"error"' "$events" 2>/dev/null || echo 0)
+  # `grep -c` always prints an integer, even on no-match (with exit 1). Don't use
+  # `|| echo 0` — that double-prints "0\n0" which breaks the bash arithmetic
+  # comparison below. Just suppress the exit-1 with `|| true`.
+  local n_idx n_skill n_cs_extract n_cs_section n_cs_query n_recon n_drain n_cap_hit n_cap_diag n_uncaught
+  n_idx=$(grep -c '"kind":"index_loaded"' "$events" || true)
+  n_skill=$(grep -c '"kind":"skill_loaded"' "$events" || true)
+  # Real event names emitted by orchestrator/loop.py:
+  # - cornerstone_extract       — section-walk entry point (per source)
+  # - cornerstone_section_extract — per-section finding extraction
+  # - cornerstone_query_run     — vector-index query at replan time (only fires
+  #                                when planner emits the cornerstone_query task kind)
+  n_cs_extract=$(grep -c '"kind":"cornerstone_extract"' "$events" || true)
+  n_cs_section=$(grep -c '"kind":"cornerstone_section_extract"' "$events" || true)
+  n_cs_query=$(grep -c '"kind":"cornerstone_query_run"' "$events" || true)
+  n_recon=$(grep -c '"kind":"source_list_reconciled"' "$events" || true)
+  n_drain=$(grep -c '"kind":"drain_replan"' "$events" || true)
+  n_cap_hit=$(grep -c '"cap_hit":true' "$events" || true)
+  n_cap_diag=$(grep -c '"kind":"cap_diagnostic"' "$events" || true)
+  n_uncaught=$(grep -c '"actor":"daemon","kind":"error"' "$events" || true)
 
   [ "$n_idx" -ge 2 ]      && pass "#211 skills index loaded ($n_idx events, expect ≥2)"      || fail "#211 skills index loaded ($n_idx, want ≥2)"
   [ "$n_skill" -ge 3 ]    && pass "#212 connector skills deep-loaded ($n_skill events)"      || fail "#212 connector skills deep-loaded ($n_skill, want ≥3)"
-  [ "$n_cs_walk" -ge 1 ]  && pass "#206 cornerstone section_walk fired ($n_cs_walk events)"  || fail "#206 cornerstone section_walk ($n_cs_walk, want ≥1)"
-  [ "$n_cs_query" -ge 1 ] && pass "#206 cornerstone_query fired ($n_cs_query events)"        || fail "#206 cornerstone_query ($n_cs_query, want ≥1 — may be 0 if synth fired before retrieval was needed)"
+  # #206: section-walk + per-section extracts are the proof; cornerstone_query is
+  # secondary (only fires when the planner emits the task kind, which it may not
+  # do in a 60-min run that hits max_tasks first).
+  [ "$n_cs_extract" -ge 1 ]  && pass "#206 cornerstone_extract fired ($n_cs_extract events)"   || fail "#206 cornerstone_extract ($n_cs_extract, want ≥1)"
+  [ "$n_cs_section" -ge 1 ]  && pass "#206 cornerstone_section_extract fired ($n_cs_section events)"  || fail "#206 cornerstone_section_extract ($n_cs_section, want ≥1)"
+  if [ "$n_cs_query" -ge 1 ]; then
+    pass "#206 cornerstone_query_run fired ($n_cs_query events)"
+  else
+    info "  (#206 cornerstone_query_run = 0 — only fires if planner emits cornerstone_query task; ok if section-walk produced enough findings)"
+  fi
   [ "$n_recon" -ge 1 ]    && pass "#207 source_list_reconciled fired ($n_recon events)"      || fail "#207 source_list_reconciled ($n_recon, want ≥1 — may be 0 if no synth pass ran)"
-  [ "$n_drain" -ge 1 ]    && pass "#209 drain_replan fired ($n_drain events)"                || fail "#209 drain_replan ($n_drain, want ≥1)"
+  # #209: drain_replan only fires when the queue empties. If max_tasks fires
+  # first (cap_hit), drain_replan won't fire — that's expected, not a failure.
+  if [ "$n_drain" -ge 1 ]; then
+    pass "#209 drain_replan fired ($n_drain events)"
+  elif [ "$n_cap_hit" -ge 1 ]; then
+    info "  (#209 drain_replan = 0 because max_tasks cap fired first — different cap, expected)"
+  else
+    fail "#209 drain_replan ($n_drain, want ≥1) — neither drain_replan nor cap_hit fired; loop may not have entered the replan path"
+  fi
   if [ "$n_cap_diag" -gt 0 ]; then
     info "  ($n_cap_diag cap_diagnostic events — expected if drain-replans hit the scope cap)"
   fi
@@ -275,12 +301,21 @@ except Exception as exc:
     print(f'  (no plan_created event yet: {exc})')
 "
 
-  # #208 — dept tracker H2 sections in report
-  hdr "#208 department tracker H2 sections in report.md"
+  # #208 — dept tracker section in report.md. Synthesizer renders departments
+  # as H3 nested under an H2 ``## Departmental Policy Tracker`` (or similar) —
+  # not as bare H2 per-department. Match either shape.
+  hdr "#208 department tracker sections in report.md"
   if [ -f "jobs/$job/report.md" ]; then
-    local depts
-    depts=$(grep -cE '^## (DOJ|DOI|EPA|DHS|State|Defense|HHS|Education|Treasury|HUD|USDA|Labor|Commerce|VA|Justice|Homeland|Agriculture|Veterans|Personnel)\b' "jobs/$job/report.md")
-    [ "$depts" -ge 3 ] && pass "$depts department H2 sections (want ≥3)" || fail "$depts department H2 sections (want ≥3)"
+    local depts dept_header
+    dept_header=$(grep -cE '^## (Departmental|Department|Agency|Department-by-Department|Federal Department)' "jobs/$job/report.md" || true)
+    depts=$(grep -cE '^### (DOJ|DOI|EPA|DHS|State|Defense|DoD|HHS|Education|Treasury|HUD|USDA|Labor|Commerce|VA|Justice|Homeland|Agriculture|Veterans|Personnel|White House)\b|^## (DOJ|DOI|EPA|DHS|State|Defense|DoD|HHS|Education|Treasury|HUD|USDA|Labor|Commerce|VA|Justice|Homeland|Agriculture|Veterans|Personnel)\b' "jobs/$job/report.md" || true)
+    if [ "$dept_header" -ge 1 ] && [ "$depts" -ge 3 ]; then
+      pass "Department tracker H2 + $depts department subsections"
+    elif [ "$depts" -ge 3 ]; then
+      pass "$depts department sections (no canonical tracker H2 but content present)"
+    else
+      fail "$depts department sections (want ≥3); tracker_h2=$dept_header"
+    fi
   else
     skip "report.md not yet written — synth may not have fired"
   fi
