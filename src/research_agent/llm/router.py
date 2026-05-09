@@ -369,18 +369,11 @@ class Router:
         )
         return Agent(model)
 
-    def _make_fallback_tier_agent(self, fallback_tier: str) -> Agent:
-        """Construct a one-shot Agent bound to the model behind ``fallback_tier``.
-
-        Used when an lmstudio tier is degraded and the router needs to dispatch
-        the call against the configured cloud equivalent. Built on every reroute
-        rather than memoized so a swap of the underlying ``OpenAIModel`` (e.g.
-        in tests via :meth:`unittest.mock.patch.object`) takes effect immediately.
-        """
+    def _fallback_model_for_tier(self, fallback_tier: str) -> OpenAIModel:
+        """Build the model behind ``fallback_tier`` for an agent-level override."""
         if fallback_tier not in self.tiers:
             raise KeyError(f"fallback_tier {fallback_tier!r} not present in router config")
-        model = _build_model_for_tier(fallback_tier, self.tiers[fallback_tier])
-        return Agent(model)
+        return _build_model_for_tier(fallback_tier, self.tiers[fallback_tier])
 
     # ---- Call wrapper ------------------------------------------------------
 
@@ -429,6 +422,7 @@ class Router:
                     return await self._reroute_to_fallback_tier(
                         original_tier=tier,
                         fallback_tier=fallback_tier,
+                        agent=agent,
                         args=args,
                         kwargs=kwargs,
                         cache_enabled=cache_enabled,
@@ -505,6 +499,7 @@ class Router:
                     return await self._reroute_to_fallback_tier(
                         original_tier=tier,
                         fallback_tier=fallback_tier,
+                        agent=agent,
                         args=args,
                         kwargs=kwargs,
                         cache_enabled=cache_enabled,
@@ -619,6 +614,7 @@ class Router:
         *,
         original_tier: str,
         fallback_tier: str,
+        agent: Any,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         cache_enabled: bool,
@@ -632,13 +628,14 @@ class Router:
         the caller asked for plus the cost the reroute incurred so an
         operator tailing logs sees both halves.
         """
+        fallback_model = self._fallback_model_for_tier(fallback_tier)
+        kwargs = {**kwargs, "model": fallback_model}
         if cache_enabled:
             kwargs = {**kwargs, "cache": True}
-        fallback_agent = self._make_fallback_tier_agent(fallback_tier)
         # Snapshot before/after spent so cache hits show $0 reroute cost
         # while real cloud charges show their incremental cost.
         before_spent = self.budget.spent
-        result = await self.call(fallback_tier, fallback_agent, *args, **kwargs)
+        result = await self.call(fallback_tier, agent, *args, **kwargs)
         cost_usd = max(0.0, self.budget.spent - before_spent)
         self._emit_lmstudio_rerouted(
             original_tier=original_tier,
