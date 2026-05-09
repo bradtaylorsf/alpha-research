@@ -224,7 +224,7 @@ async def search(
     # advancedsearch.php expects ``fl[]=<field>`` repeated per field. httpx
     # serializes a list value of a string-keyed param into the matching
     # repeat-key form, so a list of fields is the correct shape here.
-    params: list[tuple[str, str]] = [
+    params: list[tuple[str, str | int | float | bool | None]] = [
         ("q", q),
         ("fl[]", "identifier"),
         ("fl[]", "title"),
