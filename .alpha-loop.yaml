@@ -1,7 +1,7 @@
 # Alpha Loop configuration
 repo: bradtaylorsf/alpha-research
 project: 0  # GitHub Project number (find it in your project URL)
-agent: claude  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
+agent: codex  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
 # model:       # AI model (omit to use agent's default, e.g., opus, gpt-5.4)
 label: ready
 base_branch: main
@@ -86,15 +86,15 @@ smoke_test: |
 # --- Per-step model routing (cost-aware) ---
 # Plan and review get Opus (correctness matters most); implement and learn get
 # Sonnet (bulk of token spend, quality is good enough).
-pipeline:
-  plan:      { model: opus }
-  implement: { model: sonnet }
-  review:    { model: opus }
-  learn:     { model: sonnet }
+# pipeline:
+#   plan:      { model: opus }
+#   implement: { model: sonnet }
+#   review:    { model: opus }
+#   learn:     { model: sonnet }
 
 # Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
-  - claude
+  - codex
 
 # --- Safety limits (0 = unlimited) ---
 # Goal: drain the entire 45-issue backlog overnight. Realistic completion is
