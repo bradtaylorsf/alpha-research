@@ -501,7 +501,13 @@ def test_status_color_theme_matches_list(isolated_jobs_repo: Path):
     )
     # Render through a forced-terminal Console so SGR escape codes hit the buffer.
     buf = io.StringIO()
-    Console(file=buf, force_terminal=True, color_system="truecolor", width=200).print(panel)
+    Console(
+        file=buf,
+        force_terminal=True,
+        color_system="truecolor",
+        no_color=False,
+        width=200,
+    ).print(panel)
     rendered = buf.getvalue()
     assert "running" in rendered
     # _STATUS_STYLE['running'] = 'green' → the ANSI 32 sequence must appear,
