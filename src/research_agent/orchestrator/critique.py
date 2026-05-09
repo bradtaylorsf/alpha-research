@@ -216,6 +216,17 @@ def _model_name_for(router: Router, tier: str) -> str:
     return name
 
 
+def _actual_call_tier_model(router: Router, requested_tier: str) -> tuple[str, str]:
+    """Return the tier/model that produced the last router result when available."""
+    metadata = getattr(router, "last_call_metadata", None)
+    if isinstance(metadata, dict):
+        tier = metadata.get("tier")
+        model = metadata.get("model")
+        if isinstance(tier, str) and tier and isinstance(model, str) and model:
+            return tier, model
+    return requested_tier, _model_name_for(router, requested_tier)
+
+
 def _render_critique_md(payload: CritiqueOutput) -> str:
     """Render a human-readable summary for ``critique/<v>.md``."""
     lines: list[str] = ["# Critique\n"]
@@ -350,7 +361,7 @@ async def critique(
 
     cost_raw = getattr(router.budget, "last_cost", None)
     cost_val: float | None = float(cost_raw) if isinstance(cost_raw, (int, float)) else None
-    model_name = _model_name_for(router, tier)
+    actual_tier, model_name = _actual_call_tier_model(router, tier)
 
     md_body = _render_critique_md(output)
     payload_dict = output.model_dump(exclude={"version", "model", "cost_usd", "md_path"})
@@ -380,7 +391,8 @@ async def critique(
         "critique_written",
         {
             "version": version,
-            "tier": tier,
+            "tier": actual_tier,
+            "requested_tier": tier,
             "model": model_name,
             "should_replan": bool(output.should_replan),
             "gaps_count": len(output.gaps),

@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from rich.console import Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from research_agent.storage import db
 from research_agent.storage.jobs import Job
@@ -53,6 +55,16 @@ def _humanize_duration(seconds: float | int | None) -> str:
     if delta < 86400:
         return f"{delta // 3600}h"
     return f"{delta // 86400}d"
+
+
+def _hours_to_seconds(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        hours = float(value)
+    except (TypeError, ValueError):
+        return None
+    return hours * 3600 if hours > 0 else None
 
 
 def _truncate(text: str, limit: int = _GOAL_TRUNCATE) -> str:
@@ -113,6 +125,7 @@ _ETA_SAMPLE_LIMIT = 5
 
 def load_status_data(job: Job, *, db_path: Path | None = None) -> dict[str, Any]:
     """Pull plan version, task counts, cost, ETA, current task, and recent events."""
+    intake = job.intake or {}
     path = db_path if db_path is not None else job.db_path
     conn = db.connect(path)
     try:
@@ -128,12 +141,21 @@ def load_status_data(job: Job, *, db_path: Path | None = None) -> dict[str, Any]
         ).fetchall()
         task_counts: dict[str, int] = {str(r["status"]): int(r["n"]) for r in task_rows}
 
-        cost_row = conn.execute(
-            "SELECT cost_so_far_usd FROM jobs WHERE id = ?",
+        job_row = conn.execute(
+            "SELECT cost_so_far_usd, time_cap_hours, created_at, started_at"
+            " FROM jobs WHERE id = ?",
             (job.id,),
         ).fetchone()
-        cost_val = cost_row["cost_so_far_usd"] if cost_row else None
+        cost_val = job_row["cost_so_far_usd"] if job_row else None
         cost = float(cost_val) if cost_val else 0.0
+        time_cap_hours = (
+            job_row["time_cap_hours"]
+            if job_row is not None and job_row["time_cap_hours"] is not None
+            else intake.get("time_cap_hours")
+        )
+        started_at_val = job_row["started_at"] if job_row is not None else None
+        created_at_val = job_row["created_at"] if job_row is not None else job.created_at
+        started_at = int(started_at_val or created_at_val or job.created_at)
 
         # Rolling-average ETA from the last few finished tasks. We need both
         # started_at and finished_at populated to derive a duration; tasks
@@ -191,7 +213,6 @@ def load_status_data(job: Job, *, db_path: Path | None = None) -> dict[str, Any]
     finally:
         conn.close()
 
-    intake = job.intake or {}
     budget_cap = intake.get("budget_cap_usd")
 
     return {
@@ -199,6 +220,8 @@ def load_status_data(job: Job, *, db_path: Path | None = None) -> dict[str, Any]
         "task_counts": task_counts,
         "cost": cost,
         "budget_cap": budget_cap,
+        "time_cap_hours": time_cap_hours,
+        "started_at": started_at,
         "eta_seconds": eta_seconds,
         "current_task": current_task,
         "recent_events": recent_events,
@@ -229,6 +252,8 @@ def render_status_panel(
     recent_events: list[dict[str, Any]],
     *,
     budget_cap: float | None = None,
+    time_cap_hours: float | None = None,
+    started_at: int | None = None,
     eta_seconds: float | None = None,
     current_task: dict[str, Any] | None = None,
     now: int | None = None,
@@ -237,20 +262,29 @@ def render_status_panel(
     intake = job.intake or {}
     now_epoch = int(now) if now is not None else int(time.time())
     cap_for_display = budget_cap if budget_cap is not None else intake.get("budget_cap_usd")
+    time_cap_for_display = (
+        time_cap_hours if time_cap_hours is not None else intake.get("time_cap_hours")
+    )
+    elapsed_start = int(started_at) if started_at is not None else job.created_at
+    elapsed_seconds = max(0, now_epoch - elapsed_start)
+    time_cap_seconds = _hours_to_seconds(time_cap_for_display)
 
     summary_lines = [
         f"[bold]Status:[/bold] {_status_cell(job.status)}",
-        f"[bold]Goal:[/bold] {job.goal}",
-        f"[bold]Domain:[/bold] {job.domain or '—'}",
+        f"[bold]Goal:[/bold] {escape(job.goal)}",
+        f"[bold]Domain:[/bold] {escape(job.domain or '—')}",
         f"[bold]Plan version:[/bold] {plan_version}",
         f"[bold]Cost so far:[/bold] {_format_cost(cost)} / {_format_cost(cap_for_display)}",
-        f"[bold]Time cap (h):[/bold] {intake.get('time_cap_hours') or '—'}",
         f"[bold]Tasks:[/bold] {_format_task_counts(task_counts)}",
+        (
+            f"[bold]Elapsed / time cap:[/bold] {_humanize_duration(elapsed_seconds)} / "
+            f"{_humanize_duration(time_cap_seconds)}"
+        ),
         f"[bold]ETA:[/bold] ~{_humanize_duration(eta_seconds)}",
     ]
 
     if current_task is not None:
-        kind = current_task.get("kind") or "?"
+        kind = escape(str(current_task.get("kind") or "?"))
         started_at = current_task.get("started_at")
         age = _humanize_age(now_epoch, started_at) if started_at is not None else "—"
         summary_lines.append(f"[bold]Current:[/bold] {kind} (running {age})")
@@ -275,7 +309,7 @@ def render_status_panel(
     else:
         events_table.add_row("—", "—", "—", "(no events yet)")
 
-    body = Group(summary, events_table)
+    body = Group(Text.from_markup(summary), events_table)
     return Panel(body, title=f"job {job.id}", border_style="cyan")
 
 

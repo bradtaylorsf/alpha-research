@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,6 @@ from research_agent.orchestrator.loop import (
     run_loop,
 )
 from research_agent.orchestrator.plan import Plan, ScopeClass, Subgoal, TaskSpec
-from research_agent.tools.models import SearchResult
 from research_agent.storage import db
 from research_agent.storage.jobs import Job
 from research_agent.storage.markdown import write_plan
@@ -33,6 +33,7 @@ from research_agent.storage.tasks import (
     STATUS_PENDING,
     enqueue,
 )
+from research_agent.tools.models import SearchResult
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -102,6 +103,58 @@ def _read_event_kinds(db_path: Path, job_id: str) -> list[str]:
     finally:
         conn.close()
     return [r["kind"] for r in rows]
+
+
+def _read_events_by_kind(db_path: Path, job_id: str, kind: str) -> list[dict[str, Any]]:
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT level, actor, kind, payload_json"
+            " FROM events WHERE job_id = ? AND kind = ? ORDER BY id ASC",
+            (job_id, kind),
+        ).fetchall()
+    finally:
+        conn.close()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["payload"] = json.loads(item.pop("payload_json"))
+        out.append(item)
+    return out
+
+
+def _read_checkpoint_kinds(db_path: Path, job_id: str) -> list[str]:
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT kind FROM checkpoints WHERE job_id = ? ORDER BY id ASC",
+            (job_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [r["kind"] for r in rows]
+
+
+def _read_checkpoints_by_kind(
+    db_path: Path,
+    job_id: str,
+    kind: str,
+) -> list[dict[str, Any]]:
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT kind, payload_json FROM checkpoints"
+            " WHERE job_id = ? AND kind = ? ORDER BY id ASC",
+            (job_id, kind),
+        ).fetchall()
+    finally:
+        conn.close()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["payload"] = json.loads(item.pop("payload_json"))
+        out.append(item)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +346,111 @@ async def test_max_tasks_cap_triggers_final_synthesis(job: Job, db_path: Path, p
     pending_count = sum(1 for r in rows if r["status"] == STATUS_PENDING)
     assert done_count == 3
     assert pending_count == 2
+
+
+@pytest.mark.asyncio
+async def test_time_cap_terminates_with_final_synthesis(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-hour cap stops a large queue at the deadline and reports ``time_cap``."""
+    _seed_tasks(job, ["web_search"] * 1000)
+    clock = {"now": 0.0}
+    synth_calls = {"n": 0}
+
+    monkeypatch.setattr(
+        "research_agent.orchestrator.loop.time.monotonic",
+        lambda: clock["now"],
+    )
+
+    async def web_search(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        clock["now"] += 360.0
+        return {"hits": 1}
+
+    async def synth(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        synth_calls["n"] += 1
+        return {"ok": True}
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": web_search, "synthesize": synth},
+        time_cap_hours=1,
+        retry_waits=(0,),
+    )
+
+    assert result["completion_reason"] == "time_cap"
+    assert result["time_cap_hit"] is True
+    assert result["cap_hit"] is False
+    assert result["elapsed_seconds"] <= 1.05 * 3600
+    assert synth_calls["n"] == 1
+
+    rows = _read_task_rows(db_path, job.id)
+    done_count = sum(1 for r in rows if r["status"] == STATUS_DONE)
+    pending_count = sum(1 for r in rows if r["status"] == STATUS_PENDING)
+    assert done_count == 10
+    assert pending_count == 990
+
+
+@pytest.mark.asyncio
+async def test_time_cap_unset_preserves_legacy_drain_behavior(
+    job: Job,
+    plan: Plan,
+) -> None:
+    """Without a time cap, the loop drains the queue as it did before."""
+    _seed_tasks(job, ["web_search"] * 3)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["tasks_done"] == 3
+    assert result["time_cap_hit"] is False
+    assert result["completion_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_time_cap_waits_for_in_flight_handler(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the cap expires during a handler, that task finishes before the loop exits."""
+    _seed_tasks(job, ["web_search", "web_search"])
+    clock = {"now": 0.0}
+
+    monkeypatch.setattr(
+        "research_agent.orchestrator.loop.time.monotonic",
+        lambda: clock["now"],
+    )
+
+    async def slow_handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        clock["now"] += 3601.0
+        return {"hits": 1}
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": slow_handler},
+        time_cap_hours=1,
+        retry_waits=(0,),
+    )
+
+    assert result["completion_reason"] == "time_cap"
+    assert result["tasks_done"] == 1
+
+    rows = _read_task_rows(db_path, job.id)
+    assert rows[0]["status"] == STATUS_DONE
+    assert rows[1]["status"] == STATUS_PENDING
 
 
 @pytest.mark.asyncio
@@ -509,7 +667,7 @@ async def test_connector_fetch_handler_dispatches_to_module(
     persist the returned :class:`Source` via the shared helper.
     """
     import importlib
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
 
     from research_agent.tools.models import Source
 
@@ -524,7 +682,7 @@ async def test_connector_fetch_handler_dispatches_to_module(
             url=url,
             title="t",
             cleaned_text="hello world",
-            fetched_at=datetime.now(tz=timezone.utc),
+            fetched_at=datetime.now(tz=UTC),
             source_kind=sk,  # type: ignore[arg-type]
         )
 
@@ -1004,6 +1162,94 @@ async def test_loop_exits_when_subgoals_all_done(job: Job, db_path: Path) -> Non
     pending_count = sum(1 for r in rows if r["status"] == STATUS_PENDING)
     assert done_count == HEURISTIC_CHECK_EVERY_N
     assert pending_count == 0
+
+
+@pytest.mark.asyncio
+async def test_critique_cadence_repeats_over_200_tasks(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+) -> None:
+    """Critique fires every 50 completed tasks, not only the first time."""
+    total_tasks = 200
+    _seed_tasks(job, ["web_search"] * total_tasks)
+
+    critique_calls: list[int] = []
+
+    async def critique(job_arg: Job, task: dict[str, Any]) -> dict[str, Any]:
+        critique_calls.append(len(critique_calls) + 1)
+        return {"ok": True}
+
+    handlers: dict[str, Handler] = {
+        "web_search": _ok_handler(),
+        "synthesize": _ok_handler(),
+        "critique": critique,
+    }
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers=handlers,
+        max_tasks=total_tasks + HEURISTIC_CHECK_EVERY_N,
+        retry_waits=(0,),
+    )
+
+    assert result["tasks_done"] == total_tasks
+    assert len(critique_calls) == 4
+    assert len(critique_calls) >= 3
+
+    critique_checkpoints = _read_checkpoints_by_kind(db_path, job.id, "critique_done")
+    assert [c["payload"]["tasks_done"] for c in critique_checkpoints] == [50, 100, 150, 200]
+
+
+@pytest.mark.asyncio
+async def test_critique_heuristic_failure_warning_has_traceback_and_model_context(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+) -> None:
+    """A failed critique pass should be loud enough to diagnose post-run."""
+    _seed_tasks(job, ["web_search"] * (HEURISTIC_CHECK_EVERY_N * 2))
+
+    async def critique(job_arg: Job, task: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("frontier_alt unavailable")
+
+    critique._heuristic_tier = "frontier_alt"  # type: ignore[attr-defined]
+    critique._heuristic_model = "local-critic"  # type: ignore[attr-defined]
+
+    handlers: dict[str, Handler] = {
+        "web_search": _ok_handler(),
+        "synthesize": _ok_handler(),
+        "critique": critique,
+    }
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers=handlers,
+        max_tasks=HEURISTIC_CHECK_EVERY_N * 3,
+        retry_waits=(0,),
+    )
+
+    assert result["tasks_done"] == HEURISTIC_CHECK_EVERY_N * 2
+    warnings = [
+        ev["payload"]
+        for ev in _read_events_by_kind(db_path, job.id, "warning")
+        if ev["payload"].get("heuristic") == "critique"
+    ]
+    assert len(warnings) == 1
+    payload = warnings[0]
+    assert payload["tier"] == "frontier_alt"
+    assert payload["model"] == "local-critic"
+    assert payload["error_type"] == "RuntimeError"
+    assert payload["error"] == "frontier_alt unavailable"
+    assert "Traceback (most recent call last)" in payload["traceback"]
+    assert "RuntimeError: frontier_alt unavailable" in payload["traceback"]
+
+    checkpoints = _read_checkpoint_kinds(db_path, job.id)
+    assert "critique_done" not in checkpoints
 
 
 # ---------------------------------------------------------------------------

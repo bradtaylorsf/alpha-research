@@ -18,6 +18,7 @@ These tests exercise the §5.1 + §6.1 contract from the implementation guide:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
@@ -303,7 +304,7 @@ def _patch_run_daemon_for_in_process(
     calls: dict[str, list[tuple[Any, ...]]] = {"final_synthesis": [], "run_loop": []}
 
     async def _wrapped_run_loop(job: Job, router: Any, **kwargs: Any) -> Any:
-        calls["run_loop"].append((job.id,))
+        calls["run_loop"].append((job.id, kwargs))
         return await run_loop_impl(job, router, **kwargs)
 
     async def _final_synth_stub(job: Job, plan: Plan, *, router: Any) -> None:
@@ -359,6 +360,57 @@ async def test_run_daemon_stops_on_stop_flag(
         db_path=seeded_job.db_path,
     )
     assert refreshed.status == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_sweeps_stale_orphan_artifacts_on_startup(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_partial = seeded_job.root / "synthesis" / "0004.partial.md"
+    old_tmp = seeded_job.root / "critique" / "0002.md.tmp"
+    young_partial = seeded_job.root / "plan" / "0003.partial.md"
+    old_partial.write_text("", encoding="utf-8")
+    old_tmp.write_text("half-written critique", encoding="utf-8")
+    young_partial.write_text("still being written", encoding="utf-8")
+
+    now = time.time()
+    old_mtime = now - daemon.ORPHAN_ARTIFACT_MAX_AGE_S - 1
+    os.utime(old_partial, (old_mtime, old_mtime))
+    os.utime(old_tmp, (old_mtime, old_mtime))
+    os.utime(young_partial, (now, now))
+
+    async def _instant_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"tasks_done": 0, "stopped": True, "completed": False, "cap_hit": False}
+
+    _patch_run_daemon_for_in_process(monkeypatch, run_loop_impl=_instant_run_loop)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+
+    assert exit_code == 0
+    assert not old_partial.exists()
+    assert not old_tmp.exists()
+    assert young_partial.exists()
+
+    conn = db.connect(seeded_job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'orphan_artifact_cleaned'"
+            " ORDER BY id ASC",
+            (seeded_job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    cleaned_paths = {json.loads(row["payload_json"])["path"] for row in rows}
+    assert cleaned_paths == {"synthesis/0004.partial.md", "critique/0002.md.tmp"}
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        assert payload["age_seconds"] >= daemon.ORPHAN_ARTIFACT_MAX_AGE_S
 
 
 @pytest.mark.asyncio
@@ -433,6 +485,52 @@ async def test_run_daemon_completed_status_when_plan_is_complete(
         db_path=seeded_job.db_path,
     )
     assert refreshed.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_passes_time_cap_and_marks_time_cap_completion(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Persisted ``time_cap_hours`` is forwarded to run_loop and classified distinctly."""
+    intake = dict(seeded_job.intake)
+    intake["time_cap_hours"] = 1
+    conn = db.connect(seeded_job.db_path)
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE jobs SET intake_json = ?, time_cap_hours = ? WHERE id = ?",
+                (json.dumps(intake, sort_keys=True), 1, seeded_job.id),
+            )
+    finally:
+        conn.close()
+
+    async def _time_capped_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "tasks_done": 1,
+            "stopped": False,
+            "completed": False,
+            "cap_hit": False,
+            "time_cap_hit": True,
+            "completion_reason": "time_cap",
+        }
+
+    calls = _patch_run_daemon_for_in_process(monkeypatch, run_loop_impl=_time_capped_run_loop)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert exit_code == 0
+    assert calls["run_loop"][0][1]["time_cap_hours"] == 1.0
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "completed"
+    assert refreshed.completion_reason == "time_cap"
 
 
 @pytest.mark.asyncio

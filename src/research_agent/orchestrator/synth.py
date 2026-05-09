@@ -31,6 +31,8 @@ import json
 import logging
 import re
 import sqlite3
+import traceback
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
 from typing import TYPE_CHECKING, Any
@@ -45,7 +47,7 @@ from research_agent.storage import db
 from research_agent.storage.markdown import (
     write_report,
     write_synthesis,
-    write_synthesis_partial,
+    write_synthesis_failed,
 )
 
 if TYPE_CHECKING:
@@ -367,65 +369,263 @@ def _build_context(
 
 
 _SUBGOAL_STATUS_FENCE_RE = re.compile(r"```[ \t]*json[ \t]*\n(.*?)\n```\s*$", re.DOTALL)
+_ANY_JSON_FENCE_RE = re.compile(r"```[ \t]*json[ \t]*\n(.*?)\n```", re.DOTALL)
+_LEVEL_TWO_HEADING_RE = re.compile(r"^##[ \t]+(?P<title>.+?)[ \t]*$", re.MULTILINE)
+_TRAILING_STATUS_KEY_RE = re.compile(
+    r'"(?:subgoal_status|closed|reopened|inconclusive)"',
+    re.IGNORECASE,
+)
+_PROSE_SUBGOAL_STATUS_RE = re.compile(
+    r"(?im)^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?"
+    r"(?:(?:H)|(?:Subgoal))\s*#?(?P<id>\d+)(?:\*\*)?\s*[:\-]\s*"
+    r"(?:\*\*)?(?P<status>confirmed|refuted|inconclusive)\b"
+)
+_STATUS_ALIASES = {
+    "confirmed": "confirmed",
+    "confirm": "confirmed",
+    "closed": "confirmed",
+    "refuted": "refuted",
+    "refute": "refuted",
+    "inconclusive": "inconclusive",
+    "open": "inconclusive",
+    "reopened": "inconclusive",
+}
 
 
-def _extract_subgoal_status(
-    job: Job,
-    raw: str,
-) -> tuple[str, dict[int, str] | None]:
-    """Split a trailing fenced ``json`` block off the markdown report.
+@dataclass(frozen=True)
+class _StatusCandidate:
+    body: str
+    stripped_md: str
+    source: str
 
-    Returns ``(stripped_md, status_map)``. ``status_map`` is ``None`` when
-    the block is missing, has malformed JSON, or its payload doesn't carry
-    a ``subgoal_status`` mapping. A WARN ``warning`` event is emitted in
-    each of those tolerated-but-degraded cases.
-    """
+
+def _stripped_with_trailer_removed(raw: str, start: int) -> str:
+    prefix = raw[:start].rstrip()
+    return prefix + ("\n" if prefix else "")
+
+
+def _coerce_subgoal_id(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        match = re.fullmatch(r"\s*(?:(?:H)|(?:Subgoal))?\s*#?(\d+)\s*", value)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _normalize_status(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return _STATUS_ALIASES.get(value.strip().lower())
+
+
+def _normalize_subgoal_status_payload(data: Any) -> dict[int, str] | None:
+    if not isinstance(data, dict):
+        return None
+
+    status_map: dict[int, str] = {}
+    subgoal_status = data.get("subgoal_status")
+    if isinstance(subgoal_status, dict):
+        for raw_id, raw_status in subgoal_status.items():
+            sid = _coerce_subgoal_id(raw_id)
+            status = _normalize_status(raw_status)
+            if sid is not None and status is not None:
+                status_map[sid] = status
+
+    for key, status in (
+        ("closed", "confirmed"),
+        ("reopened", "inconclusive"),
+        ("inconclusive", "inconclusive"),
+    ):
+        raw_ids = data.get(key)
+        if not isinstance(raw_ids, list):
+            continue
+        for raw_id in raw_ids:
+            sid = _coerce_subgoal_id(raw_id)
+            if sid is not None:
+                status_map[sid] = status
+
+    return status_map or None
+
+
+def _json_object_from_section_body(body: str) -> str | None:
+    matches = list(_ANY_JSON_FENCE_RE.finditer(body))
+    if matches:
+        return matches[-1].group(1).strip()
+
+    start = body.find("{")
+    end = body.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    return body[start : end + 1].strip()
+
+
+def _candidate_from_final_subgoal_status_section(raw: str) -> _StatusCandidate | None:
+    headings = list(_LEVEL_TWO_HEADING_RE.finditer(raw))
+    if not headings:
+        return None
+
+    last_heading = headings[-1]
+    title = last_heading.group("title").strip().strip("#").strip().lower()
+    if title != "subgoal status":
+        return None
+
+    section_body = raw[last_heading.end() :]
+    json_body = _json_object_from_section_body(section_body)
+    if json_body is None:
+        return None
+
+    return _StatusCandidate(
+        body=json_body,
+        stripped_md=_stripped_with_trailer_removed(raw, last_heading.start()),
+        source="subgoal_status_section",
+    )
+
+
+def _candidate_from_trailing_fence(raw: str) -> _StatusCandidate | None:
     match = _SUBGOAL_STATUS_FENCE_RE.search(raw)
     if match is None:
-        emit(
-            job,
-            "WARN",
-            "synth",
-            "warning",
-            {"stage": "subgoal_status", "error": "trailing JSON fence missing"},
-        )
-        return raw, None
+        return None
+    return _StatusCandidate(
+        body=match.group(1).strip(),
+        stripped_md=_stripped_with_trailer_removed(raw, match.start()),
+        source="trailing_json_fence",
+    )
 
-    body = match.group(1).strip()
+
+def _candidate_from_raw_trailing_json(raw: str) -> _StatusCandidate | None:
+    stripped = raw.rstrip()
+    if not stripped.endswith("}"):
+        return None
+
+    decoder = json.JSONDecoder()
+    for match in reversed(list(re.finditer(r"\{", stripped))):
+        start = match.start()
+        suffix = stripped[start:]
+        if not _TRAILING_STATUS_KEY_RE.search(suffix):
+            continue
+        try:
+            _data, end = decoder.raw_decode(suffix)
+        except json.JSONDecodeError:
+            continue
+        if suffix[end:].strip():
+            continue
+        return _StatusCandidate(
+            body=suffix.strip(),
+            stripped_md=_stripped_with_trailer_removed(raw, start),
+            source="raw_trailing_json",
+        )
+    return None
+
+
+def _find_structured_status_candidate(raw: str) -> _StatusCandidate | None:
+    return (
+        _candidate_from_final_subgoal_status_section(raw)
+        or _candidate_from_trailing_fence(raw)
+        or _candidate_from_raw_trailing_json(raw)
+    )
+
+
+def _parse_status_candidate(job: Job, candidate: _StatusCandidate) -> dict[int, str] | None:
     try:
-        data = json.loads(body)
+        data = json.loads(candidate.body)
     except json.JSONDecodeError as exc:
         emit(
             job,
             "WARN",
             "synth",
             "warning",
-            {"stage": "subgoal_status", "error": f"json parse failed: {exc}"},
+            {
+                "stage": "subgoal_status",
+                "source": candidate.source,
+                "error": f"json parse failed: {exc}",
+            },
         )
-        # Still strip the fence so it never lands in report.md.
-        return raw[: match.start()].rstrip() + "\n", None
+        return None
 
-    if not isinstance(data, dict) or not isinstance(data.get("subgoal_status"), dict):
+    status_map = _normalize_subgoal_status_payload(data)
+    if status_map is None:
         emit(
             job,
             "WARN",
             "synth",
             "warning",
-            {"stage": "subgoal_status", "error": "missing or non-dict subgoal_status"},
+            {
+                "stage": "subgoal_status",
+                "source": candidate.source,
+                "error": "missing recognized subgoal status payload",
+            },
         )
-        return raw[: match.start()].rstrip() + "\n", None
+    return status_map
 
+
+def _status_event_payload(status_map: dict[int, str]) -> dict[str, Any]:
+    return {
+        "status": {str(k): v for k, v in sorted(status_map.items())},
+        "closed": sorted(k for k, v in status_map.items() if v in {"confirmed", "refuted"}),
+        "inconclusive": sorted(k for k, v in status_map.items() if v == "inconclusive"),
+    }
+
+
+def _extract_prose_subgoal_status(raw: str, subgoal_ids: set[int]) -> dict[int, str] | None:
     status_map: dict[int, str] = {}
-    for key, value in data["subgoal_status"].items():
-        try:
-            sid = int(key)
-        except (TypeError, ValueError):
+    for match in _PROSE_SUBGOAL_STATUS_RE.finditer(raw):
+        sid = _coerce_subgoal_id(match.group("id"))
+        status = _normalize_status(match.group("status"))
+        if sid is None or status is None:
             continue
-        if isinstance(value, str):
-            status_map[sid] = value
+        if subgoal_ids and sid not in subgoal_ids:
+            continue
+        status_map[sid] = status
+    return status_map or None
 
-    stripped = raw[: match.start()].rstrip() + "\n"
-    return stripped, status_map
+
+def _extract_subgoal_status(
+    job: Job,
+    raw: str,
+    *,
+    subgoal_ids: list[int] | None = None,
+) -> tuple[str, dict[int, str] | None]:
+    """Split structured subgoal status from the markdown report.
+
+    Returns ``(stripped_md, status_map)``. ``status_map`` is ``None`` when
+    no structured payload or status-like prose can be read. Structured
+    trailers are stripped before persistence even when malformed.
+    """
+    subgoal_id_set = set(subgoal_ids or [])
+    candidate = _find_structured_status_candidate(raw)
+    stripped_md = raw
+    if candidate is not None:
+        stripped_md = candidate.stripped_md
+        status_map = _parse_status_candidate(job, candidate)
+        if status_map:
+            return stripped_md, status_map
+
+    prose_status = _extract_prose_subgoal_status(stripped_md, subgoal_id_set)
+    if prose_status:
+        emit(
+            job,
+            "INFO",
+            "synth",
+            "synth_status_from_prose",
+            _status_event_payload(prose_status),
+        )
+        return stripped_md, prose_status
+
+    emit(
+        job,
+        "WARN",
+        "synth",
+        "synth_status_missing",
+        {
+            "structured_candidate": candidate.source if candidate is not None else None,
+            "subgoal_ids": sorted(subgoal_id_set),
+        },
+    )
+    return stripped_md, None
 
 
 def _apply_subgoal_status(
@@ -629,7 +829,11 @@ async def _do_synthesis(
     cost_val: float | None = float(cost) if isinstance(cost, (int, float)) else None
     model_name = _model_name_for(router, used_tier)
 
-    stripped_md, status_map = _extract_subgoal_status(job, content)
+    stripped_md, status_map = _extract_subgoal_status(
+        job,
+        content,
+        subgoal_ids=[sg.id for sg in plan.subgoals],
+    )
     stripped_md = _reconcile_sources(job, stripped_md, sources)
 
     version = write_synthesis(job, stripped_md, model=model_name, cost_usd=cost_val)
@@ -673,12 +877,18 @@ def _write_failed_output(
     """Persist whatever content we managed to assemble + emit ``synthesis_failed``.
 
     The current call path is non-streaming so ``partial_content`` is "" — the
-    file is still written so the next attempt can spot it as prior context.
+    failed file still records the traceback for post-run debugging.
     Returns a degraded :class:`SynthesisOutput` (``model='synthesis_failed'``,
     ``truncated=True``) so callers don't have to thread an exception type.
     """
-    partial_version = write_synthesis_partial(job, partial_content, model="synthesis_failed")
-    partial_path = job.root / f"synthesis/{partial_version:04d}.partial.md"
+    traceback_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    failed_version = write_synthesis_failed(
+        job,
+        partial_content,
+        model="synthesis_failed",
+        traceback_text=traceback_text,
+    )
+    failed_path = job.root / f"synthesis/{failed_version:04d}.failed.md"
     emit(
         job,
         "ERROR",
@@ -688,15 +898,16 @@ def _write_failed_output(
             "tier": tier,
             "reason": str(exc),
             "attempt_count": attempt_count,
-            "partial_path": str(partial_path),
+            "failed_path": str(failed_path),
+            "traceback": traceback_text,
         },
     )
     return SynthesisOutput(
-        version=partial_version,
+        version=failed_version,
         content=partial_content,
         model="synthesis_failed",
         cost_usd=None,
-        report_path=str(partial_path),
+        report_path=str(failed_path),
         truncated=True,
     )
 
@@ -943,7 +1154,11 @@ async def final_synthesis_after_cap(
     cost_val: float | None = float(cost) if isinstance(cost, (int, float)) else None
     model_name = _model_name_for(router, fallback_tier)
 
-    stripped_md, status_map = _extract_subgoal_status(job, content)
+    stripped_md, status_map = _extract_subgoal_status(
+        job,
+        content,
+        subgoal_ids=[sg.id for sg in plan.subgoals],
+    )
     stripped_md = _reconcile_sources(job, stripped_md, sources)
 
     version = write_synthesis(job, stripped_md, model=model_name, cost_usd=cost_val)

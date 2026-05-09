@@ -255,6 +255,44 @@ def test_critique_uses_frontier_alt_tier_by_default(job: Job, db_path: Path, pla
     assert router.calls[0][0] == DEFAULT_TIER == "frontier_alt"
 
 
+def test_critique_records_actual_router_fallback_model(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+) -> None:
+    _seed_findings(job, [0.7])
+    router = _StubRouter(
+        tiers={
+            "frontier_alt": {"provider": "lmstudio", "model": "local-critic"},
+            "frontier": {"provider": "lmstudio", "model": "local-frontier"},
+        }
+    )
+    router.last_call_metadata = {
+        "tier": "frontier",
+        "provider": "lmstudio",
+        "model": "local-frontier",
+        "original_tier": "frontier_alt",
+        "rerouted": True,
+    }
+
+    out = asyncio.run(critique(job, plan, "# Synthesis\n", router=router))
+
+    assert out.model == "local-frontier"
+    rows = _read_critique_rows(db_path, job.id)
+    assert rows[0]["model"] == "local-frontier"
+
+    events = _read_event_rows(db_path, job.id)
+    written = [
+        json.loads(ev["payload_json"])
+        for ev in events
+        if ev["kind"] == "critique_written"
+    ]
+    assert written
+    assert written[0]["tier"] == "frontier"
+    assert written[0]["requested_tier"] == "frontier_alt"
+    assert written[0]["model"] == "local-frontier"
+
+
 def test_critique_file_rotation_writes_0002_on_second_call(
     job: Job, db_path: Path, plan: Plan
 ) -> None:

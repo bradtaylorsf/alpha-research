@@ -19,8 +19,9 @@ the tier's configured ``fallback_tier`` (cloud), each emitting a WARN event
 plus a per-call cost figure so the operator can see what's being charged.
 After the window expires the router retries local; on success the tier is
 marked recovered (INFO event). When no ``fallback_tier`` is configured the
-second TimeoutError propagates — the §16 anti-pattern is silent reroutes,
-not loud ones.
+second TimeoutError propagates, except ``frontier_alt`` defaults to
+``frontier`` so critique can still run during local-model degradation. The
+§16 anti-pattern is silent reroutes, not loud ones.
 """
 
 from __future__ import annotations
@@ -323,6 +324,10 @@ class Router:
         # only after two consecutive timeouts; cleared after a successful
         # local call once the window has expired. Public for tests/inspection.
         self._tier_degraded_until: dict[str, float] = {}
+        # Metadata for the most recent successful model call. Critique and
+        # warning paths use this to report the tier/model that actually
+        # produced output after router-level fallback.
+        self.last_call_metadata: dict[str, Any] | None = None
         # Settable per-instance so tests can drop the sleep to zero without
         # monkeypatching the global asyncio loop.
         self.retry_sleep_s: float = LMSTUDIO_RETRY_SLEEP_S
@@ -364,18 +369,11 @@ class Router:
         )
         return Agent(model)
 
-    def _make_fallback_tier_agent(self, fallback_tier: str) -> Agent:
-        """Construct a one-shot Agent bound to the model behind ``fallback_tier``.
-
-        Used when an lmstudio tier is degraded and the router needs to dispatch
-        the call against the configured cloud equivalent. Built on every reroute
-        rather than memoized so a swap of the underlying ``OpenAIModel`` (e.g.
-        in tests via :meth:`unittest.mock.patch.object`) takes effect immediately.
-        """
+    def _fallback_model_for_tier(self, fallback_tier: str) -> OpenAIModel:
+        """Build the model behind ``fallback_tier`` for an agent-level override."""
         if fallback_tier not in self.tiers:
             raise KeyError(f"fallback_tier {fallback_tier!r} not present in router config")
-        model = _build_model_for_tier(fallback_tier, self.tiers[fallback_tier])
-        return Agent(model)
+        return _build_model_for_tier(fallback_tier, self.tiers[fallback_tier])
 
     # ---- Call wrapper ------------------------------------------------------
 
@@ -413,17 +411,18 @@ class Router:
 
         # Skip local entirely while the tier is in its degraded window —
         # rerouting earliest avoids burning another timeout cycle on a swap
-        # that's known to be in flight. Without a configured fallback we fall
-        # through and try local; the §16 rule is *no silent reroutes*, not *no
-        # local attempts at all*.
+        # that's known to be in flight. Without a fallback we fall through and
+        # try local; frontier_alt gets a default frontier fallback because
+        # critique is the loop's self-correction path.
         if is_local:
             until = self._tier_degraded_until.get(tier)
             if until is not None and time.time() < until:
-                fallback_tier = spec.get("fallback_tier")
+                fallback_tier = self._lmstudio_fallback_tier(tier, spec)
                 if fallback_tier:
                     return await self._reroute_to_fallback_tier(
                         original_tier=tier,
                         fallback_tier=fallback_tier,
+                        agent=agent,
                         args=args,
                         kwargs=kwargs,
                         cache_enabled=cache_enabled,
@@ -449,6 +448,14 @@ class Router:
                     fallback_used=False,
                     cached=True,
                 )
+                self.last_call_metadata = {
+                    "tier": tier,
+                    "provider": provider,
+                    "model": model_name,
+                    "cost_usd": 0.0,
+                    "fallback_used": False,
+                    "cached": True,
+                }
                 return _CachedResult(hit)
 
         if is_cloud:
@@ -482,7 +489,7 @@ class Router:
                 # is intentionally omitted, e.g. embeddings).
                 until_ts = time.time() + self.degraded_window_s
                 self._tier_degraded_until[tier] = until_ts
-                fallback_tier = spec.get("fallback_tier")
+                fallback_tier = self._lmstudio_fallback_tier(tier, spec)
                 self._emit_lmstudio_degraded(
                     tier=tier,
                     fallback_tier=fallback_tier,
@@ -492,6 +499,7 @@ class Router:
                     return await self._reroute_to_fallback_tier(
                         original_tier=tier,
                         fallback_tier=fallback_tier,
+                        agent=agent,
                         args=args,
                         kwargs=kwargs,
                         cache_enabled=cache_enabled,
@@ -541,8 +549,24 @@ class Router:
             fallback_used=fallback_used,
             cached=False,
         )
+        self.last_call_metadata = {
+            "tier": tier,
+            "provider": provider,
+            "model": model_name,
+            "cost_usd": cost_usd,
+            "fallback_used": fallback_used,
+            "cached": False,
+        }
 
         return result
+
+    def _lmstudio_fallback_tier(self, tier: str, spec: dict[str, Any]) -> str | None:
+        configured = spec.get("fallback_tier")
+        if isinstance(configured, str) and configured:
+            return configured
+        if tier == "frontier_alt" and "frontier" in self.tiers:
+            return "frontier"
+        return None
 
     @staticmethod
     async def _run_with_timeout(
@@ -590,6 +614,7 @@ class Router:
         *,
         original_tier: str,
         fallback_tier: str,
+        agent: Any,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         cache_enabled: bool,
@@ -603,19 +628,26 @@ class Router:
         the caller asked for plus the cost the reroute incurred so an
         operator tailing logs sees both halves.
         """
+        fallback_model = self._fallback_model_for_tier(fallback_tier)
+        kwargs = {**kwargs, "model": fallback_model}
         if cache_enabled:
             kwargs = {**kwargs, "cache": True}
-        fallback_agent = self._make_fallback_tier_agent(fallback_tier)
         # Snapshot before/after spent so cache hits show $0 reroute cost
         # while real cloud charges show their incremental cost.
         before_spent = self.budget.spent
-        result = await self.call(fallback_tier, fallback_agent, *args, **kwargs)
+        result = await self.call(fallback_tier, agent, *args, **kwargs)
         cost_usd = max(0.0, self.budget.spent - before_spent)
         self._emit_lmstudio_rerouted(
             original_tier=original_tier,
             fallback_tier=fallback_tier,
             cost_usd=cost_usd,
         )
+        if self.last_call_metadata is not None:
+            self.last_call_metadata = {
+                **self.last_call_metadata,
+                "original_tier": original_tier,
+                "rerouted": True,
+            }
         return result
 
     # ---- Ledger + event ----------------------------------------------------

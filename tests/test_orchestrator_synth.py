@@ -353,10 +353,10 @@ def test_final_synthesis_uses_larger_top_n_and_final_flag(
     assert len(payload["findings"]) <= FINAL_TOP_N
 
 
-def test_synthesize_retry_exhaustion_writes_partial_and_emits_failed(
+def test_synthesize_retry_exhaustion_writes_failed_and_emits_failed(
     job: Job, db_path: Path, plan: Plan
 ) -> None:
-    """Terminal retry exhaustion → partial md + ``synthesis_failed`` ERROR event."""
+    """Terminal retry exhaustion → failed md + ``synthesis_failed`` ERROR event."""
     _seed_findings(job, [0.6])
     router = _StubRouter(
         side_effect={
@@ -371,15 +371,18 @@ def test_synthesize_retry_exhaustion_writes_partial_and_emits_failed(
     assert out.model == "synthesis_failed"
     assert out.cost_usd is None
 
-    # Partial md exists at the synthesis/<v>.partial.md path (no DB row written).
-    partial = job.root / f"synthesis/{out.version:04d}.partial.md"
-    assert partial.exists()
-    # Non-streaming call path — the partial is empty but its presence lets
-    # the next attempt know a prior failure happened.
-    assert partial.read_text(encoding="utf-8") == ""
+    failed_path = job.root / f"synthesis/{out.version:04d}.failed.md"
+    assert out.report_path == str(failed_path)
+    assert failed_path.exists()
+    assert list((job.root / "synthesis").glob("*.partial.md")) == []
+    failed_md = failed_path.read_text(encoding="utf-8")
+    assert "## Partial Output" in failed_md
+    assert "_No partial output captured._" in failed_md
+    assert "## Traceback" in failed_md
+    assert "RuntimeError: openrouter: connection reset after 6 retries" in failed_md
 
     rows = _read_synthesis_rows(db_path, job.id)
-    assert rows == [], "partial writes must not insert a syntheses row"
+    assert rows == [], "failed writes must not insert a syntheses row"
 
     events = _read_event_rows(db_path, job.id)
     failed = [e for e in events if e["kind"] == "synthesis_failed"]
@@ -389,7 +392,35 @@ def test_synthesize_retry_exhaustion_writes_partial_and_emits_failed(
     assert payload["tier"] == "frontier"
     assert "connection reset" in payload["reason"]
     assert payload["attempt_count"] == 1
-    assert payload["partial_path"].endswith(".partial.md")
+    assert payload["failed_path"].endswith(".failed.md")
+    assert (
+        "RuntimeError: openrouter: connection reset after 6 retries" in payload["traceback"]
+    )
+
+
+def test_failed_synthesis_artifact_includes_partial_content_and_traceback(
+    job: Job, db_path: Path
+) -> None:
+    try:
+        raise RuntimeError("handler crashed mid-write")
+    except RuntimeError as exc:
+        out = synth_module._write_failed_output(
+            job,
+            tier="frontier",
+            exc=exc,
+            attempt_count=1,
+            partial_content="# Partial report\n\nDraft body",
+        )
+
+    failed_path = job.root / f"synthesis/{out.version:04d}.failed.md"
+    failed_md = failed_path.read_text(encoding="utf-8")
+    assert "# Partial report" in failed_md
+    assert "Draft body" in failed_md
+    assert "RuntimeError: handler crashed mid-write" in failed_md
+    assert list((job.root / "synthesis").glob("*.partial.md")) == []
+
+    rows = _read_synthesis_rows(db_path, job.id)
+    assert rows == []
 
 
 def test_synthesize_emits_synthesis_written_event(job: Job, db_path: Path, plan: Plan) -> None:
@@ -576,6 +607,100 @@ def test_synthesize_extracts_subgoal_status_and_strips_fence(
     assert sorted(payload["closed"]) == [1, 2, 3]
 
 
+def test_synthesize_extracts_raw_trailing_subgoal_status_json(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """A raw trailing JSON object is parsed and stripped even without a fence."""
+    _seed_findings(job, [0.9, 0.5])
+    body = (
+        "# Investigation Report\n\n"
+        "## Executive Summary\n- finding [1]\n\n"
+        '## Sources\n1. https://example.com/0 — "Title"\n'
+    )
+    raw_json = '\n{"closed": [1], "reopened": [2], "inconclusive": [3]}\n'
+    router = _StubRouter(content=body + raw_json)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert '"closed"' not in report
+    assert "Investigation Report" in report
+
+    subgoals = _read_latest_plan_subgoals(db_path, job.id)
+    by_id = {sg["id"]: sg for sg in subgoals}
+    assert by_id[1]["done"] is True
+    assert by_id[2]["done"] is False
+    assert by_id[3]["done"] is False
+
+    events = _read_event_rows(db_path, job.id)
+    updated = [e for e in events if e["kind"] == "plan_subgoals_updated"]
+    assert len(updated) == 1
+    payload = json.loads(updated[0]["payload_json"])
+    assert payload["closed"] == [1]
+    assert payload["inconclusive"] == [2, 3]
+
+
+def test_synthesize_extracts_subgoal_status_section_json(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """A final ``## Subgoal Status`` section can carry the JSON payload."""
+    _seed_findings(job, [0.9])
+    content = (
+        "# Investigation Report\n\n"
+        "## Executive Summary\n- finding [1]\n\n"
+        '## Sources\n1. https://example.com/0 — "Title"\n\n'
+        "## Subgoal Status\n\n"
+        "```json\n"
+        '{"subgoal_status": {"1": "confirmed", "2": "inconclusive", "3": "refuted"}}'
+        "\n```\n"
+    )
+    router = _StubRouter(content=content)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "## Subgoal Status" not in report
+    assert "subgoal_status" not in report
+
+    subgoals = _read_latest_plan_subgoals(db_path, job.id)
+    by_id = {sg["id"]: sg for sg in subgoals}
+    assert by_id[1]["done"] is True
+    assert by_id[2]["done"] is False
+    assert by_id[3]["done"] is True
+
+
+def test_synthesize_extracts_subgoal_status_from_prose(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    """Prose-only status lines are an observable fallback."""
+    _seed_findings(job, [0.9])
+    content = (
+        "# Investigation Report\n\n"
+        "## Hypotheses\n\n"
+        "Subgoal 1: Confirmed after checking filings [1].\n"
+        "Subgoal 2: Inconclusive because records are missing.\n"
+        "H3: Refuted by the permit history [1].\n"
+        "H99: Confirmed, but this is not in the active plan.\n\n"
+        '## Sources\n1. https://example.com/0 — "Title"\n'
+    )
+    router = _StubRouter(content=content)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    subgoals = _read_latest_plan_subgoals(db_path, job.id)
+    by_id = {sg["id"]: sg for sg in subgoals}
+    assert by_id[1]["done"] is True
+    assert by_id[2]["done"] is False
+    assert by_id[3]["done"] is True
+
+    events = _read_event_rows(db_path, job.id)
+    prose_events = [e for e in events if e["kind"] == "synth_status_from_prose"]
+    assert len(prose_events) == 1
+    payload = json.loads(prose_events[0]["payload_json"])
+    assert payload["status"] == {"1": "confirmed", "2": "inconclusive", "3": "refuted"}
+    assert [e for e in events if e["kind"] == "synth_status_missing"] == []
+
+
 def test_synthesize_inconclusive_status_keeps_subgoal_open(
     job: Job, db_path: Path, multi_subgoal_plan: Plan
 ) -> None:
@@ -607,7 +732,7 @@ def test_synthesize_inconclusive_status_keeps_subgoal_open(
 def test_synthesize_missing_fence_emits_warning_and_skips_plan_bump(
     job: Job, db_path: Path, multi_subgoal_plan: Plan
 ) -> None:
-    """No trailing JSON fence: warning emitted, report still written, plan unchanged."""
+    """No structured or prose status: warning emitted, report written, plan unchanged."""
     _seed_findings(job, [0.6])
     router = _StubRouter(content="# Report\n\nNo fence at all.\n")
 
@@ -617,9 +742,9 @@ def test_synthesize_missing_fence_emits_warning_and_skips_plan_bump(
     assert _read_latest_plan_version(db_path, job.id) == multi_subgoal_plan.version
 
     events = _read_event_rows(db_path, job.id)
-    warns = [e for e in events if e["kind"] == "warning"]
-    payloads = [json.loads(e["payload_json"]) for e in warns]
-    assert any(p.get("stage") == "subgoal_status" for p in payloads)
+    missing = [e for e in events if e["kind"] == "synth_status_missing"]
+    assert len(missing) == 1
+    assert missing[0]["level"] == "WARN"
 
     updated = [e for e in events if e["kind"] == "plan_subgoals_updated"]
     assert updated == []
@@ -978,6 +1103,14 @@ def test_synthesizer_prompt_has_scope_aware_closure_rules() -> None:
     assert "5 distinct" in body
     assert "2 specific" in body
     assert "3 distinct" in body
+
+
+def test_synthesizer_prompt_ends_with_status_trailer_instruction() -> None:
+    """Keep the machine-readable trailer requirement at the end for recency."""
+    body = prompts_loader.load_prompt("synthesizer", goal="x")
+    assert "Final mandatory subgoal-status trailer" in body
+    assert "MUST be emitted on every synthesis pass" in body
+    assert body.rstrip().endswith("text after the closing fence.")
 
 
 def test_synthesize_accepts_fence_with_space_before_json_lang(

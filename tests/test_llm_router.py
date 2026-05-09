@@ -27,6 +27,7 @@ from research_agent.storage.jobs import Job
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHIPPED_MODELS_YAML = REPO_ROOT / "config" / "models.yaml"
+SHIPPED_LOCAL_MODELS_YAML = REPO_ROOT / "config" / "models.local.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +147,35 @@ class _FakeAgent:
         if self.raises:
             raise self.raises.pop(0)
         return self.result
+
+
+class _TimeoutThenSuccessAgent:
+    """Times out for N calls, then succeeds immediately.
+
+    This lets router fallback tests assert that reroutes preserve the original
+    agent object while overriding its model for the fallback tier.
+    """
+
+    def __init__(
+        self,
+        *,
+        result: Any = None,
+        timeout_attempts: int = 2,
+    ) -> None:
+        self.result = result if result is not None else _FakeResult()
+        self.timeout_attempts = timeout_attempts
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def run(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        if len(self.calls) <= self.timeout_attempts:
+            await asyncio.sleep(1.0)
+            return None  # pragma: no cover - cancelled by router timeout
+        return self.result
+
+
+def _override_model_name(call: tuple[tuple[Any, ...], dict[str, Any]]) -> str | None:
+    return getattr(call[1].get("model"), "model_name", None)
 
 
 def _rate_limit_error() -> RateLimitError:
@@ -889,6 +919,14 @@ def test_models_yaml_ships_lmstudio_fallback_tiers() -> None:
     assert "fallback_tier" not in tiers["embeddings"]
 
 
+def test_local_models_yaml_routes_frontier_alt_to_frontier() -> None:
+    """Local critique must have a declared same-family fallback tier."""
+    cfg = load_models_config(SHIPPED_LOCAL_MODELS_YAML)
+    tiers = cfg["tiers"]
+    assert tiers["frontier_alt"]["provider"] == "lmstudio"
+    assert tiers["frontier_alt"].get("fallback_tier") == "frontier"
+
+
 def _make_lmstudio_router(
     *,
     job: Job,
@@ -946,18 +984,18 @@ async def test_two_timeouts_marks_tier_degraded_and_routes_to_fallback(
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     router, budget = _make_lmstudio_router(job=job, db_path=db_path)
 
-    cloud_agent = _FakeAgent(result=_FakeResult(output="cloud body"))
-    monkeypatch.setattr(router, "_make_fallback_tier_agent", lambda ft: cloud_agent)
-
-    local_agent = _FakeAgent(sleep_s=1.0)
+    local_agent = _TimeoutThenSuccessAgent(result=_FakeResult(output="cloud body"))
     result = await router.call("fast", local_agent, "do work")
 
-    assert result is cloud_agent.result
+    assert result is local_agent.result
     assert "fast" in router._tier_degraded_until
     # Retry path: agent.run was attempted twice before we gave up on local.
-    assert len(local_agent.calls) == 2
-    # The cloud (fallback_tier) call ran exactly once.
-    assert len(cloud_agent.calls) == 1
+    assert len(local_agent.calls) == 3
+    assert _override_model_name(local_agent.calls[0]) is None
+    assert _override_model_name(local_agent.calls[1]) is None
+    # The fallback tier reuses the original agent so output_type/system prompt
+    # are preserved, but overrides the model for the rerouted call.
+    assert _override_model_name(local_agent.calls[2]) == "anthropic/claude-haiku-4-5"
 
     degraded = _read_events_by_kind(job, "lmstudio_degraded")
     rerouted = _read_events_by_kind(job, "lmstudio_rerouted")
@@ -980,6 +1018,71 @@ async def test_two_timeouts_marks_tier_degraded_and_routes_to_fallback(
 
 
 @pytest.mark.asyncio
+async def test_frontier_alt_lmstudio_degradation_defaults_to_frontier_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    db_path: Path,
+    job: Job,
+) -> None:
+    """Critique's local frontier_alt tier falls through to frontier even without config."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    cfg: dict[str, Any] = {
+        "tiers": {
+            t: {"provider": "lmstudio", "model": "stub", "timeout_s": 60}
+            for t in EXPECTED_TIERS
+        },
+    }
+    cfg["tiers"]["frontier_alt"] = {
+        "provider": "lmstudio",
+        "model": "local-critic",
+        "timeout_s": 0.05,
+    }
+    cfg["tiers"]["frontier"] = {
+        "provider": "openrouter",
+        "model": "anthropic/claude-opus-4-7",
+        "timeout_s": 60,
+    }
+    budget = _RecordingBudget(cost_per_call=0.17, db_path=db_path, job_id=job.id)
+    router = Router(cfg, budget, job=job, db_path=db_path)  # type: ignore[arg-type]
+    router.retry_sleep_s = 0.0
+    router.openrouter_retry_min_delay = 0.0
+    router.openrouter_retry_max_delay = 0.0
+    router.openrouter_retry_stop_delay = 0.0
+
+    local_agent = _TimeoutThenSuccessAgent(result=_FakeResult(output="frontier fallback"))
+    result = await router.call("frontier_alt", local_agent, "critique context")
+
+    assert result is local_agent.result
+    assert len(local_agent.calls) == 3
+    assert _override_model_name(local_agent.calls[2]) == "anthropic/claude-opus-4-7"
+    assert budget.precheck_calls == ["frontier"]
+    assert len(budget.charge_calls) == 1
+
+    second_local_agent = _FakeAgent(result=_FakeResult(output="frontier fallback 2"))
+    second = await router.call("frontier_alt", second_local_agent, "critique context 2")
+    assert second is second_local_agent.result
+    assert len(second_local_agent.calls) == 1
+    assert _override_model_name(second_local_agent.calls[0]) == "anthropic/claude-opus-4-7"
+    assert budget.precheck_calls == ["frontier", "frontier"]
+
+    degraded = _read_events_by_kind(job, "lmstudio_degraded")
+    rerouted = _read_events_by_kind(job, "lmstudio_rerouted")
+    assert len(degraded) == 1
+    assert degraded[0]["payload"]["tier"] == "frontier_alt"
+    assert degraded[0]["payload"]["fallback_tier"] == "frontier"
+    assert len(rerouted) == 2
+    assert rerouted[0]["payload"]["original_tier"] == "frontier_alt"
+    assert rerouted[0]["payload"]["fallback_tier"] == "frontier"
+    assert rerouted[1]["payload"]["original_tier"] == "frontier_alt"
+    assert rerouted[1]["payload"]["fallback_tier"] == "frontier"
+
+    assert router.last_call_metadata is not None
+    assert router.last_call_metadata["tier"] == "frontier"
+    assert router.last_call_metadata["model"] == "anthropic/claude-opus-4-7"
+    assert router.last_call_metadata["original_tier"] == "frontier_alt"
+    assert router.last_call_metadata["rerouted"] is True
+
+
+@pytest.mark.asyncio
 async def test_calls_within_degraded_window_skip_local_and_reroute(
     monkeypatch: pytest.MonkeyPatch,
     db_path: Path,
@@ -992,19 +1095,20 @@ async def test_calls_within_degraded_window_skip_local_and_reroute(
     # Pretend the prior call already degraded the tier.
     router._tier_degraded_until["fast"] = time.time() + 600.0
 
-    cloud_agent = _FakeAgent(result=_FakeResult(output="reroute"))
-    monkeypatch.setattr(router, "_make_fallback_tier_agent", lambda ft: cloud_agent)
-
-    local_agent = _FakeAgent(sleep_s=10.0)  # would hang if it were called
+    local_agent = _FakeAgent(result=_FakeResult(output="reroute"))
 
     for _ in range(3):
         out = await router.call("fast", local_agent, "x")
-        assert out is cloud_agent.result
+        assert out is local_agent.result
 
-    # Local was never even tried — the bypass kicks in before the timeout.
-    assert local_agent.calls == []
+    # Local was never tried with the original model - the bypass kicks in and
+    # every call uses the fallback model override immediately.
+    assert len(local_agent.calls) == 3
+    assert all(
+        _override_model_name(call) == "anthropic/claude-haiku-4-5"
+        for call in local_agent.calls
+    )
     # Three reroutes → three cloud calls and three WARN events with cost.
-    assert len(cloud_agent.calls) == 3
     rerouted = _read_events_by_kind(job, "lmstudio_rerouted")
     assert len(rerouted) == 3
     for ev in rerouted:
@@ -1052,13 +1156,6 @@ async def test_two_timeouts_without_fallback_tier_propagates_timeout(
     """When ``fallback_tier`` is omitted (e.g. embeddings) the second timeout raises."""
     monkeypatch.delenv("LMSTUDIO_BASE_URL", raising=False)
     router, budget = _make_lmstudio_router(job=job, db_path=db_path, fallback_tier=None)
-    # If the reroute path were taken anyway it would call this — fail loudly.
-    monkeypatch.setattr(
-        router,
-        "_make_fallback_tier_agent",
-        lambda ft: pytest.fail("must not build a fallback agent when fallback_tier is unset"),
-    )
-
     local_agent = _FakeAgent(sleep_s=1.0)
     with pytest.raises(asyncio.TimeoutError):
         await router.call("fast", local_agent, "x")
