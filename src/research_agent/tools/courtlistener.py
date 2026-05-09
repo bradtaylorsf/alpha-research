@@ -3,8 +3,9 @@
 Public surface:
 
 * ``async def search(query, *, kind="opinions", max_results=20) -> list[SearchResult]``
-  hits the REST v3 ``search/`` endpoint for opinions, dockets (RECAP), or oral
+  hits the REST v4 ``search/`` endpoint for opinions, dockets (RECAP), or oral
   arguments. ``kind`` maps to the API's ``type`` code (``o``/``r``/``oa``).
+  v4 was made the default in 2024 and v3 returns 403 for new keys (#255).
 * ``async def fetch(url, timeout=30.0) -> Source | None`` opens an opinion or
   docket page and returns markdown of the opinion text or docket entries.
 
@@ -41,7 +42,7 @@ from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://www.courtlistener.com/api/rest/v3/"
+_BASE_URL = "https://www.courtlistener.com/api/rest/v4/"
 _SITE_BASE = "https://www.courtlistener.com"
 # 5000 req/hr ≈ 1.4 RPS; we throttle to 1 RPS to leave headroom.
 _RATE_LIMIT_INTERVAL = 1.0

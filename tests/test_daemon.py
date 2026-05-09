@@ -893,3 +893,66 @@ async def test_foreground_progress_updates_as_tasks_transition(
     final = fake.updates[-1]
     assert final[1]["completed"] == 2
     assert final[1]["total"] == 3
+
+
+
+# ---------------------------------------------------------------------------
+# _cancel_with_timeout — bounds daemon teardown so a hung watcher can't block exit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_timeout_returns_promptly_when_task_obeys_cancel() -> None:
+    async def _well_behaved() -> None:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            return
+
+    task = asyncio.create_task(_well_behaved())
+    start = time.monotonic()
+    await daemon._cancel_with_timeout(task, "well_behaved", timeout=2.0)
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0, f"cancel should return immediately, took {elapsed:.2f}s"
+    assert task.done()
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_timeout_abandons_task_that_ignores_cancel() -> None:
+    """Regression for the post-cap-hit hang: if cancel() can't reach the
+    awaited operation, the daemon must NOT block forever waiting. The helper
+    returns within the timeout and logs a warning so process exit can reap
+    the task. Simulate by stubbing ``Task.cancel`` to a no-op so the
+    underlying sleep keeps running past the helper's timeout window."""
+
+    async def _slow() -> None:
+        await asyncio.sleep(60)
+
+    task = asyncio.create_task(_slow())
+    # Stub: cancel() becomes a no-op so the sleep keeps running. This models
+    # the real-world failure mode where cancellation can't propagate (e.g.
+    # synchronous I/O block) and the helper's timeout is the only guard.
+    task.cancel = lambda *a, **kw: False  # type: ignore[method-assign]
+
+    start = time.monotonic()
+    await daemon._cancel_with_timeout(task, "ignores_cancel", timeout=0.3)
+    elapsed = time.monotonic() - start
+    assert 0.25 <= elapsed < 1.5, f"timeout should fire ~0.3s; took {elapsed:.2f}s"
+    # Cleanup the orphan via the real cancel path (bypass our stub).
+    type(task).cancel(task)
+    try:
+        await asyncio.wait_for(task, timeout=0.5)
+    except (asyncio.CancelledError, TimeoutError):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_timeout_no_op_for_already_done_task() -> None:
+    async def _quick() -> None:
+        return
+
+    task = asyncio.create_task(_quick())
+    await asyncio.sleep(0.01)
+    assert task.done()
+    # Should be a no-op — neither raise nor block.
+    await daemon._cancel_with_timeout(task, "already_done", timeout=2.0)
