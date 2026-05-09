@@ -231,8 +231,8 @@ def test_module_name_defaults_to_short_name(
 # ---------------------------------------------------------------------------
 
 
-def test_live_registry_has_all_18_connectors() -> None:
-    """The 18 direct-connector kinds named in issue #223 all register."""
+def test_live_registry_has_all_registered_connectors() -> None:
+    """The shipped direct-connector kinds all register."""
     import research_agent.tools  # noqa: F401 — ensure registration ran
 
     expected = {
@@ -244,15 +244,18 @@ def test_live_registry_has_all_18_connectors() -> None:
         "fec_search",
         "fedregister_search",
         "gdelt_search",
+        "iarchive_search",
         "lda_search",
         "licensing_search",
         "linkedin_search",
         "littlesis_search",
+        "loc_search",
         "nonprofits_search",
         "opencorporates_search",
         "sanctions_search",
         "scholar_search",
         "sos_search",
+        "trove_search",
         "usaspending_search",
     }
     actual = {entry.name for entry in iter_kinds()}
@@ -260,7 +263,7 @@ def test_live_registry_has_all_18_connectors() -> None:
 
 
 def test_live_registry_skill_name_assignment() -> None:
-    """The 5 connectors with shipping skills wire ``skill_name``; the 13 don't."""
+    """Connectors with shipping skills wire ``skill_name``."""
     import research_agent.tools  # noqa: F401
 
     skilled = {
@@ -274,4 +277,7 @@ def test_live_registry_skill_name_assignment() -> None:
         "edgar_search": "edgar",
         "fec_search": "fec",
         "fedregister_search": "fedregister",
+        "iarchive_search": "iarchive",
+        "loc_search": "loc",
+        "trove_search": "trove",
     }
