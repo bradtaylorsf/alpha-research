@@ -197,6 +197,8 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
         "category",
         "zone",
         "sortby",
+        "collection",
+        "page",
     }
 )
 

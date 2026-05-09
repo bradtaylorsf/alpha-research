@@ -195,6 +195,7 @@ connector module on the fetch side.
 | `site:cslb.ca.gov` | `licensing_search` (state: CA) | `site:cslb.ca.gov "SBI Builders"` |
 | `site:bizfileonline.sos.ca.gov` | `sos_search` (state: CA) | `site:bizfileonline.sos.ca.gov "Acme Corp"` |
 | `site:bbb.org` | `bbb_search` | `site:bbb.org "SBI Builders"` |
+| `site:loc.gov` | `loc_search` | `site:loc.gov "battle of algiers"` |
 
 ### Payload shapes
 

@@ -32,6 +32,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     licensing,
     linkedin,
     littlesis,
+    loc,
     nonprofits,
     opencorporates,
     sanctions,
@@ -321,6 +322,35 @@ def _smoke_nonprofits(query: str) -> str:
                 snippet = snippet[:200] + "…"
             lines.append(
                 f"- {hit.title} — EIN {ein} — {city}, {state} — NTEE {ntee}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_loc(query: str) -> str:
+    """Smoke wrapper: Library of Congress unified search.
+
+    Per AC: ``research _smoke-tool loc_search "battle of algiers"`` should
+    return ≥1 result with a non-empty title and a ``www.loc.gov`` URL.
+    Each line shows the title, URL, and source_kind so an operator can
+    eyeball whether the loc.gov JSON API is reachable.
+    """
+    from research_agent.tools import loc
+
+    async def _run() -> str:
+        results = await loc.search(query, max_results=5)
+        if not results:
+            return f"loc search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — source_kind={hit.source_kind}\n"
                 f"  {hit.url}\n"
                 f"  {snippet}"
             )
@@ -1264,6 +1294,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "courtlistener": _smoke_courtlistener,
     "scholar": _smoke_scholar,
     "linkedin": _smoke_linkedin,
+    "loc_search": _smoke_loc,
     "fedregister": _smoke_fedregister,
     "nonprofits": _smoke_nonprofits,
     "fec": _smoke_fec,
