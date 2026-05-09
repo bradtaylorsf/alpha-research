@@ -279,6 +279,8 @@ def status_command(
             cost=data["cost"],
             recent_events=data["recent_events"],
             budget_cap=data["budget_cap"],
+            time_cap_hours=data["time_cap_hours"],
+            started_at=data["started_at"],
             eta_seconds=data["eta_seconds"],
             current_task=data["current_task"],
         )

@@ -47,6 +47,7 @@ import httpx
 
 from research_agent.config import get as cfg_get
 from research_agent.observability.events import emit
+from research_agent.storage import db
 from research_agent.storage.jobs import DEFAULT_JOBS_ROOT, Job
 
 logger = logging.getLogger(__name__)
@@ -355,6 +356,32 @@ def _resolve_db_path() -> Path | None:
     """Pull ``RESEARCH_DB_PATH`` from the env, if set, else None for the default."""
     val = os.environ.get("RESEARCH_DB_PATH")
     return Path(val) if val else None
+
+
+def _coerce_positive_hours(raw: Any) -> float | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        hours = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return hours if hours > 0 else None
+
+
+def _load_time_cap_hours(job: Job, intake: dict[str, Any]) -> float | None:
+    raw = intake.get("time_cap_hours")
+    if raw is not None:
+        return _coerce_positive_hours(raw)
+
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            "SELECT time_cap_hours FROM jobs WHERE id = ?",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return _coerce_positive_hours(row["time_cap_hours"] if row is not None else None)
 
 
 def _install_stop_signal_handlers(
@@ -741,6 +768,9 @@ async def run_daemon(
         loop_kwargs: dict[str, Any] = {}
         if isinstance(max_tasks_override, int) and max_tasks_override >= 1:
             loop_kwargs["max_tasks"] = max_tasks_override
+        time_cap_override = _load_time_cap_hours(job, intake)
+        if time_cap_override is not None:
+            loop_kwargs["time_cap_hours"] = time_cap_override
         try:
             loop_result = await _loop.run_loop(job, router, **loop_kwargs)
         except BudgetExceeded as exc:
@@ -784,6 +814,9 @@ async def run_daemon(
             return 1
 
         plan = _loop._load_latest_plan(job)
+        loop_time_capped = loop_result is not None and (
+            loop_result.get("completion_reason") == "time_cap" or loop_result.get("time_cap_hit")
+        )
         if budget_capped:
             try:
                 if plan is not None:
@@ -805,32 +838,36 @@ async def run_daemon(
             final_status = "completed"
             completion_reason = "budget_cap"
         else:
-            try:
-                if plan is not None:
-                    await _synth.final_synthesis(job, plan, router=router)
-            except Exception as exc:
-                logger.warning("daemon: final synthesis failed for job %s: %s", job.id, exc)
+            if not loop_time_capped:
                 try:
-                    emit(
-                        job,
-                        "WARN",
-                        "daemon",
-                        "warning",
-                        {"stage": "final_synthesis", "error": str(exc)},
-                    )
-                except Exception:
-                    pass
+                    if plan is not None:
+                        await _synth.final_synthesis(job, plan, router=router)
+                except Exception as exc:
+                    logger.warning("daemon: final synthesis failed for job %s: %s", job.id, exc)
+                    try:
+                        emit(
+                            job,
+                            "WARN",
+                            "daemon",
+                            "warning",
+                            {"stage": "final_synthesis", "error": str(exc)},
+                        )
+                    except Exception:
+                        pass
 
-            # Re-load the plan after final_synthesis: that pass can fire a
-            # synthesizer that calls update_subgoal_done, writing a new plan
-            # version with done=True flags. Using the stale plan from before
-            # final_synthesis would miss those closures and mis-classify a
-            # clean finish as user_stopped (issue #160).
+            # Re-load the plan after any final synthesis path: that pass can
+            # fire a synthesizer that calls update_subgoal_done, writing a new
+            # plan version with done=True flags. Using the stale plan from
+            # before final_synthesis would miss those closures and mis-classify
+            # a clean finish as user_stopped (issue #160).
             plan = _loop._load_latest_plan(job)
 
             if _loop._should_stop(job):
                 final_status = "stopped"
                 completion_reason = "user_stopped"
+            elif loop_time_capped:
+                final_status = "completed"
+                completion_reason = "time_cap"
             elif loop_result is not None and loop_result.get("cap_hit"):
                 final_status = "completed"
                 completion_reason = "task_cap"
