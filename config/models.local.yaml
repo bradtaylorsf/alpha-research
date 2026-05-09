@@ -63,6 +63,7 @@ tiers:
     provider: lmstudio
     model: google/gemma-4-26b-a4b
     timeout_s: 600
+    fallback_tier: frontier
     purpose: Critique alt — same model as frontier in local mode.
 
   frontier_speed:

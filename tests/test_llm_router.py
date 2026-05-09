@@ -27,6 +27,7 @@ from research_agent.storage.jobs import Job
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHIPPED_MODELS_YAML = REPO_ROOT / "config" / "models.yaml"
+SHIPPED_LOCAL_MODELS_YAML = REPO_ROOT / "config" / "models.local.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -889,6 +890,14 @@ def test_models_yaml_ships_lmstudio_fallback_tiers() -> None:
     assert "fallback_tier" not in tiers["embeddings"]
 
 
+def test_local_models_yaml_routes_frontier_alt_to_frontier() -> None:
+    """Local critique must have a declared same-family fallback tier."""
+    cfg = load_models_config(SHIPPED_LOCAL_MODELS_YAML)
+    tiers = cfg["tiers"]
+    assert tiers["frontier_alt"]["provider"] == "lmstudio"
+    assert tiers["frontier_alt"].get("fallback_tier") == "frontier"
+
+
 def _make_lmstudio_router(
     *,
     job: Job,
@@ -977,6 +986,82 @@ async def test_two_timeouts_marks_tier_degraded_and_routes_to_fallback(
     # charge) so the budget side recorded one cloud call.
     assert budget.precheck_calls == ["frontier_speed"]
     assert len(budget.charge_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_frontier_alt_lmstudio_degradation_defaults_to_frontier_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    db_path: Path,
+    job: Job,
+) -> None:
+    """Critique's local frontier_alt tier falls through to frontier even without config."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    cfg: dict[str, Any] = {
+        "tiers": {
+            t: {"provider": "lmstudio", "model": "stub", "timeout_s": 60}
+            for t in EXPECTED_TIERS
+        },
+    }
+    cfg["tiers"]["frontier_alt"] = {
+        "provider": "lmstudio",
+        "model": "local-critic",
+        "timeout_s": 0.05,
+    }
+    cfg["tiers"]["frontier"] = {
+        "provider": "openrouter",
+        "model": "anthropic/claude-opus-4-7",
+        "timeout_s": 60,
+    }
+    budget = _RecordingBudget(cost_per_call=0.17, db_path=db_path, job_id=job.id)
+    router = Router(cfg, budget, job=job, db_path=db_path)  # type: ignore[arg-type]
+    router.retry_sleep_s = 0.0
+    router.openrouter_retry_min_delay = 0.0
+    router.openrouter_retry_max_delay = 0.0
+    router.openrouter_retry_stop_delay = 0.0
+
+    cloud_agent = _FakeAgent(result=_FakeResult(output="frontier fallback"))
+    fallback_tiers: list[str] = []
+
+    def _fallback_agent(tier: str) -> _FakeAgent:
+        fallback_tiers.append(tier)
+        return cloud_agent
+
+    monkeypatch.setattr(router, "_make_fallback_tier_agent", _fallback_agent)
+
+    local_agent = _FakeAgent(sleep_s=1.0)
+    result = await router.call("frontier_alt", local_agent, "critique context")
+
+    assert result is cloud_agent.result
+    assert fallback_tiers == ["frontier"]
+    assert len(local_agent.calls) == 2
+    assert len(cloud_agent.calls) == 1
+    assert budget.precheck_calls == ["frontier"]
+    assert len(budget.charge_calls) == 1
+
+    second_local_agent = _FakeAgent(sleep_s=1.0)
+    second = await router.call("frontier_alt", second_local_agent, "critique context 2")
+    assert second is cloud_agent.result
+    assert second_local_agent.calls == []
+    assert fallback_tiers == ["frontier", "frontier"]
+    assert len(cloud_agent.calls) == 2
+    assert budget.precheck_calls == ["frontier", "frontier"]
+
+    degraded = _read_events_by_kind(job, "lmstudio_degraded")
+    rerouted = _read_events_by_kind(job, "lmstudio_rerouted")
+    assert len(degraded) == 1
+    assert degraded[0]["payload"]["tier"] == "frontier_alt"
+    assert degraded[0]["payload"]["fallback_tier"] == "frontier"
+    assert len(rerouted) == 2
+    assert rerouted[0]["payload"]["original_tier"] == "frontier_alt"
+    assert rerouted[0]["payload"]["fallback_tier"] == "frontier"
+    assert rerouted[1]["payload"]["original_tier"] == "frontier_alt"
+    assert rerouted[1]["payload"]["fallback_tier"] == "frontier"
+
+    assert router.last_call_metadata is not None
+    assert router.last_call_metadata["tier"] == "frontier"
+    assert router.last_call_metadata["model"] == "anthropic/claude-opus-4-7"
+    assert router.last_call_metadata["original_tier"] == "frontier_alt"
+    assert router.last_call_metadata["rerouted"] is True
 
 
 @pytest.mark.asyncio

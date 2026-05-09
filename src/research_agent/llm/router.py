@@ -19,8 +19,9 @@ the tier's configured ``fallback_tier`` (cloud), each emitting a WARN event
 plus a per-call cost figure so the operator can see what's being charged.
 After the window expires the router retries local; on success the tier is
 marked recovered (INFO event). When no ``fallback_tier`` is configured the
-second TimeoutError propagates — the §16 anti-pattern is silent reroutes,
-not loud ones.
+second TimeoutError propagates, except ``frontier_alt`` defaults to
+``frontier`` so critique can still run during local-model degradation. The
+§16 anti-pattern is silent reroutes, not loud ones.
 """
 
 from __future__ import annotations
@@ -323,6 +324,10 @@ class Router:
         # only after two consecutive timeouts; cleared after a successful
         # local call once the window has expired. Public for tests/inspection.
         self._tier_degraded_until: dict[str, float] = {}
+        # Metadata for the most recent successful model call. Critique and
+        # warning paths use this to report the tier/model that actually
+        # produced output after router-level fallback.
+        self.last_call_metadata: dict[str, Any] | None = None
         # Settable per-instance so tests can drop the sleep to zero without
         # monkeypatching the global asyncio loop.
         self.retry_sleep_s: float = LMSTUDIO_RETRY_SLEEP_S
@@ -413,13 +418,13 @@ class Router:
 
         # Skip local entirely while the tier is in its degraded window —
         # rerouting earliest avoids burning another timeout cycle on a swap
-        # that's known to be in flight. Without a configured fallback we fall
-        # through and try local; the §16 rule is *no silent reroutes*, not *no
-        # local attempts at all*.
+        # that's known to be in flight. Without a fallback we fall through and
+        # try local; frontier_alt gets a default frontier fallback because
+        # critique is the loop's self-correction path.
         if is_local:
             until = self._tier_degraded_until.get(tier)
             if until is not None and time.time() < until:
-                fallback_tier = spec.get("fallback_tier")
+                fallback_tier = self._lmstudio_fallback_tier(tier, spec)
                 if fallback_tier:
                     return await self._reroute_to_fallback_tier(
                         original_tier=tier,
@@ -449,6 +454,14 @@ class Router:
                     fallback_used=False,
                     cached=True,
                 )
+                self.last_call_metadata = {
+                    "tier": tier,
+                    "provider": provider,
+                    "model": model_name,
+                    "cost_usd": 0.0,
+                    "fallback_used": False,
+                    "cached": True,
+                }
                 return _CachedResult(hit)
 
         if is_cloud:
@@ -482,7 +495,7 @@ class Router:
                 # is intentionally omitted, e.g. embeddings).
                 until_ts = time.time() + self.degraded_window_s
                 self._tier_degraded_until[tier] = until_ts
-                fallback_tier = spec.get("fallback_tier")
+                fallback_tier = self._lmstudio_fallback_tier(tier, spec)
                 self._emit_lmstudio_degraded(
                     tier=tier,
                     fallback_tier=fallback_tier,
@@ -541,8 +554,24 @@ class Router:
             fallback_used=fallback_used,
             cached=False,
         )
+        self.last_call_metadata = {
+            "tier": tier,
+            "provider": provider,
+            "model": model_name,
+            "cost_usd": cost_usd,
+            "fallback_used": fallback_used,
+            "cached": False,
+        }
 
         return result
+
+    def _lmstudio_fallback_tier(self, tier: str, spec: dict[str, Any]) -> str | None:
+        configured = spec.get("fallback_tier")
+        if isinstance(configured, str) and configured:
+            return configured
+        if tier == "frontier_alt" and "frontier" in self.tiers:
+            return "frontier"
+        return None
 
     @staticmethod
     async def _run_with_timeout(
@@ -616,6 +645,12 @@ class Router:
             fallback_tier=fallback_tier,
             cost_usd=cost_usd,
         )
+        if self.last_call_metadata is not None:
+            self.last_call_metadata = {
+                **self.last_call_metadata,
+                "original_tier": original_tier,
+                "rerouted": True,
+            }
         return result
 
     # ---- Ledger + event ----------------------------------------------------
