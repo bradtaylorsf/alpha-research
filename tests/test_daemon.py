@@ -18,6 +18,7 @@ These tests exercise the §5.1 + §6.1 contract from the implementation guide:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
@@ -303,7 +304,7 @@ def _patch_run_daemon_for_in_process(
     calls: dict[str, list[tuple[Any, ...]]] = {"final_synthesis": [], "run_loop": []}
 
     async def _wrapped_run_loop(job: Job, router: Any, **kwargs: Any) -> Any:
-        calls["run_loop"].append((job.id,))
+        calls["run_loop"].append((job.id, kwargs))
         return await run_loop_impl(job, router, **kwargs)
 
     async def _final_synth_stub(job: Job, plan: Plan, *, router: Any) -> None:
@@ -433,6 +434,52 @@ async def test_run_daemon_completed_status_when_plan_is_complete(
         db_path=seeded_job.db_path,
     )
     assert refreshed.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_passes_time_cap_and_marks_time_cap_completion(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Persisted ``time_cap_hours`` is forwarded to run_loop and classified distinctly."""
+    intake = dict(seeded_job.intake)
+    intake["time_cap_hours"] = 1
+    conn = db.connect(seeded_job.db_path)
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE jobs SET intake_json = ?, time_cap_hours = ? WHERE id = ?",
+                (json.dumps(intake, sort_keys=True), 1, seeded_job.id),
+            )
+    finally:
+        conn.close()
+
+    async def _time_capped_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "tasks_done": 1,
+            "stopped": False,
+            "completed": False,
+            "cap_hit": False,
+            "time_cap_hit": True,
+            "completion_reason": "time_cap",
+        }
+
+    calls = _patch_run_daemon_for_in_process(monkeypatch, run_loop_impl=_time_capped_run_loop)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert exit_code == 0
+    assert calls["run_loop"][0][1]["time_cap_hours"] == 1.0
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "completed"
+    assert refreshed.completion_reason == "time_cap"
 
 
 @pytest.mark.asyncio

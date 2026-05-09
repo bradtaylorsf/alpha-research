@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -2348,6 +2349,7 @@ async def run_loop(
     plan: Plan | None = None,
     handlers: dict[str, Handler] | None = None,
     max_tasks: int = MAX_TASKS_PER_JOB,
+    time_cap_hours: float | None = None,
     retry_waits: tuple[int, ...] = RETRY_WAITS,
     retry_max_attempts: int = RETRY_MAX_ATTEMPTS,
 ) -> dict[str, Any]:
@@ -2368,9 +2370,19 @@ async def run_loop(
             "run initial_plan() before entering the loop"
         )
 
+    start_ts = time.monotonic()
+    time_cap_seconds = (
+        float(time_cap_hours) * 3600 if time_cap_hours is not None and time_cap_hours > 0 else None
+    )
+    deadline_ts = start_ts + time_cap_seconds if time_cap_seconds is not None else None
+
+    def _within_time_cap() -> bool:
+        return deadline_ts is None or deadline_ts > time.monotonic()
+
     tasks_done = 0
     stopped = False
     cap_hit = False
+    time_cap_hit = False
     drain_replans = 0
 
     checkpoint(
@@ -2379,7 +2391,12 @@ async def run_loop(
         {"plan_version": plan.version, "objective": plan.objective},
     )
 
-    while not _should_stop(job) and not plan.is_complete() and tasks_done < max_tasks:
+    while (
+        not _should_stop(job)
+        and not plan.is_complete()
+        and tasks_done < max_tasks
+        and _within_time_cap()
+    ):
         task = next_pending(job)
         if task is None:
             cap = _resolve_drain_cap(plan)
@@ -2566,7 +2583,28 @@ async def run_loop(
             if refreshed is not None:
                 plan = refreshed
 
-    if tasks_done >= max_tasks and not _should_stop(job):
+    if (
+        deadline_ts is not None
+        and not _should_stop(job)
+        and not plan.is_complete()
+        and not _within_time_cap()
+    ):
+        time_cap_hit = True
+        emit(
+            job,
+            "WARN",
+            "loop",
+            "warning",
+            {
+                "time_cap_hit": True,
+                "time_cap_hours": time_cap_hours,
+                "tasks_done": tasks_done,
+                "elapsed_seconds": time.monotonic() - start_ts,
+            },
+        )
+        await _final_synthesis_best_effort(job, handlers)
+
+    if tasks_done >= max_tasks and not _should_stop(job) and not time_cap_hit:
         cap_hit = True
         emit(
             job,
@@ -2586,6 +2624,11 @@ async def run_loop(
         "stopped": stopped,
         "completed": plan.is_complete(),
         "cap_hit": cap_hit,
+        "time_cap_hit": time_cap_hit,
+        "completion_reason": (
+            "time_cap" if time_cap_hit else "task_cap" if cap_hit else None
+        ),
+        "elapsed_seconds": time.monotonic() - start_ts,
         "drain_replans": drain_replans,
     }
 

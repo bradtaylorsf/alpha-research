@@ -296,6 +296,111 @@ async def test_max_tasks_cap_triggers_final_synthesis(job: Job, db_path: Path, p
 
 
 @pytest.mark.asyncio
+async def test_time_cap_terminates_with_final_synthesis(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-hour cap stops a large queue at the deadline and reports ``time_cap``."""
+    _seed_tasks(job, ["web_search"] * 1000)
+    clock = {"now": 0.0}
+    synth_calls = {"n": 0}
+
+    monkeypatch.setattr(
+        "research_agent.orchestrator.loop.time.monotonic",
+        lambda: clock["now"],
+    )
+
+    async def web_search(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        clock["now"] += 360.0
+        return {"hits": 1}
+
+    async def synth(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        synth_calls["n"] += 1
+        return {"ok": True}
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": web_search, "synthesize": synth},
+        time_cap_hours=1,
+        retry_waits=(0,),
+    )
+
+    assert result["completion_reason"] == "time_cap"
+    assert result["time_cap_hit"] is True
+    assert result["cap_hit"] is False
+    assert result["elapsed_seconds"] <= 1.05 * 3600
+    assert synth_calls["n"] == 1
+
+    rows = _read_task_rows(db_path, job.id)
+    done_count = sum(1 for r in rows if r["status"] == STATUS_DONE)
+    pending_count = sum(1 for r in rows if r["status"] == STATUS_PENDING)
+    assert done_count == 10
+    assert pending_count == 990
+
+
+@pytest.mark.asyncio
+async def test_time_cap_unset_preserves_legacy_drain_behavior(
+    job: Job,
+    plan: Plan,
+) -> None:
+    """Without a time cap, the loop drains the queue as it did before."""
+    _seed_tasks(job, ["web_search"] * 3)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["tasks_done"] == 3
+    assert result["time_cap_hit"] is False
+    assert result["completion_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_time_cap_waits_for_in_flight_handler(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the cap expires during a handler, that task finishes before the loop exits."""
+    _seed_tasks(job, ["web_search", "web_search"])
+    clock = {"now": 0.0}
+
+    monkeypatch.setattr(
+        "research_agent.orchestrator.loop.time.monotonic",
+        lambda: clock["now"],
+    )
+
+    async def slow_handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        clock["now"] += 3601.0
+        return {"hits": 1}
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": slow_handler},
+        time_cap_hours=1,
+        retry_waits=(0,),
+    )
+
+    assert result["completion_reason"] == "time_cap"
+    assert result["tasks_done"] == 1
+
+    rows = _read_task_rows(db_path, job.id)
+    assert rows[0]["status"] == STATUS_DONE
+    assert rows[1]["status"] == STATUS_PENDING
+
+
+@pytest.mark.asyncio
 async def test_follow_up_tasks_get_enqueued(job: Job, db_path: Path, plan: Plan) -> None:
     """A handler returning ``follow_up_tasks`` must enqueue + process them."""
     _seed_tasks(job, ["web_search"])

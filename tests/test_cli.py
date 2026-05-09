@@ -148,13 +148,17 @@ def _make_synthetic_job(
     today: date = date(2026, 5, 2),
     status: str = "pending",
     cost: float = 1.23,
+    time_cap_hours: int | None = None,
     plan_version: int | None = None,
     finding_text: str | None = None,
     event_lines: list[dict] | None = None,
 ) -> Job:
     """Hand-create a job, optionally seed plan/finding/events for richer tests."""
+    intake = {"goal": goal, "domain": "general"}
+    if time_cap_hours is not None:
+        intake["time_cap_hours"] = time_cap_hours
     job = Job.create(
-        {"goal": goal, "domain": "general"},
+        intake,
         jobs_root=repo / "jobs",
         db_path=repo / "data" / "index.sqlite",
         today=today,
@@ -432,6 +436,38 @@ def test_status_renders_eta_and_current_task(isolated_jobs_repo: Path):
     # Counter row uses the canonical pending/running/done/failed shape.
     assert "pending=2" in out
     assert "done=3" in out
+
+
+def test_status_panel_shows_elapsed_against_time_cap(isolated_jobs_repo: Path):
+    """`research status` data includes elapsed wall time next to the persisted cap."""
+    from rich.console import Console
+
+    job = _make_synthetic_job(
+        isolated_jobs_repo,
+        goal="timed target",
+        time_cap_hours=2,
+    )
+
+    data = render.load_status_data(job)
+    panel = render.render_status_panel(
+        job,
+        plan_version=data["plan_version"],
+        task_counts=data["task_counts"],
+        cost=data["cost"],
+        recent_events=data["recent_events"],
+        budget_cap=data["budget_cap"],
+        time_cap_hours=data["time_cap_hours"],
+        started_at=data["started_at"],
+        eta_seconds=data["eta_seconds"],
+        current_task=data["current_task"],
+        now=job.created_at + 1800,
+    )
+
+    console = Console(record=True, width=200)
+    console.print(panel)
+    rendered = console.export_text()
+    assert "Elapsed / time cap" in rendered
+    assert "30m / 2h" in rendered
 
 
 def test_status_idle_when_no_running_task(isolated_jobs_repo: Path):
