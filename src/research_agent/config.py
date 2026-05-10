@@ -166,6 +166,15 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         ),
     ),
     EnvKey(
+        name="DPLA_API_KEY",
+        required=False,
+        description=(
+            "Digital Public Library of America API key for tools/dpla.py."
+            " Request with curl -X POST https://api.dp.la/v2/api_key/<your-email>;"
+            " the emailed 32-character key is sent as api_key=<key>."
+        ),
+    ),
+    EnvKey(
         name="SERPAPI_KEY",
         required=False,
         description=(

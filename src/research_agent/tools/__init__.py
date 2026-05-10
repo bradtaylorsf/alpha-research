@@ -19,6 +19,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     congress,
     courtlistener,
     cspan,
+    dpla,
     edgar,
     fec,
     fedregister,
@@ -957,6 +958,62 @@ def _smoke_si_search(query: str) -> str:
                 ("object_type", "object_type"),
                 ("license", "license"),
                 ("image_url", "image_url"),
+            ):
+                value = str(hit.extras.get(key) or "").strip()
+                if value:
+                    lines.append(f"  {label}: {value}")
+            if snippet:
+                lines.append(f"  snippet: {snippet}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_dpla_search(query: str) -> str:
+    """Smoke wrapper: DPLA item search, skipping when no key is set."""
+    import sys
+
+    from research_agent import config
+
+    if not (config.get("DPLA_API_KEY") or "").strip():
+        return (
+            "_smoke-tool dpla_search: would need DPLA_API_KEY; request one "
+            "with curl -X POST https://api.dp.la/v2/api_key/<your-email>; "
+            "live test skipped"
+        )
+
+    async def _run() -> str:
+        results = await dpla.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool dpla_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url for hit in results if not hit.title or not hit.url
+        ]
+        if missing:
+            print(
+                "_smoke-tool dpla_search: missing title/url on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"dpla_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(f"- {hit.title}\n  url: {hit.url}")
+            for label, key in (
+                ("dpla_id", "dpla_id"),
+                ("provider", "provider"),
+                ("data_provider", "data_provider"),
+                ("license", "license"),
+                ("object_url", "object_url"),
             ):
                 value = str(hit.extras.get(key) or "").strip()
                 if value:
@@ -1943,6 +2000,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "calaccess": _smoke_calaccess,
     "commons_search": _smoke_commons_search,
     "cspan_search": _smoke_cspan_search,
+    "dpla_search": _smoke_dpla_search,
     "edgar": _smoke_edgar,
     "courtlistener": _smoke_courtlistener,
     "scholar": _smoke_scholar,

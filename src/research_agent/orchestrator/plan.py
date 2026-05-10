@@ -111,6 +111,8 @@ TaskKind = Literal[
     "commons_fetch",
     "cspan_search",
     "cspan_fetch",
+    "dpla_search",
+    "dpla_fetch",
     "iarchive_search",
     "iarchive_fetch",
     "trove_search",

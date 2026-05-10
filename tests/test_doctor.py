@@ -286,6 +286,35 @@ def test_run_all_checks_includes_trove_note(tmp_path):
     assert any(r.name == "trove_api_note" for r in results)
 
 
+def test_check_dpla_api_note_skips_when_key_missing(monkeypatch):
+    monkeypatch.delenv("DPLA_API_KEY", raising=False)
+
+    result = doctor.check_dpla_api_note()
+
+    assert result.name == "dpla_api_note"
+    assert result.status == "skip"
+    assert result.required is False
+    assert "curl -X POST https://api.dp.la/v2/api_key/<your-email>" in result.detail
+    assert "?api_key=<key>" in result.detail
+
+
+def test_check_dpla_api_note_masks_present_key(monkeypatch):
+    monkeypatch.setenv("DPLA_API_KEY", "1234567890abcdef1234567890abcdef")
+
+    result = doctor.check_dpla_api_note()
+
+    assert result.status == "ok"
+    assert "...cdef" in result.detail
+    assert "1234567890abcdef" not in result.detail
+
+
+def test_run_all_checks_includes_dpla_note(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.yaml").write_text("tiers: {}\n", encoding="utf-8")
+    results = doctor.run_all_checks([], repo_root=tmp_path)
+    assert any(r.name == "dpla_api_note" for r in results)
+
+
 def test_check_result_dataclass_shape():
     from dataclasses import FrozenInstanceError
 
