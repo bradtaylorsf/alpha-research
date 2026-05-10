@@ -194,6 +194,7 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
         "jurisdiction",
         "award_type",
         "language",
+        "lang",
         "category",
         "zone",
         "sortby",

@@ -1,0 +1,19 @@
+{
+  "batchcomplete": true,
+  "query": {
+    "searchinfo": {
+      "totalhits": 1
+    },
+    "search": [
+      {
+        "ns": 0,
+        "title": "La Marseillaise",
+        "pageid": 777,
+        "size": 9000,
+        "wordcount": 1100,
+        "snippet": "Allons enfants de la Patrie.",
+        "timestamp": "2022-05-01T00:00:00Z"
+      }
+    ]
+  }
+}

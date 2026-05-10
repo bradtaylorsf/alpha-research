@@ -47,6 +47,7 @@ EXPECTED_SOURCE_KINDS = (
     "trove_search",
     "wikidata_search",
     "commons_search",
+    "wikisource_search",
 )
 
 

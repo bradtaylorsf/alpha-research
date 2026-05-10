@@ -387,6 +387,21 @@ _TROVE_HOSTS = frozenset(
 # connector — leave web.archive.org Wayback URLs and bare downloads on the
 # generic httpx + trafilatura path.
 _IARCHIVE_HOSTS = frozenset({"archive.org", "www.archive.org"})
+_WIKISOURCE_HOSTS = frozenset(
+    {
+        "ar.wikisource.org",
+        "de.wikisource.org",
+        "en.wikisource.org",
+        "es.wikisource.org",
+        "fr.wikisource.org",
+        "it.wikisource.org",
+        "ja.wikisource.org",
+        "nl.wikisource.org",
+        "pt.wikisource.org",
+        "ru.wikisource.org",
+        "zh.wikisource.org",
+    }
+)
 
 _PDF_CONTENT_TYPE = "application/pdf"
 
@@ -717,6 +732,11 @@ async def fetch(
         from research_agent.tools import iarchive
 
         return await iarchive.fetch(url)
+
+    if netloc in _WIKISOURCE_HOSTS:
+        from research_agent.tools import wikisource
+
+        return await wikisource.fetch(url)
 
     user_agent = _resolve_user_agent()
 

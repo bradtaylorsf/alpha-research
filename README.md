@@ -109,6 +109,7 @@ from `src/research_agent/tools/_registry.py` via
 | `trove_search` | Trove / National Library of Australia metadata for newspapers, books, photos, magazines, oral histories; metadata-only default | `category`, `zone`, `sortby` | `White Australia Policy 1901` |
 | `usaspending_search` | Federal contracts, grants, loans (award-level detail, no auth) | `award_type: contracts\|grants\|loans` | `Heritage Foundation contract` |
 | `wikidata_search` | Wikidata Query Service raw SPARQL for biographical, relational, occupational, place, and entity-ID data | `max_results` (client-side truncation; SPARQL should include `LIMIT`) | `SELECT ?item ?itemLabel WHERE { ?item wdt:P31 wd:Q5; wdt:P19 wd:Q90 . SERVICE wikibase:label { bd:serviceParam wikibase:language "en". } } LIMIT 3` |
+| `wikisource_search` | Wikisource transcribed primary documents across per-language hosts; fetch returns the full source text in cleaned_text | `lang: en|fr|es|de|it|pt|nl|ru|zh|ja|ar`, `max_results` | `Treaty of Versailles` |
 
 <!-- END: direct-connector-kinds -->
 

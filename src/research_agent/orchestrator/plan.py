@@ -109,6 +109,8 @@ TaskKind = Literal[
     "trove_fetch",
     "wikidata_search",
     "wikidata_fetch",
+    "wikisource_search",
+    "wikisource_fetch",
 ]
 
 ScopeClass = Literal["narrow", "medium", "broad", "comprehensive"]
