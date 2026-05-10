@@ -32,6 +32,7 @@ use it across multiple connectors.
 |---|---|---|---|---|
 | FEC OpenFEC | #94 | `DATA_GOV_API_KEY` | <https://api.data.gov/signup/> | 1,000 req/hr |
 | Congress.gov | #99 | `DATA_GOV_API_KEY` | (same key as above) | 5,000 req/hr |
+| Smithsonian Open Access | #227 | `DATA_GOV_API_KEY` | (same key as above) | api.data.gov tier; connector gates at 1 RPS |
 | Regulations.gov | (future) | `DATA_GOV_API_KEY` | (same key) | varies |
 
 Connector-specific free keys (separate signups):
