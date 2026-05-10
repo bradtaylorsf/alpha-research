@@ -187,7 +187,12 @@ async def tail_events(
 
     from watchfiles import awatch
 
-    async for _changes in awatch(path):
+    watch_target = path if path.exists() else path.parent
+    async for _changes in awatch(
+        watch_target,
+        rust_timeout=250,
+        yield_on_timeout=True,
+    ):
         if not path.exists():
             continue
         with path.open("rb") as f:
