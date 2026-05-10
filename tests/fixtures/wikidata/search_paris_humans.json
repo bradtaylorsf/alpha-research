@@ -1,0 +1,61 @@
+{
+  "head": {
+    "vars": [
+      "item",
+      "itemLabel",
+      "itemDescription",
+      "birth",
+      "img"
+    ]
+  },
+  "results": {
+    "bindings": [
+      {
+        "item": {
+          "type": "uri",
+          "value": "http://www.wikidata.org/entity/Q535"
+        },
+        "itemLabel": {
+          "xml:lang": "en",
+          "type": "literal",
+          "value": "Victor Hugo"
+        },
+        "itemDescription": {
+          "xml:lang": "en",
+          "type": "literal",
+          "value": "French poet, novelist, and dramatist"
+        },
+        "birth": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+          "type": "literal",
+          "value": "1802-02-26T00:00:00Z"
+        },
+        "img": {
+          "type": "uri",
+          "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Victor%20Hugo.jpg"
+        }
+      },
+      {
+        "item": {
+          "type": "uri",
+          "value": "http://www.wikidata.org/entity/Q5593"
+        },
+        "itemLabel": {
+          "xml:lang": "en",
+          "type": "literal",
+          "value": "Simone de Beauvoir"
+        },
+        "itemDescription": {
+          "xml:lang": "en",
+          "type": "literal",
+          "value": "French writer, intellectual, existentialist philosopher, political activist, feminist and social theorist"
+        },
+        "birth": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+          "type": "literal",
+          "value": "1908-01-09T00:00:00Z"
+        }
+      }
+    ]
+  }
+}

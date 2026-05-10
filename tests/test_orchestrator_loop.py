@@ -550,6 +550,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "linkedin",
     "iarchive",
     "trove",
+    "wikidata",
 )
 
 # Connector module name → ``source_kind`` Literal value. Most connectors
@@ -557,6 +558,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
 _CONNECTOR_SOURCE_KIND: dict[str, str] = {p: p for p in CONNECTOR_KIND_PREFIXES}
 _CONNECTOR_SOURCE_KIND["edgar"] = "sec"
 _CONNECTOR_SOURCE_KIND["trove"] = "trove_search"
+_CONNECTOR_SOURCE_KIND["wikidata"] = "wikidata_search"
 
 
 def test_default_handlers_covers_every_task_kind() -> None:

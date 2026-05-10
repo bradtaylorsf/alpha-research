@@ -94,16 +94,20 @@ from `src/research_agent/tools/_registry.py` via
 | `fec_search` | Candidates, committees, schedule A/E filings (OpenFEC) | `kind: candidates\|committees\|schedules/schedule_a\|schedules/schedule_e` | `Trump 2024 committee` |
 | `fedregister_search` | Federal Register rules, proposed rules, agency notices since 1994 (no auth) | `since: YYYY-MM-DD`, `agencies: [...]` | `Schedule F` |
 | `gdelt_search` | GDELT — Global news event aggregator, no `site:` operator (no auth) | `since: YYYY-MM-DD`, `language: english` | `Project 2025 mainstream coverage` |
+| `iarchive_search` | Internet Archive texts, audio, movies, and web-archive collection metadata through advancedsearch.php | `mediatype: texts\|audio\|movies\|web`, `page: <int>` | `Pullman Strike` |
 | `lda_search` | Senate Lobbying Disclosure Act filings (registrants, contributions) | `kind: filings\|registrants\|contributions` | `Heritage Foundation` |
 | `licensing_search` | State contractor / licensing-board lookups (Playwright; CA wired, others stubs) | `state: CA\|TX\|FL\|NY` | `SBI Builders` |
 | `linkedin_search` | LinkedIn person/company lookup via Proxycurl or Lix — requires broker key | `kind: person\|company` | `Sundar Pichai` |
 | `littlesis_search` | Power-mapping database — entities, donations, board seats, family ties (lead, not evidence) | `kind: entities\|relationships` | `Peter Thiel` |
+| `loc_search` | Library of Congress digital collections, including Chronicling America through the unified loc.gov API | `collection: chronicling-america\|prints\|manuscripts\|recordings\|maps`, `page: <int>` | `battle of algiers` |
 | `nonprofits_search` | ProPublica Nonprofit Explorer (Form 990 filings, no auth) | — | `Heritage Foundation` |
 | `opencorporates_search` | Global company registry — requires `OPENCORPORATES_API_KEY` | `jurisdiction: us_ca\|gb\|...` | `Acme Holdings` |
 | `sanctions_search` | OFAC SDN + UK sanctions lists (local index, no auth) | — | `Wagner Group` |
 | `scholar_search` | Google Scholar via SerpAPI — requires `SERPAPI_KEY` | `kind: case_law\|articles` | `Section 230 appellate` |
 | `sos_search` | State Secretary-of-State business entity filings (Playwright; CA wired, others stubs) | `state: CA\|DE\|NV\|...` | `Acme Corp` |
+| `trove_search` | Trove / National Library of Australia metadata for newspapers, books, photos, magazines, oral histories; metadata-only default | `category`, `zone`, `sortby` | `White Australia Policy 1901` |
 | `usaspending_search` | Federal contracts, grants, loans (award-level detail, no auth) | `award_type: contracts\|grants\|loans` | `Heritage Foundation contract` |
+| `wikidata_search` | Wikidata Query Service raw SPARQL for biographical, relational, occupational, place, and entity-ID data | `max_results` (client-side truncation; SPARQL should include `LIMIT`) | `SELECT ?item ?itemLabel WHERE { ?item wdt:P31 wd:Q5; wdt:P19 wd:Q90 . SERVICE wikibase:label { bd:serviceParam wikibase:language "en". } } LIMIT 3` |
 
 <!-- END: direct-connector-kinds -->
 
