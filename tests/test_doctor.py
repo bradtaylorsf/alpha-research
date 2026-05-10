@@ -376,6 +376,13 @@ def test_check_planner_allowlist_coherence_passes_for_live_registry() -> None:
     assert result.required is True
 
 
+def test_check_task_kind_registry_coherence_passes_for_live_registry() -> None:
+    """Every registry-rendered connector kind must also validate as TaskKind."""
+    result = doctor.check_task_kind_registry_coherence()
+    assert result.status == "ok", result.detail
+    assert result.required is True
+
+
 def test_check_planner_allowlist_coherence_flags_orphan(monkeypatch) -> None:
     """A kind in the allowlist that isn't registered is a hard fail.
 
@@ -485,4 +492,5 @@ def test_run_all_checks_includes_registry_coherence(tmp_path) -> None:
     results = doctor.run_all_checks([], repo_root=tmp_path)
     names = {r.name for r in results}
     assert "planner_allowlist_coherence" in names
+    assert "task_kind_registry_coherence" in names
     assert any(n.startswith("registry_skill:") for n in names)

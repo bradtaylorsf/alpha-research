@@ -426,6 +426,47 @@ def check_planner_allowlist_coherence() -> CheckResult:
         )
 
 
+def check_task_kind_registry_coherence() -> CheckResult:
+    """Assert every registered connector kind validates as a planner TaskKind."""
+    name = "task_kind_registry_coherence"
+    try:
+        from typing import get_args
+
+        import research_agent.tools  # noqa: F401 - populate the connector registry
+        from research_agent.orchestrator.plan import TaskKind
+        from research_agent.tools._registry import iter_kinds
+
+        allowed = set(get_args(TaskKind))
+        missing: list[str] = []
+        for entry in iter_kinds():
+            if entry.name not in allowed:
+                missing.append(entry.name)
+            fetch_kind = entry.name.replace("_search", "_fetch")
+            if fetch_kind not in allowed:
+                missing.append(fetch_kind)
+
+        if missing:
+            return CheckResult(
+                name,
+                "fail",
+                required=True,
+                detail=f"registered connector kinds missing from TaskKind: {missing}",
+            )
+        return CheckResult(
+            name,
+            "ok",
+            required=True,
+            detail=f"{len(list(iter_kinds()))} registered kinds validate as TaskKind",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            name,
+            "fail",
+            required=True,
+            detail=f"coherence check raised {type(exc).__name__}: {exc}",
+        )
+
+
 def check_registry_skill_coherence() -> list[CheckResult]:
     """Assert each registered kind's skill file exists and parses.
 
@@ -512,6 +553,7 @@ def run_all_checks(
     results.append(check_trove_api_note())
     results.extend(check_sanctions_refresh())
     results.append(check_planner_allowlist_coherence())
+    results.append(check_task_kind_registry_coherence())
     results.extend(check_registry_skill_coherence())
     return results
 

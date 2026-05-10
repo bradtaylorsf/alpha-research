@@ -53,6 +53,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "usaspending",
     "gdelt",
     "littlesis",
+    "loc",
     "nonprofits",
     "opencorporates",
     "sanctions",
@@ -96,6 +97,22 @@ def test_task_kind_covers_expected_set() -> None:
         expected.add(f"{prefix}_search")
         expected.add(f"{prefix}_fetch")
     assert set(ALL_TASK_KINDS) == expected
+
+
+def test_task_kind_covers_registered_connector_kinds() -> None:
+    import research_agent.tools  # noqa: F401 - populates the connector registry
+    from research_agent.tools._registry import iter_kinds
+
+    task_kinds = set(ALL_TASK_KINDS)
+    missing: list[str] = []
+    for entry in iter_kinds():
+        if entry.name not in task_kinds:
+            missing.append(entry.name)
+        fetch_kind = entry.name.replace("_search", "_fetch")
+        if fetch_kind not in task_kinds:
+            missing.append(fetch_kind)
+
+    assert missing == []
 
 
 @pytest.mark.parametrize("prefix", CONNECTOR_KIND_PREFIXES)

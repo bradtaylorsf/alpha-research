@@ -103,6 +103,8 @@ TaskKind = Literal[
     "scholar_fetch",
     "linkedin_search",
     "linkedin_fetch",
+    "loc_search",
+    "loc_fetch",
     "commons_search",
     "commons_fetch",
     "cspan_search",

@@ -786,4 +786,3 @@ _register_kind(
     example_query="guerra civil 1936",
     module_name="bne",
 )
-
