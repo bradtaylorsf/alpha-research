@@ -48,6 +48,7 @@ EXPECTED_SOURCE_KINDS = (
     "wikidata_search",
     "commons_search",
     "wikisource_search",
+    "hathitrust",
 )
 
 

@@ -1,0 +1,42 @@
+{
+  "records": {
+    "000578050": {
+      "recordURL": "https://catalog.hathitrust.org/Record/000578050",
+      "titles": [
+        "Infinite series."
+      ],
+      "isbns": [
+        "0030110408"
+      ],
+      "issns": [],
+      "oclcs": [
+        "00424023"
+      ],
+      "lccns": [
+        "62009520"
+      ]
+    }
+  },
+  "items": [
+    {
+      "orig": "University of California",
+      "fromRecord": "000578050",
+      "htid": "uc1.b4405602",
+      "itemURL": "https://hdl.handle.net/2027/uc1.b4405602",
+      "rightsCode": "ic",
+      "lastUpdate": "20090903",
+      "enumcron": false,
+      "usRightsString": "Limited (search-only)"
+    },
+    {
+      "orig": "University of Michigan",
+      "fromRecord": "000578050",
+      "htid": "mdp.39015025315527",
+      "itemURL": "https://hdl.handle.net/2027/mdp.39015025315527",
+      "rightsCode": "pd",
+      "lastUpdate": "20240102",
+      "enumcron": false,
+      "usRightsString": "Full View"
+    }
+  ]
+}
