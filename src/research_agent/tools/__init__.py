@@ -36,6 +36,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     littlesis,
     loc,
     nonprofits,
+    openlibrary,
     opencorporates,
     sanctions,
     scholar,
@@ -831,6 +832,49 @@ def _smoke_wikisource_search(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_openlibrary_search(query: str) -> str:
+    """Smoke wrapper: Open Library search with non-empty title/URL checks."""
+    import sys
+
+    async def _run() -> str:
+        results = await openlibrary.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool openlibrary_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url for hit in results if not hit.title or not hit.url
+        ]
+        if missing:
+            print(
+                "_smoke-tool openlibrary_search: missing title/url on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"openlibrary_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  ia_scan_id: "
+                f"{', '.join(hit.extras.get('ia_scan_id') or []) or '?'}\n"
+                f"  isbn: {', '.join(hit.extras.get('isbn') or []) or '?'}\n"
+                f"  oclc: {', '.join(hit.extras.get('oclc') or []) or '?'}\n"
+                f"  snippet: {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_sos(query: str) -> str:
     """Smoke wrapper: California Secretary of State business registry.
 
@@ -1488,6 +1532,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "trove_search": _smoke_trove_search,
     "wikidata_search": _smoke_wikidata_search,
     "wikisource_search": _smoke_wikisource_search,
+    "openlibrary_search": _smoke_openlibrary_search,
     "sos": _smoke_sos,
     "licensing": _smoke_licensing,
     "sanctions": _smoke_sanctions,

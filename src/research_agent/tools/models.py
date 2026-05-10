@@ -54,6 +54,7 @@ SourceKind = Literal[
     "wikidata_search",
     "commons_search",
     "wikisource_search",
+    "openlibrary_search",
     "hathitrust",
 ]
 

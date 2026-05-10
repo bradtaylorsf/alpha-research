@@ -111,6 +111,8 @@ TaskKind = Literal[
     "wikidata_fetch",
     "wikisource_search",
     "wikisource_fetch",
+    "openlibrary_search",
+    "openlibrary_fetch",
 ]
 
 ScopeClass = Literal["narrow", "medium", "broad", "comprehensive"]

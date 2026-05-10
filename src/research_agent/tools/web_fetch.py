@@ -403,6 +403,7 @@ _WIKISOURCE_HOSTS = frozenset(
     }
 )
 _HATHITRUST_HOSTS = frozenset({"catalog.hathitrust.org"})
+_OPENLIBRARY_HOSTS = frozenset({"openlibrary.org", "www.openlibrary.org"})
 
 _PDF_CONTENT_TYPE = "application/pdf"
 
@@ -743,6 +744,11 @@ async def fetch(
         from research_agent.tools import hathitrust
 
         return await hathitrust.fetch(url)
+
+    if netloc in _OPENLIBRARY_HOSTS:
+        from research_agent.tools import openlibrary
+
+        return await openlibrary.fetch(url)
 
     user_agent = _resolve_user_agent()
 

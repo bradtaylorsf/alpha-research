@@ -197,6 +197,7 @@ connector module on the fetch side.
 | `site:bbb.org` | `bbb_search` | `site:bbb.org "SBI Builders"` |
 | `site:loc.gov` | `loc_search` | `site:loc.gov "battle of algiers"` |
 | `site:archive.org/details` | `iarchive_search` | `site:archive.org/details "Pullman Strike"` |
+| `site:openlibrary.org` | `openlibrary_search` | `site:openlibrary.org "Pullman Strike 1894"` |
 
 ### Payload shapes
 
