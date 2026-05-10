@@ -1,0 +1,104 @@
+{
+  "Records": [
+    {
+      "AltName": "",
+      "Places": [
+        "Kenya"
+      ],
+      "CorpBodies": [
+        "Colonial Office"
+      ],
+      "Taxonomies": [
+        "Empire and Commonwealth"
+      ],
+      "FormerReferenceDep": "",
+      "FormerReferencePro": "",
+      "HeldBy": [
+        "The National Archives, Kew"
+      ],
+      "Context": "Colonial Office and successors: East Africa Department",
+      "Content": "Correspondence and reports concerning the Mau Mau emergency, detention camps, rehabilitation policy, and security operations in Kenya.",
+      "URLParameters": "C1234567",
+      "Department": "CO",
+      "Note": "",
+      "AdminHistory": "",
+      "Arrangement": "",
+      "MapDesignation": "",
+      "MapScale": "",
+      "PhysicalCondition": "",
+      "CatalogueLevel": 6,
+      "OpeningDate": "01 January 1987",
+      "ClosureStatus": "Open Document, Open Description",
+      "ClosureType": "",
+      "ClosureCode": "",
+      "DocumentType": "Textual record",
+      "CoveringDates": "1952-1959",
+      "Description": "Kenya: Mau Mau emergency and rehabilitation camps",
+      "EndDate": "1959",
+      "NumEndDate": 1959,
+      "NumStartDate": 1952,
+      "StartDate": "1952",
+      "Id": "1234567",
+      "Reference": "CO 822/1234",
+      "Score": 14.25,
+      "Source": "CAT",
+      "Title": "Kenya: Mau Mau emergency"
+    },
+    {
+      "AltName": "",
+      "Places": [
+        "Kenya"
+      ],
+      "CorpBodies": [
+        "War Office"
+      ],
+      "Taxonomies": [
+        "Military operations"
+      ],
+      "FormerReferenceDep": "",
+      "FormerReferencePro": "",
+      "HeldBy": [
+        "The National Archives, Kew"
+      ],
+      "Context": "War Office: Army operational records",
+      "Content": "Security reports on operations in Kenya during the Mau Mau conflict.",
+      "URLParameters": "C7654321",
+      "Department": "WO",
+      "Note": "",
+      "AdminHistory": "",
+      "Arrangement": "",
+      "MapDesignation": "",
+      "MapScale": "",
+      "PhysicalCondition": "",
+      "CatalogueLevel": 6,
+      "OpeningDate": "01 January 1989",
+      "ClosureStatus": "Open Document, Open Description",
+      "ClosureType": "",
+      "ClosureCode": "",
+      "DocumentType": "Textual record",
+      "CoveringDates": "1954-1956",
+      "Description": "Kenya: security operations against Mau Mau",
+      "EndDate": "1956",
+      "NumEndDate": 1956,
+      "NumStartDate": 1954,
+      "StartDate": "1954",
+      "Id": "7654321",
+      "Reference": "WO 276/89",
+      "Score": 8.5,
+      "Source": "CAT",
+      "Title": "Kenya: security operations"
+    }
+  ],
+  "TaxonomySubjects": [],
+  "TimePeriods": [],
+  "Departments": [],
+  "CatalogueLevels": [],
+  "ClosureStatuses": [],
+  "Sources": [],
+  "Repositories": [],
+  "HeldByReps": [],
+  "ReferenceFirstLetters": [],
+  "TitleFirstLetters": [],
+  "Count": 2,
+  "NextBatchMark": null
+}

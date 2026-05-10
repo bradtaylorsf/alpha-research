@@ -53,6 +53,7 @@ SourceKind = Literal[
     "loc",
     "nara_search",
     "trove_search",
+    "ukna_search",
     "wikidata_search",
     "commons_search",
     "cspan_search",

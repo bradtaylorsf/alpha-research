@@ -43,6 +43,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     smithsonian,
     sos,
     trove,
+    ukna,
     usaspending,
     wikidata,
     wikisource,
@@ -1197,6 +1198,55 @@ def _smoke_gallica_search(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_ukna_search(query: str) -> str:
+    """Smoke wrapper: UKNA Discovery search with catalogue metadata checks."""
+    import sys
+
+    async def _run() -> str:
+        results = await ukna.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool ukna_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url
+            for hit in results
+            if (
+                not hit.title
+                or not hit.url
+                or "discovery.nationalarchives.gov.uk/" not in hit.url
+                or not hit.extras.get("catalogue_reference")
+            )
+        ]
+        if missing:
+            print(
+                "_smoke-tool ukna_search: missing title/Discovery URL/catalogue "
+                f"reference on {len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"ukna_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 220:
+                snippet = snippet[:220] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  catalogue_reference: {hit.extras.get('catalogue_reference')}\n"
+                f"  covering_dates: {hit.extras.get('covering_dates') or 'none listed'}\n"
+                f"  held_by: {hit.extras.get('held_by') or 'none listed'}\n"
+                f"  snippet: {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_persee_search(query: str) -> str:
     """Smoke wrapper: Persee Playwright search with non-empty title/URL checks."""
     import sys
@@ -2077,6 +2127,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "opencorporates": _smoke_opencorporates,
     "openalex_search": _smoke_openalex_search,
     "trove_search": _smoke_trove_search,
+    "ukna_search": _smoke_ukna_search,
     "wikidata_search": _smoke_wikidata_search,
     "wikisource_search": _smoke_wikisource_search,
     "openlibrary_search": _smoke_openlibrary_search,
