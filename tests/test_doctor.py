@@ -437,6 +437,8 @@ def test_check_registry_skill_coherence_skips_grandfathered() -> None:
     assert commons_row.status == "ok"
     wikidata_row = by_name["registry_skill:wikidata_search"]
     assert wikidata_row.status == "ok"
+    wikisource_row = by_name["registry_skill:wikisource_search"]
+    assert wikisource_row.status == "ok"
 
 
 def test_check_registry_skill_coherence_fails_when_skill_file_missing(

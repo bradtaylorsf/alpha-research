@@ -1,0 +1,28 @@
+{
+  "batchcomplete": true,
+  "query": {
+    "searchinfo": {
+      "totalhits": 2
+    },
+    "search": [
+      {
+        "ns": 0,
+        "title": "Treaty of Versailles",
+        "pageid": 12345,
+        "size": 245000,
+        "wordcount": 31200,
+        "snippet": "<span class=\"searchmatch\">Treaty</span> of Versailles, signed at Versailles on 28 June 1919.",
+        "timestamp": "2023-01-02T03:04:05Z"
+      },
+      {
+        "ns": 0,
+        "title": "Treaty of Versailles/Part I",
+        "pageid": 12346,
+        "size": 12000,
+        "wordcount": 1600,
+        "snippet": "Part I of the <span class=\"searchmatch\">Treaty</span> text.",
+        "timestamp": "2023-01-03T03:04:05Z"
+      }
+    ]
+  }
+}

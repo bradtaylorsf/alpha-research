@@ -259,6 +259,7 @@ def test_live_registry_has_all_registered_connectors() -> None:
         "trove_search",
         "usaspending_search",
         "wikidata_search",
+        "wikisource_search",
     }
     actual = {entry.name for entry in iter_kinds()}
     assert expected == actual
@@ -284,4 +285,5 @@ def test_live_registry_skill_name_assignment() -> None:
         "loc_search": "loc",
         "trove_search": "trove",
         "wikidata_search": "wikidata",
+        "wikisource_search": "wikisource",
     }

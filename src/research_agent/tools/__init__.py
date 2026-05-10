@@ -43,6 +43,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     trove,
     usaspending,
     wikidata,
+    wikisource,
 )
 
 
@@ -766,6 +767,70 @@ def _smoke_commons_search(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_wikisource_search(query: str) -> str:
+    """Smoke wrapper: Wikisource search plus top-hit full-text fetch."""
+    import sys
+
+    async def _run() -> str:
+        results = await wikisource.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool wikisource_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [hit.title for hit in results if not hit.title or not hit.url]
+        if missing:
+            print(
+                "_smoke-tool wikisource_search: missing title/url on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        source = await wikisource.fetch(results[0].url)
+        if (
+            source is None
+            or not source.cleaned_text.strip()
+            or not source.metadata.get("wikisource_lang")
+            or not source.metadata.get("page_title")
+            or source.metadata.get("revision_id") in (None, "")
+        ):
+            print(
+                "_smoke-tool wikisource_search: fetch(top_hit) did not populate "
+                "cleaned_text and required Wikisource metadata",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"wikisource_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  lang: {hit.extras.get('wikisource_lang') or '?'}\n"
+                f"  snippet: {snippet}"
+            )
+        preview = source.cleaned_text.replace("\n", " ")
+        if len(preview) > 240:
+            preview = preview[:240] + "..."
+        lines.append(
+            "fetched: "
+            f"title={source.title!r} "
+            f"lang={source.metadata['wikisource_lang']} "
+            f"revision_id={source.metadata['revision_id']} "
+            f"chars={len(source.cleaned_text)}"
+        )
+        lines.append(f"preview: {preview}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_sos(query: str) -> str:
     """Smoke wrapper: California Secretary of State business registry.
 
@@ -1422,6 +1487,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "opencorporates": _smoke_opencorporates,
     "trove_search": _smoke_trove_search,
     "wikidata_search": _smoke_wikidata_search,
+    "wikisource_search": _smoke_wikisource_search,
     "sos": _smoke_sos,
     "licensing": _smoke_licensing,
     "sanctions": _smoke_sanctions,
