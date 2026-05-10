@@ -44,6 +44,7 @@ EXPECTED_SOURCE_KINDS = (
     "scholar",
     "linkedin",
     "iarchive",
+    "iwm_search",
     "loc",
     "nara_search",
     "trove_search",

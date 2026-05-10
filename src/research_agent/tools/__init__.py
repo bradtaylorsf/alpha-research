@@ -27,6 +27,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     gallica,
     gdelt,
     iarchive,
+    iwm,
     lda,
     licensing,
     linkedin,
@@ -1371,6 +1372,72 @@ def _smoke_bne_search(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_iwm_search(query: str) -> str:
+    """Smoke wrapper: IWM public Collections Search through Playwright."""
+    import sys
+
+    from research_agent.tools import browser as _browser
+
+    async def _run() -> str:
+        try:
+            results = await iwm.search(query, max_results=5)
+            if not results:
+                print(
+                    f"_smoke-tool iwm_search: search({query!r}) returned 0 results",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            missing = [
+                hit.title or hit.url
+                for hit in results
+                if (
+                    not hit.title
+                    or not hit.url
+                    or not hit.url.startswith(
+                        (
+                            "https://www.iwm.org.uk/collections/item/object/",
+                            "https://iwm.org.uk/collections/item/object/",
+                        )
+                    )
+                )
+            ]
+            if missing:
+                print(
+                    "_smoke-tool iwm_search: missing title/IWM item URL on "
+                    f"{len(missing)} result(s): {missing[:3]}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            query_text = " ".join(query.split())
+            lines = [f"iwm_search: returned {len(results)} hits for query: {query_text}"]
+            for hit in results:
+                metadata_lines: list[str] = []
+                for label, key in (
+                    ("object_type", "object_type"),
+                    ("period", "period"),
+                    ("collection", "collection"),
+                    ("catalogue_id", "catalogue_id"),
+                    ("production_date", "production_date"),
+                    ("creator", "creator"),
+                ):
+                    value = str(hit.extras.get(key) or "").strip()
+                    if value:
+                        metadata_lines.append(f"  {label}: {value}")
+                hit_lines = [f"- {hit.title}", f"  url: {hit.url}"]
+                hit_lines.extend(metadata_lines)
+                lines.append("\n".join(hit_lines))
+            return "\n".join(lines)
+        finally:
+            try:
+                await _browser.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+
+    return asyncio.run(_run())
+
+
 def _smoke_cspan_search(query: str) -> str:
     """Smoke wrapper: C-SPAN Video Library search plus transcript fetch."""
     import sys
@@ -2118,6 +2185,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "fedregister": _smoke_fedregister,
     "gallica_search": _smoke_gallica_search,
     "iarchive_search": _smoke_iarchive,
+    "iwm_search": _smoke_iwm_search,
     "nara_search": _smoke_nara_search,
     "nonprofits": _smoke_nonprofits,
     "fec": _smoke_fec,

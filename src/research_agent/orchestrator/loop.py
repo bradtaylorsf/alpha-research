@@ -211,6 +211,17 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
         "type_of_materials",
         "result_types",
         "record_group",
+        "object_category",
+        "web_category",
+        "objectCategory",
+        "related_period",
+        "period",
+        "periodString",
+        "records_with_media",
+        "recordsWithMedia",
+        "style",
+        "page_size",
+        "pageSize",
     }
 )
 
