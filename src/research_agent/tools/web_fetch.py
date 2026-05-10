@@ -402,6 +402,7 @@ _WIKISOURCE_HOSTS = frozenset(
         "zh.wikisource.org",
     }
 )
+_HATHITRUST_HOSTS = frozenset({"catalog.hathitrust.org"})
 
 _PDF_CONTENT_TYPE = "application/pdf"
 
@@ -737,6 +738,11 @@ async def fetch(
         from research_agent.tools import wikisource
 
         return await wikisource.fetch(url)
+
+    if netloc in _HATHITRUST_HOSTS:
+        from research_agent.tools import hathitrust
+
+        return await hathitrust.fetch(url)
 
     user_agent = _resolve_user_agent()
 
