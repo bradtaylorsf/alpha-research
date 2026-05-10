@@ -262,6 +262,33 @@ def check_dpla_api_note() -> CheckResult:
     )
 
 
+def check_europeana_api_note() -> CheckResult:
+    """Surface Europeana key registration and wskey auth in doctor output."""
+    name = "europeana_api_note"
+    raw = os.environ.get("EUROPEANA_API_KEY")
+    if not raw:
+        return CheckResult(
+            name,
+            "skip",
+            required=False,
+            detail=(
+                "EUROPEANA_API_KEY unset - europeana_search disabled; create a"
+                " free key in your Europeana account under Manage API keys"
+                " (migrated 2025-05-28); key rides as ?wskey=<key>;"
+                " connector enforces 1 RPS"
+            ),
+        )
+    return CheckResult(
+        name,
+        "ok",
+        required=False,
+        detail=(
+            f"present ({mask_secret(raw)}); sent as ?wskey=<key> to"
+            " /api/v2/search.json; 1 RPS"
+        ),
+    )
+
+
 def check_models_yaml(path: Path) -> CheckResult:
     """Parse ``config/models.yaml`` — fail if missing or invalid YAML."""
     name = "models_yaml"
@@ -575,6 +602,7 @@ def run_all_checks(
     results.append(check_serpapi_cost_note())
     results.append(check_trove_api_note())
     results.append(check_dpla_api_note())
+    results.append(check_europeana_api_note())
     results.extend(check_sanctions_refresh())
     results.append(check_planner_allowlist_coherence())
     results.append(check_task_kind_registry_coherence())

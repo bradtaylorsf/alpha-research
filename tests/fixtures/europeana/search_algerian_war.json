@@ -1,0 +1,72 @@
+{
+  "apikey": "test",
+  "success": true,
+  "itemsCount": 2,
+  "items": [
+    {
+      "id": "/9200429/BibliographicResource_3000135723944",
+      "guid": "https://www.europeana.eu/en/item/9200429/BibliographicResource_3000135723944",
+      "title": [
+        "Guerre d'Algerie, 1954-1962"
+      ],
+      "dcDescription": [
+        "Documents and photographs about the Algerian war."
+      ],
+      "dataProvider": [
+        "Bibliotheque nationale de France"
+      ],
+      "provider": [
+        "The European Library"
+      ],
+      "country": [
+        "France"
+      ],
+      "language": [
+        "fr"
+      ],
+      "rights": [
+        "http://creativecommons.org/publicdomain/mark/1.0/"
+      ],
+      "edmIsShownAt": [
+        "https://gallica.bnf.fr/ark:/12148/bpt6k1234567"
+      ],
+      "edmPreview": [
+        "https://api.europeana.eu/thumbnail/v3/400/abc.jpg"
+      ],
+      "type": "TEXT",
+      "year": [
+        "1958"
+      ],
+      "score": 12.5
+    },
+    {
+      "id": "/2020601/https___example_org_photo_1956",
+      "title": [
+        "Algerian war photograph, 1956"
+      ],
+      "dcDescription": [
+        "Photograph from a European archive collection."
+      ],
+      "dataProvider": [
+        "Europeana Photography"
+      ],
+      "country": [
+        "The Netherlands"
+      ],
+      "language": [
+        "en"
+      ],
+      "rights": [
+        "http://rightsstatements.org/vocab/InC/1.0/"
+      ],
+      "edmIsShownAt": [
+        "https://example.org/photo-1956"
+      ],
+      "type": "IMAGE",
+      "year": [
+        "1956"
+      ],
+      "score": 8.75
+    }
+  ]
+}

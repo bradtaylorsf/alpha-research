@@ -21,6 +21,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     cspan,
     dpla,
     edgar,
+    europeana,
     fec,
     fedregister,
     gallica,
@@ -1025,6 +1026,63 @@ def _smoke_dpla_search(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_europeana_search(query: str) -> str:
+    """Smoke wrapper: Europeana item search, skipping when no key is set."""
+    import sys
+
+    from research_agent import config
+
+    if not (config.get("EUROPEANA_API_KEY") or "").strip():
+        return (
+            "_smoke-tool europeana_search: would need EUROPEANA_API_KEY; "
+            "create a free key in your Europeana account under Manage API "
+            "keys (migrated May 2025); live test skipped"
+        )
+
+    async def _run() -> str:
+        results = await europeana.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool europeana_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url for hit in results if not hit.title or not hit.url
+        ]
+        if missing:
+            print(
+                "_smoke-tool europeana_search: missing title/url on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"europeana_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(f"- {hit.title}\n  url: {hit.url}")
+            for label, key in (
+                ("europeana_id", "europeana_id"),
+                ("dataProvider", "dataProvider"),
+                ("country", "country"),
+                ("language", "language"),
+                ("rights", "rights"),
+                ("edmIsShownAt", "edmIsShownAt"),
+            ):
+                value = str(hit.extras.get(key) or "").strip()
+                if value:
+                    lines.append(f"  {label}: {value}")
+            if snippet:
+                lines.append(f"  snippet: {snippet}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_openalex_search(query: str) -> str:
     """Smoke wrapper: OpenAlex Works search with DOI/OpenAlex URL checks."""
     import sys
@@ -2002,6 +2060,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "cspan_search": _smoke_cspan_search,
     "dpla_search": _smoke_dpla_search,
     "edgar": _smoke_edgar,
+    "europeana_search": _smoke_europeana_search,
     "courtlistener": _smoke_courtlistener,
     "scholar": _smoke_scholar,
     "linkedin": _smoke_linkedin,

@@ -47,6 +47,7 @@ Connector-specific free keys (separate signups):
 | Trove / National Library of Australia | #230 | `TROVE_API_KEY` | <https://trove.nla.gov.au/about/create-something/using-api> (request through Trove account API form) | Free key required. Keys expire after 12 months and require the renewal email loop. Send as `X-API-KEY`, not a URL parameter. Use metadata-only by default; NLA has reportedly cancelled keys without warning for full-text downloading workflows. |
 | National Archives Catalog OPA v2 | #226 | `NARA_API_KEY` | Email `Catalog_API@nara.gov` with your name and email address | Free key required for production use; registration takes about 24h. Send as `x-api-key`. Default limit is 10,000 queries/month per key, so the connector enforces 0.5 RPS and the smoke skips cleanly when unset. |
 | Digital Public Library of America | #228 | `DPLA_API_KEY` | `curl -X POST https://api.dp.la/v2/api_key/<your-email>` | Free key required. Registration is an HTTP POST, not a web form; the 32-character key is delivered by email and rides as `?api_key=<key>` on requests. The connector enforces 1 RPS and the smoke skips cleanly when unset. |
+| Europeana | #229 | `EUROPEANA_API_KEY` | Europeana account → Manage API keys | Free key required. Registration moved into the Europeana account section on 2025-05-28. The connector sends the key as `?wskey=<key>` to `https://api.europeana.eu/api/v2/search.json`, not as `api_key`, and enforces 1 RPS. Smoke skips cleanly when unset. |
 
 ---
 
