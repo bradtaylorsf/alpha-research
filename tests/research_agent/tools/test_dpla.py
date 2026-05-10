@@ -398,6 +398,7 @@ def test_dpla_skill_covers_required_operator_topics() -> None:
     for token in (
         "DPLA_API_KEY",
         "curl -X POST https://api.dp.la/v2/api_key/<your-email>",
+        "instant",
         "provider",
         "dataProvider",
         "?provider=",
