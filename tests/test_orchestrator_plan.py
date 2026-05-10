@@ -63,6 +63,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "linkedin",
     "iarchive",
     "trove",
+    "wikidata",
 )
 
 

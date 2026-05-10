@@ -45,6 +45,7 @@ EXPECTED_SOURCE_KINDS = (
     "iarchive",
     "loc",
     "trove_search",
+    "wikidata_search",
 )
 
 

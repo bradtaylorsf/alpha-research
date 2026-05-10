@@ -51,6 +51,7 @@ SourceKind = Literal[
     "iarchive",
     "loc",
     "trove_search",
+    "wikidata_search",
 ]
 
 

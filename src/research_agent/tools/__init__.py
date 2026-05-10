@@ -41,6 +41,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     sos,
     trove,
     usaspending,
+    wikidata,
 )
 
 
@@ -679,6 +680,30 @@ def _smoke_trove_search(query: str) -> str:
                 f"  trove_id: {trove_id} | zone: {zone} | pub_date: {pub_date}\n"
                 f"  snippet: {snippet}"
             )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_wikidata_search(query: str) -> str:
+    """Smoke wrapper: raw SPARQL query against Wikidata Query Service."""
+    import sys
+
+    async def _run() -> str:
+        results = await wikidata.search(query, max_results=10)
+        if not results:
+            print(
+                f"_smoke-tool wikidata_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        lines = [f"wikidata_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 240:
+                snippet = snippet[:240] + "..."
+            entity_id = hit.extras.get("entity_id") or "?"
+            lines.append(f"- {hit.title} ({entity_id})\n  {hit.url}\n  {snippet}")
         return "\n".join(lines)
 
     return asyncio.run(_run())
@@ -1338,6 +1363,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "littlesis": _smoke_littlesis,
     "opencorporates": _smoke_opencorporates,
     "trove_search": _smoke_trove_search,
+    "wikidata_search": _smoke_wikidata_search,
     "sos": _smoke_sos,
     "licensing": _smoke_licensing,
     "sanctions": _smoke_sanctions,
