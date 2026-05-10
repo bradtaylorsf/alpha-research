@@ -201,6 +201,9 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
         "collection",
         "page",
         "mediatype",
+        "fechaDesde",
+        "fechaHasta",
+        "localizacion",
     }
 )
 

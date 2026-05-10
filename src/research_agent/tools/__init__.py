@@ -13,6 +13,7 @@ from collections.abc import Callable
 # the README table, and `research doctor` all walk this list.
 from research_agent.tools import (  # noqa: F401, E402 — side-effecting registration
     bbb,
+    bne,
     calaccess,
     commons,
     congress,
@@ -982,6 +983,73 @@ def _smoke_persee_search(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_bne_search(query: str) -> str:
+    """Smoke wrapper: BNE Hemeroteca Digital Playwright search."""
+    import sys
+
+    from research_agent.tools import browser as _browser
+
+    async def _run() -> str:
+        try:
+            results = await bne.search(query, max_results=5)
+            if not results:
+                print(
+                    f"_smoke-tool bne_search: search({query!r}) returned 0 results",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            missing = [
+                hit.title or hit.url
+                for hit in results
+                if (
+                    not hit.title
+                    or not hit.url
+                    or not hit.url.startswith(
+                        (
+                            "https://hemerotecadigital.bne.es/",
+                            "https://www.hemerotecadigital.bne.es/",
+                            "https://bnedigital.bne.es/",
+                            "https://www.bnedigital.bne.es/",
+                        )
+                    )
+                )
+            ]
+            if missing:
+                print(
+                    "_smoke-tool bne_search: missing title/BNE URL on "
+                    f"{len(missing)} result(s): {missing[:3]}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            query_text = " ".join(query.split())
+            lines = [f"bne_search: returned {len(results)} hits for query: {query_text}"]
+            for hit in results:
+                metadata_lines: list[str] = []
+                for label, key in (
+                    ("publication", "publication"),
+                    ("date", "pub_date"),
+                    ("place", "place"),
+                    ("lang", "lang"),
+                    ("fulltext_url", "fulltext_url"),
+                ):
+                    value = str(hit.extras.get(key) or "").strip()
+                    if value:
+                        metadata_lines.append(f"  {label}: {value}")
+                hit_lines = [f"- {hit.title}", f"  url: {hit.url}"]
+                hit_lines.extend(metadata_lines)
+                lines.append("\n".join(hit_lines))
+            return "\n".join(lines)
+        finally:
+            try:
+                await _browser.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+
+    return asyncio.run(_run())
+
+
 def _smoke_sos(query: str) -> str:
     """Smoke wrapper: California Secretary of State business registry.
 
@@ -1621,6 +1689,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "arxiv": _smoke_arxiv,
     "audio": _smoke_audio,
     "bbb": _smoke_bbb,
+    "bne_search": _smoke_bne_search,
     "calaccess": _smoke_calaccess,
     "commons_search": _smoke_commons_search,
     "edgar": _smoke_edgar,
