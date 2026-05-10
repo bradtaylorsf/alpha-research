@@ -88,6 +88,7 @@ from `src/research_agent/tools/_registry.py` via
 |---|---|---|---|
 | `bbb_search` | Better Business Bureau profiles + ratings (Playwright, no auth) | — | `SBI Builders` |
 | `calaccess_search` | California Cal-Access campaign finance (Playwright) | `kind: contributions\|independent_expenditures` | `Newsom` |
+| `commons_search` | Wikimedia Commons free media files with imageinfo license, author, MIME type, original URL, and thumbnail metadata | `max_results` | `Algerian war photographs` |
 | `congress_search` | Bills, members, committees, hearings, congressional record (Congress.gov v3 API) | `kind: bill\|member\|committee\|hearing\|congressional-record` | `Inflation Reduction Act` |
 | `courtlistener_search` | Federal & state court opinions, dockets (RECAP), oral arguments — requires `COURTLISTENER_API_TOKEN` | `kind: opinions\|dockets\|oral_arguments` | `Schedule F appellate` |
 | `edgar_search` | SEC filings (10-K, 10-Q, 8-K, Form 4) — requires `RESEARCH_USER_AGENT` w/ contact email | `form_type: 10-K\|8-K\|...` | `Cisco cybersecurity` |
@@ -736,6 +737,7 @@ research _smoke-tool web_fetch "https://example.com/article"
 research _smoke-tool arxiv "transformer interpretability"
 research _smoke-tool news "federal reserve"
 research _smoke-tool trove_search "White Australia Policy"
+research _smoke-tool commons_search "Algerian war photographs"
 ```
 
 `web_fetch` prints the resolved title, the path that served the fetch

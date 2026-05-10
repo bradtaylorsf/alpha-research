@@ -1,0 +1,28 @@
+{
+  "batchcomplete": true,
+  "query": {
+    "searchinfo": {
+      "totalhits": 2
+    },
+    "search": [
+      {
+        "ns": 6,
+        "title": "File:Algerian war photograph 1957.jpg",
+        "pageid": 1001,
+        "size": 1200,
+        "wordcount": 42,
+        "snippet": "Photograph from the <span class=\"searchmatch\">Algerian</span> war.",
+        "timestamp": "2024-01-02T03:04:05Z"
+      },
+      {
+        "ns": 6,
+        "title": "File:Battle of Algiers film still.ogv",
+        "pageid": 1002,
+        "size": 900,
+        "wordcount": 31,
+        "snippet": "<span class=\"searchmatch\">Algiers</span> media clip.",
+        "timestamp": "2023-05-06T07:08:09Z"
+      }
+    ]
+  }
+}

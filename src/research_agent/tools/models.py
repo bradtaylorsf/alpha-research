@@ -52,6 +52,7 @@ SourceKind = Literal[
     "loc",
     "trove_search",
     "wikidata_search",
+    "commons_search",
 ]
 
 
