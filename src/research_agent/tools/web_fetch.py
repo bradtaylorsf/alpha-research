@@ -407,6 +407,7 @@ _UKNA_HOSTS = frozenset({"discovery.nationalarchives.gov.uk"})
 # connector — leave web.archive.org Wayback URLs and bare downloads on the
 # generic httpx + trafilatura path.
 _IARCHIVE_HOSTS = frozenset({"archive.org", "www.archive.org"})
+_IWM_HOSTS = frozenset({"iwm.org.uk", "www.iwm.org.uk"})
 _WIKISOURCE_HOSTS = frozenset(
     {
         "ar.wikisource.org",
@@ -806,6 +807,13 @@ async def fetch(
         from research_agent.tools import iarchive
 
         return await iarchive.fetch(url)
+
+    if netloc in _IWM_HOSTS and urlparse(url).path.startswith(
+        "/collections/item/object/"
+    ):
+        from research_agent.tools import iwm
+
+        return await iwm.fetch(url)
 
     if netloc in _WIKISOURCE_HOSTS:
         from research_agent.tools import wikisource

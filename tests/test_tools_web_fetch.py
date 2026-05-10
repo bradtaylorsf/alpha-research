@@ -572,6 +572,8 @@ def test_browser_module_imported_lazily(monkeypatch):
         ("https://trove.nla.gov.au/newspaper/article/18342701", "trove"),
         ("https://nla.gov.au/nla.news-article18342701", "trove"),
         ("https://discovery.nationalarchives.gov.uk/details/r/C1234567", "ukna"),
+        ("https://www.iwm.org.uk/collections/item/object/205226579", "iwm"),
+        ("https://iwm.org.uk/collections/item/object/205226579", "iwm"),
         ("https://en.wikisource.org/wiki/Treaty_of_Versailles", "wikisource"),
         ("https://fr.wikisource.org/wiki/La_Marseillaise", "wikisource"),
         ("https://catalog.hathitrust.org/Record/000578050", "hathitrust"),
