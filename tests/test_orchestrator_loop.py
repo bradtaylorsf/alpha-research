@@ -534,6 +534,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "edgar",
     "courtlistener",
     "fedregister",
+    "gallica",
     "lda",
     "usaspending",
     "gdelt",
@@ -560,6 +561,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
 # match by name; ``edgar`` is the SEC connector so its source_kind is "sec".
 _CONNECTOR_SOURCE_KIND: dict[str, str] = {p: p for p in CONNECTOR_KIND_PREFIXES}
 _CONNECTOR_SOURCE_KIND["edgar"] = "sec"
+_CONNECTOR_SOURCE_KIND["gallica"] = "gallica_search"
 _CONNECTOR_SOURCE_KIND["trove"] = "trove_search"
 _CONNECTOR_SOURCE_KIND["wikidata"] = "wikidata_search"
 _CONNECTOR_SOURCE_KIND["commons"] = "commons_search"

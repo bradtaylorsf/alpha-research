@@ -35,6 +35,7 @@ SourceKind = Literal[
     "fec",
     "courtlistener",
     "fedregister",
+    "gallica_search",
     "nonprofits",
     "congress",
     "lda",
