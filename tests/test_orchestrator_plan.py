@@ -70,6 +70,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "europeana",
     "iarchive",
     "trove",
+    "ukna",
     "wikidata",
     "wikisource",
     "openalex",

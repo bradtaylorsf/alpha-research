@@ -267,6 +267,7 @@ def test_live_registry_has_all_registered_connectors() -> None:
         "si_search",
         "sos_search",
         "trove_search",
+        "ukna_search",
         "usaspending_search",
         "wikidata_search",
         "wikisource_search",
@@ -304,6 +305,7 @@ def test_live_registry_skill_name_assignment() -> None:
         "persee_search": "persee",
         "si_search": "smithsonian",
         "trove_search": "trove",
+        "ukna_search": "ukna",
         "wikidata_search": "wikidata",
         "wikisource_search": "wikisource",
     }

@@ -119,6 +119,8 @@ TaskKind = Literal[
     "iarchive_fetch",
     "trove_search",
     "trove_fetch",
+    "ukna_search",
+    "ukna_fetch",
     "wikidata_search",
     "wikidata_fetch",
     "wikisource_search",

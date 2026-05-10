@@ -401,6 +401,7 @@ _TROVE_HOSTS = frozenset(
         "www.nla.gov.au",
     }
 )
+_UKNA_HOSTS = frozenset({"discovery.nationalarchives.gov.uk"})
 # ``archive.org`` is a multi-tenant host (details/, download/, web/, …).
 # Only the ``/details/<identifier>`` path is owned by the iarchive
 # connector — leave web.archive.org Wayback URLs and bare downloads on the
@@ -795,6 +796,11 @@ async def fetch(
         from research_agent.tools import trove
 
         return await trove.fetch(url)
+
+    if netloc in _UKNA_HOSTS:
+        from research_agent.tools import ukna
+
+        return await ukna.fetch(url)
 
     if netloc in _IARCHIVE_HOSTS and urlparse(url).path.startswith("/details/"):
         from research_agent.tools import iarchive
