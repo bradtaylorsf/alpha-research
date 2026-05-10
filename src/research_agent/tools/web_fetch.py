@@ -420,6 +420,7 @@ _WIKISOURCE_HOSTS = frozenset(
 )
 _HATHITRUST_HOSTS = frozenset({"catalog.hathitrust.org", "hdl.handle.net"})
 _OPENLIBRARY_HOSTS = frozenset({"openlibrary.org", "www.openlibrary.org"})
+_SMITHSONIAN_HOSTS = frozenset({"api.si.edu", "si.edu", "www.si.edu", "3d.si.edu"})
 _CSPAN_HOSTS = frozenset({"c-span.org", "www.c-span.org", "cspan.org", "www.cspan.org"})
 
 _PDF_CONTENT_TYPE = "application/pdf"
@@ -806,6 +807,11 @@ async def fetch(
         from research_agent.tools import openlibrary
 
         return await openlibrary.fetch(url)
+
+    if netloc in _SMITHSONIAN_HOSTS:
+        from research_agent.tools import smithsonian
+
+        return await smithsonian.fetch(url)
 
     if netloc in _CSPAN_HOSTS:
         from research_agent.tools import cspan

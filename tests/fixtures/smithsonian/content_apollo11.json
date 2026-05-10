@@ -1,0 +1,79 @@
+{
+  "status": 200,
+  "responseCode": 1,
+  "response": {
+    "id": "edanmdm:nasm_A19700102000",
+    "title": "Command Module, Apollo 11",
+    "unitCode": "NASM",
+    "type": "edanmdm",
+    "content": {
+      "descriptiveNonRepeating": {
+        "record_ID": "nasm_A19700102000",
+        "data_source": "National Air and Space Museum",
+        "title": {
+          "content": "Command Module, Apollo 11"
+        },
+        "metadata_usage": {
+          "access": "CC0"
+        },
+        "online_media": {
+          "mediaCount": 1,
+          "media": [
+            {
+              "type": "Images",
+              "content": "https://ids.si.edu/ids/deliveryService?id=NASM-A19700102000_PS01",
+              "thumbnail": "https://ids.si.edu/ids/deliveryService?id=NASM-A19700102000_PS01&max=150"
+            }
+          ]
+        }
+      },
+      "indexedStructured": {
+        "date": [
+          "1969"
+        ],
+        "object_type": [
+          "SPACECRAFT-Crewed"
+        ]
+      },
+      "media_usage": {
+        "access": "CC0"
+      },
+      "freetext": {
+        "notes": [
+          {
+            "label": "Summary",
+            "content": "The Apollo 11 Command Module Columbia carried Neil Armstrong, Buzz Aldrin, and Michael Collins to the Moon and back in July 1969."
+          }
+        ],
+        "name": [
+          {
+            "label": "Astronaut",
+            "content": "Neil A. Armstrong"
+          },
+          {
+            "label": "Astronaut",
+            "content": "Buzz Aldrin"
+          }
+        ],
+        "objectType": [
+          {
+            "label": "Type",
+            "content": "SPACECRAFT-Crewed"
+          }
+        ],
+        "creditLine": [
+          {
+            "label": "Credit Line",
+            "content": "Transferred from the National Aeronautics and Space Administration"
+          }
+        ],
+        "physicalDescription": [
+          {
+            "label": "Materials",
+            "content": "Aluminum alloy, stainless steel, and titanium"
+          }
+        ]
+      }
+    }
+  }
+}

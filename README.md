@@ -112,6 +112,7 @@ from `src/research_agent/tools/_registry.py` via
 | `persee_search` | Persee French academic journals in humanities and social sciences (Playwright scrape, no auth) | `max_results` | `guerre d'Algerie` |
 | `sanctions_search` | OFAC SDN + UK sanctions lists (local index, no auth) | — | `Wagner Group` |
 | `scholar_search` | Google Scholar via SerpAPI — requires `SERPAPI_KEY` | `kind: case_law\|articles` | `Section 230 appellate` |
+| `si_search` | Smithsonian Open Access digitized collection objects, museum artifacts, images, 3D assets, and object metadata via api.data.gov | `max_results` | `Apollo 11` |
 | `sos_search` | State Secretary-of-State business entity filings (Playwright; CA wired, others stubs) | `state: CA\|DE\|NV\|...` | `Acme Corp` |
 | `trove_search` | Trove / National Library of Australia metadata for newspapers, books, photos, magazines, oral histories; metadata-only default | `category`, `zone`, `sortby` | `White Australia Policy 1901` |
 | `usaspending_search` | Federal contracts, grants, loans (award-level detail, no auth) | `award_type: contracts\|grants\|loans` | `Heritage Foundation contract` |
@@ -235,7 +236,7 @@ that list, so there is no drift.
 | `RESEARCH_OCR_VLM_ESCALATION` | no | Set to `1` to enable Opus 4.7 vision escalation for image OCR when Tesseract and the local VLM both fail. Off by default — costs real money; emits an `ocr_vlm_escalation` WARN event when fired. |
 | `RESEARCH_DAEMON_PROGRESS` | no | Set to `0` to suppress the foreground Rich progress bar the daemon writes to stdout when run interactively. |
 | `COURTLISTENER_API_TOKEN` | no | CourtListener API token (free w/ signup) — required by `tools/courtlistener.py`. Authenticated tier is 5,000 req/hr; anonymous traffic is throttled to the point of unusability. |
-| `DATA_GOV_API_KEY` | no | api.data.gov key (free w/ signup at <https://api.data.gov/signup/>) — used by `tools/fec.py` (OpenFEC). Authenticated tier is 1,000 req/hr; falls back to `DEMO_KEY` (~40 req/hr per IP) when unset. |
+| `DATA_GOV_API_KEY` | no | api.data.gov key (free w/ signup at <https://api.data.gov/signup/>) — used by `tools/fec.py`, `tools/congress.py`, and `tools/smithsonian.py`. FEC/Congress/Smithsonian fall back to `DEMO_KEY` for low-volume smoke when unset. |
 | `LDA_API_KEY` | no | Senate Lobbying Disclosure Act API key (free, optional, register at <https://lda.senate.gov/api/register/>) — used by `tools/lda.py`. Anonymous works for low-volume; authenticated raises rate limits. Sent via `Authorization: Token <key>`. |
 | `OPENCORPORATES_API_KEY` | no | OpenCorporates API token — used by `tools/opencorporates.py`. **Required for any live request:** anonymous v0.4 access is now gated (returns HTTP 401), so without a key the connector returns no results and smoke skips cleanly. Token rides as `?api_token=<key>`. Public-benefit access by emailing service desk; commercial pricing £2,250–£12,000/yr. |
 | `OPENALEX_API_KEY` | no | Free OpenAlex API key — used by `tools/openalex.py`. Optional for low-volume smoke/demos; recommended for regular use since the February 2026 free-key policy. Sent as `?api_key=<key>`. |

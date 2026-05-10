@@ -108,9 +108,11 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         name="DATA_GOV_API_KEY",
         required=False,
         description=(
-            "api.data.gov key used by tools/fec.py (OpenFEC). Authenticated"
-            " tier: 1,000 req/hr; falls back to DEMO_KEY (~40 req/hr per IP)"
-            " when unset. Free signup at https://api.data.gov/signup/."
+            "api.data.gov key used by tools/fec.py (OpenFEC),"
+            " tools/congress.py, and tools/smithsonian.py. Authenticated"
+            " tier varies by API; falls back to DEMO_KEY for FEC/Congress/"
+            "Smithsonian smoke when unset. Free signup at"
+            " https://api.data.gov/signup/."
         ),
     ),
     EnvKey(

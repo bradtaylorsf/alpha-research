@@ -125,6 +125,8 @@ TaskKind = Literal[
     "openlibrary_fetch",
     "persee_search",
     "persee_fetch",
+    "si_search",
+    "si_fetch",
     "bne_search",
     "bne_fetch",
 ]

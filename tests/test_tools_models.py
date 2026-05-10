@@ -54,6 +54,7 @@ EXPECTED_SOURCE_KINDS = (
     "openalex_search",
     "openlibrary_search",
     "persee_search",
+    "si_search",
     "bne_search",
     "hathitrust",
 )
