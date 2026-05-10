@@ -71,6 +71,34 @@ _HOURS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|hr)\b", re.IGNORECASE)
 _MINUTES_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|min)\b", re.IGNORECASE)
 _SECONDS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|sec)\b", re.IGNORECASE)
 _TRANSCRIPT_KEY_RE = re.compile(r"(transcript|caption|closedcaption|segment)", re.I)
+_TIME_LINE_RE = re.compile(
+    r"^(?P<time>(?:\d{1,2}:)?\d{1,2}:\d{2})(?:\s+(?P<rest>.+))?$"
+)
+_TRANSCRIPT_BOUNDARY_RE = re.compile(
+    r"^(?:people in this video|hosting organization|more videos from|related video|"
+    r"user created clips|featured clips|more information about|purchase a dvd|about c-span|"
+    r"resources|follow c-span|channel finder)\b",
+    re.IGNORECASE,
+)
+_TRANSCRIPT_NOTE_RE = re.compile(
+    r"this transcript was compiled from uncorrected closed captioning",
+    re.IGNORECASE,
+)
+_TRANSCRIPT_UI_TEXT = frozenset(
+    {
+        "all speakers",
+        "bookmark to myc-span",
+        "clip",
+        "embed",
+        "filter by speaker",
+        "report video issue",
+        "search this transcript",
+        "show full text",
+        "show less",
+        "text",
+        "transcript type",
+    }
+)
 _ACTION_TEXT = frozenset(
     {
         "c-span",
@@ -172,8 +200,10 @@ def _is_video_url(url: str) -> bool:
     if path.startswith(("/program/", "/clip/", "/video/")):
         return True
     query = parse_qs(parsed.query)
+    query_parts = [parsed.query, *query.keys()]
+    query_parts.extend(value for values in query.values() for value in values)
     return parsed.path.rstrip("/") == "/video" and any(
-        _PROGRAM_ID_RE.search(value) for values in query.values() for value in values
+        _PROGRAM_ID_RE.search(value) for value in query_parts
     )
 
 
@@ -190,6 +220,10 @@ def _program_id_from_url(url: str) -> str:
             match = _PROGRAM_ID_RE.search(value)
             if match is not None:
                 return match.group(1)
+    for value in (parsed.query, *parse_qs(parsed.query).keys()):
+        match = _PROGRAM_ID_RE.search(value)
+        if match is not None:
+            return match.group(1)
     return ""
 
 
@@ -268,7 +302,8 @@ def _duration_seconds(value: str | None) -> int | None:
         hours = int(match.group("h") or 0)
         minutes = int(match.group("m") or 0)
         seconds = int(match.group("s"))
-        return hours * 3600 + minutes * 60 + seconds
+        total = hours * 3600 + minutes * 60 + seconds
+        return total if total > 0 else None
 
     lowered = text.casefold()
     if not any(unit in lowered for unit in ("hour", "hr", "minute", "min", "second", "sec")):
@@ -495,12 +530,17 @@ async def _settle_page(page: Any) -> None:
 async def _reveal_transcript(page: Any) -> None:
     if not hasattr(page, "get_by_text"):
         return
-    for label in ("Transcript", "Show Transcript", "View Transcript"):
+    for label in (
+        "Transcript",
+        "Transcript type",
+        "Show Transcript",
+        "View Transcript",
+        "Show Full Text",
+    ):
         try:
             locator = page.get_by_text(label, exact=False)
             await locator.first.click(timeout=1_000)
             await _settle_page(page)
-            return
         except Exception:  # noqa: BLE001
             continue
 
@@ -703,6 +743,117 @@ def _segments_from_transcript_dom(root: HtmlElement) -> list[_TranscriptSegment]
     return segments
 
 
+def _text_lines(root: HtmlElement) -> list[str]:
+    return [
+        _clean_text(str(value))
+        for value in root.xpath("//body//text()")
+        if _clean_text(str(value))
+    ]
+
+
+def _is_time_line(line: str) -> bool:
+    return _TIME_LINE_RE.match(line) is not None
+
+
+def _is_transcript_ui_line(line: str) -> bool:
+    folded = _fold(line)
+    return (
+        folded in _TRANSCRIPT_UI_TEXT
+        or bool(_TRANSCRIPT_NOTE_RE.search(line))
+        or bool(_TRANSCRIPT_BOUNDARY_RE.search(line))
+    )
+
+
+def _is_transcript_boundary_line(line: str) -> bool:
+    return _TRANSCRIPT_BOUNDARY_RE.search(line) is not None
+
+
+def _looks_like_speaker(line: str, upcoming: list[str]) -> bool:
+    text = _clean_text(line)
+    if not text or _is_time_line(text) or _is_transcript_ui_line(text):
+        return False
+    if text.startswith((">>", "*")):
+        return False
+    if len(text) > 100 or len(text.split()) > 12:
+        return False
+    next_text = next(
+        (
+            candidate
+            for candidate in upcoming
+            if candidate and not _is_transcript_ui_line(candidate)
+        ),
+        "",
+    )
+    return bool(next_text) and not _is_time_line(next_text)
+
+
+def _split_inline_speaker_text(value: str) -> tuple[str, str]:
+    text = _clean_text(value)
+    if not text:
+        return "", ""
+    if ">>" in text:
+        speaker, body = text.split(">>", 1)
+        return _clean_text(speaker), f">> {_clean_text(body)}"
+    return "", text
+
+
+def _segments_from_timecoded_text(root: HtmlElement) -> list[_TranscriptSegment]:
+    """Fallback for live C-SPAN pages whose transcript rows are not classed as transcript."""
+    lines = _text_lines(root)
+    segments: list[_TranscriptSegment] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = _TIME_LINE_RE.match(line)
+        if match is None:
+            index += 1
+            continue
+
+        time_start = match.group("time")
+        speaker = ""
+        text_parts: list[str] = []
+        inline_rest = _clean_text(match.group("rest"))
+        if inline_rest and not _is_transcript_ui_line(inline_rest):
+            inline_speaker, inline_text = _split_inline_speaker_text(inline_rest)
+            speaker = inline_speaker
+            if inline_text:
+                text_parts.append(inline_text)
+
+        cursor = index + 1
+        while cursor < len(lines) and _is_transcript_ui_line(lines[cursor]):
+            cursor += 1
+
+        if not speaker and cursor < len(lines):
+            upcoming = lines[cursor + 1 : cursor + 4]
+            if _looks_like_speaker(lines[cursor], upcoming):
+                speaker = lines[cursor]
+                cursor += 1
+
+        while cursor < len(lines):
+            candidate = lines[cursor]
+            if _is_time_line(candidate):
+                break
+            if _is_transcript_boundary_line(candidate):
+                break
+            if not _is_transcript_ui_line(candidate):
+                if not speaker or _fold(candidate) != _fold(speaker):
+                    text_parts.append(candidate)
+            cursor += 1
+
+        text = _clean_text(" ".join(text_parts))
+        if text and _fold(text) not in _ACTION_TEXT:
+            segments.append(
+                _TranscriptSegment(
+                    time_start=time_start,
+                    speaker=speaker,
+                    text=text,
+                )
+            )
+        index = max(cursor, index + 1)
+
+    return segments
+
+
 def _dedupe_segments(segments: Iterable[_TranscriptSegment]) -> list[_TranscriptSegment]:
     out: list[_TranscriptSegment] = []
     seen: set[tuple[str, str, str]] = set()
@@ -732,6 +883,7 @@ def _extract_transcript_segments(root: HtmlElement) -> list[_TranscriptSegment]:
     for value in _json_values_from_scripts(root):
         segments.extend(_segments_from_json(value))
     segments.extend(_segments_from_transcript_dom(root))
+    segments.extend(_segments_from_timecoded_text(root))
     return _dedupe_segments(segments)
 
 

@@ -100,9 +100,22 @@ async def test_search_happy_path_parses_fixture_html(
     assert first.extras["video_url"] == first.url
 
     second = results[1]
+    assert second.url == "https://www.c-span.org/video/?654322-1/project-2025-hearing-clip"
     assert second.extras["program_id"] == "654322"
     assert second.extras["air_date"] == "2024-06-12"
     assert second.extras["duration_seconds"] == 743
+
+
+async def test_fetch_accepts_cspan_video_query_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://www.c-span.org/video/?654321-1/project-2025-presidential-transition"
+    _patch_browser(monkeypatch, _source_fixture())
+
+    source = await cspan.fetch(url)
+
+    assert source is not None
+    assert source.metadata["program_id"] == "654321"
 
 
 async def test_search_url_supports_house_senate_type_filter(
@@ -158,6 +171,25 @@ async def test_transcript_is_in_cleaned_text_not_metadata(
     assert source is not None
     assert "transcript" not in source.metadata
     assert "Project 2025 plan calls" in source.cleaned_text
+
+
+async def test_fetch_extracts_live_timecoded_transcript_text_without_transcript_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://www.c-span.org/video/?654322-1/project-2025-hearing"
+    _patch_browser(monkeypatch, _fixture("source-program-live-text.html"))
+
+    source = await cspan.fetch(url)
+
+    assert source is not None
+    assert "No transcript text was available" not in source.cleaned_text
+    assert source.metadata["duration_seconds"] is None
+    assert "[00:00:00] Unidentified Speaker:" in source.cleaned_text
+    assert "PROJECT 2025 HEARING" in source.cleaned_text
+    assert "[00:00:09] Jamie Raskin:" in source.cleaned_text
+    assert "PROJECT 2025 WOULD RESTRUCTURE EXECUTIVE AGENCIES" in source.cleaned_text
+    assert "Show Full Text" not in source.cleaned_text
+    assert "transcript" not in source.metadata
 
 
 async def test_search_empty_fixture_returns_empty_without_drift_warning(
