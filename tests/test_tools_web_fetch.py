@@ -552,6 +552,7 @@ def test_browser_module_imported_lazily(monkeypatch):
         ),
         ("https://www.bbb.org/us/ca/santa-clara/profile/general-contractor/sbi", "bbb"),
         ("https://www.loc.gov/item/2020630599/", "loc"),
+        ("https://catalog.archives.gov/id/123456", "nara"),
         ("https://gallica.bnf.fr/ark:/12148/bpt6k1234567", "gallica"),
         ("https://commons.wikimedia.org/wiki/File:Algerian_war.jpg", "commons"),
         ("https://upload.wikimedia.org/wikipedia/commons/a/ab/Algerian_war.jpg", "commons"),

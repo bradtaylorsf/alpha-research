@@ -374,6 +374,7 @@ _OPENCORPORATES_HOSTS = frozenset(
     {"opencorporates.com", "www.opencorporates.com"}
 )
 _LOC_HOSTS = frozenset({"www.loc.gov"})
+_NARA_HOSTS = frozenset({"catalog.archives.gov"})
 _GALLICA_HOSTS = frozenset({"gallica.bnf.fr"})
 _COMMONS_HOSTS = frozenset({"commons.wikimedia.org", "upload.wikimedia.org"})
 _WIKIDATA_HOSTS = frozenset({"www.wikidata.org", "wikidata.org"})
@@ -750,6 +751,11 @@ async def fetch(
         from research_agent.tools import loc
 
         return await loc.fetch(url)
+
+    if netloc in _NARA_HOSTS:
+        from research_agent.tools import nara
+
+        return await nara.fetch(url)
 
     if netloc in _GALLICA_HOSTS:
         from research_agent.tools import gallica
