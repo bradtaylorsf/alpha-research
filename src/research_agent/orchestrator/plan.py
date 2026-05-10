@@ -117,6 +117,8 @@ TaskKind = Literal[
     "europeana_fetch",
     "iarchive_search",
     "iarchive_fetch",
+    "iwm_search",
+    "iwm_fetch",
     "trove_search",
     "trove_fetch",
     "ukna_search",

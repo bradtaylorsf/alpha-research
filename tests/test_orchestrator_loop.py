@@ -555,6 +555,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "dpla",
     "europeana",
     "iarchive",
+    "iwm",
     "trove",
     "ukna",
     "wikidata",
@@ -579,6 +580,7 @@ _CONNECTOR_SOURCE_KIND["commons"] = "commons_search"
 _CONNECTOR_SOURCE_KIND["cspan"] = "cspan_search"
 _CONNECTOR_SOURCE_KIND["dpla"] = "dpla_search"
 _CONNECTOR_SOURCE_KIND["europeana"] = "europeana_search"
+_CONNECTOR_SOURCE_KIND["iwm"] = "iwm_search"
 _CONNECTOR_SOURCE_KIND["wikisource"] = "wikisource_search"
 _CONNECTOR_SOURCE_KIND["openalex"] = "openalex_search"
 _CONNECTOR_SOURCE_KIND["openlibrary"] = "openlibrary_search"
