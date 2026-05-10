@@ -201,7 +201,7 @@ connector module on the fetch side.
 
 ### Payload shapes
 
-- `web_search`: `{ query: "…", sub_question: "…", max_results: 10, engine: "auto" }` (optional `expand_top_k` to override the scope-aware default)
+- `web_search`: `{ query: "…", sub_question: "…", max_results: 10, engine: "auto", lang: "fr" }` (optional `lang` is Brave-only `search_lang` targeting when the existing opt-in `BRAVE_SEARCH_API_KEY` is configured; it is not a new required paid third-party data API dependency, and DDG/Google fallbacks ignore it. Optional `expand_top_k` overrides the scope-aware default)
 - `news_search`: `{ query: "…", sub_question: "…" }`
 - `reddit_search`: `{ query: "…", sub_question: "…" }`
 - `arxiv_search`: `{ query: "…", sub_question: "…", max_results: 10 }`

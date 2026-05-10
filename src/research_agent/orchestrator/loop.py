@@ -374,6 +374,7 @@ def default_handlers(router: Any) -> dict[str, Handler]:
             payload.get("query", ""),
             max_results=payload.get("max_results", 10),
             engine=payload.get("engine", "auto"),
+            lang=payload.get("lang"),
         )
         return _expand_search_to_fetches(job, payload, results)
 

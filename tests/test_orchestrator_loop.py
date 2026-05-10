@@ -602,6 +602,66 @@ def test_default_handlers_covers_every_task_kind() -> None:
 
 
 @pytest.mark.asyncio
+async def test_web_search_handler_passes_lang_payload_to_tool(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_agent.tools import web_search
+
+    captured: dict[str, Any] = {}
+
+    async def fake_search(
+        query: str,
+        max_results: int = 10,
+        engine: str = "auto",
+        *,
+        lang: str | None = None,
+    ) -> list[SearchResult]:
+        captured.update(
+            {
+                "query": query,
+                "max_results": max_results,
+                "engine": engine,
+                "lang": lang,
+            }
+        )
+        return [
+            SearchResult(
+                url="https://example.test/fr",
+                title="French archive hit",
+                snippet="Archive source",
+                source_kind="web",
+            )
+        ]
+
+    monkeypatch.setattr(web_search, "search", fake_search)
+
+    handler = default_handlers(router=None)["web_search"]
+    out = await handler(
+        job,
+        {
+            "kind": "web_search",
+            "payload": {
+                "query": "guerre d'Algerie",
+                "sub_question": "Find French-language archival sources",
+                "max_results": 3,
+                "engine": "auto",
+                "lang": "fr",
+            },
+        },
+    )
+
+    assert captured == {
+        "query": "guerre d'Algerie",
+        "max_results": 3,
+        "engine": "auto",
+        "lang": "fr",
+    }
+    assert len(out["results"]) == 1
+    assert out["follow_up_tasks"][0]["payload"]["url"] == "https://example.test/fr"
+
+
+@pytest.mark.asyncio
 async def test_default_not_implemented_handler_raises_fatal(
     job: Job, db_path: Path, plan: Plan
 ) -> None:
