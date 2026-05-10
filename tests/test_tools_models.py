@@ -45,6 +45,7 @@ EXPECTED_SOURCE_KINDS = (
     "linkedin",
     "iarchive",
     "loc",
+    "nara_search",
     "trove_search",
     "wikidata_search",
     "commons_search",

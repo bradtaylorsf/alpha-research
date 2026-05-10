@@ -207,6 +207,10 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
         "localizacion",
         "filter",
         "sort",
+        "available_online",
+        "type_of_materials",
+        "result_types",
+        "record_group",
     }
 )
 

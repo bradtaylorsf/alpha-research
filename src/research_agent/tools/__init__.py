@@ -30,6 +30,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     linkedin,
     littlesis,
     loc,
+    nara,
     nonprofits,
     openalex,
     opencorporates,
@@ -394,6 +395,47 @@ def _smoke_iarchive(query: str) -> str:
                 f"- {hit.title} — {identifier} — {mediatype} —"
                 f" downloads={downloads}\n"
                 f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_nara_search(query: str) -> str:
+    """Smoke wrapper: NARA Catalog OPA v2 search, skipping when no key is set."""
+    from research_agent import config
+
+    if not (config.get("NARA_API_KEY") or "").strip():
+        return (
+            "_smoke-tool nara_search: would need NARA_API_KEY; "
+            "live test skipped"
+        )
+
+    async def _run() -> str:
+        results = await nara.search(query, max_results=5)
+        if not results:
+            raise RuntimeError(
+                f"_smoke-tool nara_search: search({query!r}) returned 0 results"
+            )
+        lines: list[str] = [f"nara_search: returned {len(results)} hits"]
+        for hit in results:
+            naid = hit.extras.get("nara_record_id") or "?"
+            record_group = hit.extras.get("record_group") or "?"
+            series_title = hit.extras.get("series_title") or "?"
+            access = hit.extras.get("access_restriction") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 180:
+                snippet = snippet[:180] + "..."
+            if not hit.title or not hit.url:
+                raise RuntimeError(
+                    "_smoke-tool nara_search: missing title/url on "
+                    f"result: {hit!r}"
+                )
+            lines.append(
+                f"- {hit.title}\n"
+                f"  {hit.url}\n"
+                f"  NAID {naid} | {record_group} | {series_title} | access={access}\n"
                 f"  {snippet}"
             )
         return "\n".join(lines)
@@ -1862,6 +1904,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "fedregister": _smoke_fedregister,
     "gallica_search": _smoke_gallica_search,
     "iarchive_search": _smoke_iarchive,
+    "nara_search": _smoke_nara_search,
     "nonprofits": _smoke_nonprofits,
     "fec": _smoke_fec,
     "congress": _smoke_congress,
