@@ -54,6 +54,7 @@ SourceKind = Literal[
     "trove_search",
     "wikidata_search",
     "commons_search",
+    "cspan_search",
     "wikisource_search",
     "openalex_search",
     "openlibrary_search",
