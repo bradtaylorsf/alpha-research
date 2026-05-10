@@ -18,6 +18,7 @@ from research_agent.storage.jobs import (
 )
 from research_agent.storage.markdown import (
     write_finding,
+    write_finding_translation,
     write_plan,
     write_report,
     write_synthesis,
@@ -44,6 +45,7 @@ __all__ = [
     "migrate",
     "search_fts",
     "write_finding",
+    "write_finding_translation",
     "write_plan",
     "write_report",
     "write_source",

@@ -125,6 +125,12 @@ def start_command(
         " Skips the OpenRouter health check and uses config/models.local.yaml."
         " Cost is always $0; useful for validation runs.",
     ),
+    translate_non_english: bool = typer.Option(
+        False,
+        "--translate-non-english",
+        help="Translate non-English extracted findings into English mirrors using"
+        " the frontier_speed tier. Off by default.",
+    ),
     fresh_reset: bool = typer.Option(
         False,
         "--fresh-reset",
@@ -146,6 +152,7 @@ def start_command(
             "time_cap_hours": time_cap,
             "budget_cap_usd": budget_usd,
             "disk_cap_gb": disk_cap_gb,
+            "translate_non_english": translate_non_english,
         }
         if corpus:
             intake_data["corpus"] = corpus
@@ -157,6 +164,7 @@ def start_command(
             "budget_cap_usd": answers["budget_usd"],
             "corpus": answers["corpus_path"],
             "disk_cap_gb": disk_cap_gb,
+            "translate_non_english": translate_non_english,
         }
 
     if max_tasks is not None:

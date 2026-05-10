@@ -210,6 +210,17 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
     }
 )
 
+_TRANSLATE_NON_ENGLISH_KEY = "translate_non_english"
+_LANGUAGE_HINT_KEYS: tuple[str, ...] = (
+    "source_lang",
+    "detected_language",
+    "detected_lang",
+    "language",
+    "lang",
+    "dc:language",
+    "wikisource_lang",
+)
+
 
 def _filter_kwargs_for(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Drop kwargs the callable doesn't accept.
@@ -243,6 +254,33 @@ def _filter_kwargs_for(fn: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
         )
     }
     return {k: v for k, v in kwargs.items() if k in accepted}
+
+
+def _language_hints_from_mapping(mapping: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep only language metadata fields that downstream extraction understands."""
+    if not isinstance(mapping, dict):
+        return {}
+    hints: dict[str, Any] = {}
+    for key in _LANGUAGE_HINT_KEYS:
+        value = mapping.get(key)
+        if value not in (None, "", []):
+            hints[key] = value
+    nested = mapping.get("metadata")
+    if isinstance(nested, dict):
+        for key in _LANGUAGE_HINT_KEYS:
+            value = nested.get(key)
+            if value not in (None, "", []) and key not in hints:
+                hints[key] = value
+    return hints
+
+
+def _task_passthrough_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Forward extraction-only knobs from search/fetch tasks to follow-ups."""
+    out: dict[str, Any] = {}
+    if _TRANSLATE_NON_ENGLISH_KEY in payload:
+        out[_TRANSLATE_NON_ENGLISH_KEY] = payload[_TRANSLATE_NON_ENGLISH_KEY]
+    out.update(_language_hints_from_mapping(payload))
+    return out
 
 
 def _deep_load_skills_for_connector(
@@ -396,9 +434,14 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         source_id = result.get("source_id")
         if isinstance(source_id, int):
             sub_question = payload.get("sub_question") or job.goal
+            extract_payload = {
+                "source_id": source_id,
+                "sub_question": sub_question,
+                **_task_passthrough_payload(payload),
+            }
             follow_up = TaskSpec(
                 kind="extract_findings",
-                payload={"source_id": source_id, "sub_question": sub_question},
+                payload=extract_payload,
             )
             # Issue #193: ``_persist_fetched_source`` may have already added
             # a bill-text fan-out follow-up (when web_fetch host-dispatched
@@ -1041,14 +1084,18 @@ def _expand_search_to_fetches(
         top_k = _DEFAULT_TOP_K_BY_SCOPE.get(scope or "", _DEFAULT_TOP_K_FALLBACK)
     sub_question = payload.get("sub_question") or payload.get("query") or job.goal
 
-    follow_ups: list[TaskSpec] = [
-        TaskSpec(
-            kind="web_fetch",
-            payload={"url": hit.url, "sub_question": sub_question},
-        )
-        for hit in results[:top_k]
-        if getattr(hit, "url", None)
-    ]
+    follow_ups: list[TaskSpec] = []
+    for hit in results[:top_k]:
+        url = getattr(hit, "url", None)
+        if not url:
+            continue
+        hit_payload = {
+            "url": url,
+            "sub_question": sub_question,
+            **_task_passthrough_payload(payload),
+        }
+        hit_payload.update(_language_hints_from_mapping(getattr(hit, "extras", None)))
+        follow_ups.append(TaskSpec(kind="web_fetch", payload=hit_payload))
 
     return {
         "results": [r.model_dump(mode="json") for r in results],
@@ -1106,6 +1153,14 @@ def _persist_fetched_source(
     else:
         fetched_epoch = None
 
+    source_metadata = source_dict.get("metadata")
+    if not isinstance(source_metadata, dict):
+        source_metadata = {}
+    else:
+        source_metadata = dict(source_metadata)
+    for key, value in _language_hints_from_mapping(payload).items():
+        source_metadata.setdefault(key, value)
+
     source_id = write_source(
         job,
         url=source_dict.get("url"),
@@ -1114,6 +1169,7 @@ def _persist_fetched_source(
         kind=source_dict.get("source_kind"),
         archive_url=source_dict.get("archive_url"),
         fetched_at=fetched_epoch,
+        metadata=source_metadata,
     )
     result: dict[str, Any] = {"source": source_dict, "source_id": source_id}
 
@@ -1483,13 +1539,27 @@ def _load_source_text(job: Job, source_id: int) -> tuple[str, dict[str, Any]] | 
     if not md_path.exists():
         return None
     text = md_path.read_text(encoding="utf-8")
+    sidecar_metadata: dict[str, Any] = {}
+    json_path = md_path.with_suffix(".json")
+    if json_path.exists():
+        import json as _json
+
+        try:
+            sidecar = _json.loads(json_path.read_text(encoding="utf-8"))
+        except (_json.JSONDecodeError, OSError):
+            sidecar = {}
+        if isinstance(sidecar, dict) and isinstance(sidecar.get("metadata"), dict):
+            sidecar_metadata = dict(sidecar["metadata"])
     meta = {
         "id": int(row["id"]),
         "url": row["url"],
         "title": row["title"],
         "archive_url": row["archive_url"],
         "source_kind": row["kind"],
+        "metadata": sidecar_metadata,
     }
+    for key, value in sidecar_metadata.items():
+        meta.setdefault(key, value)
     return text, meta
 
 
@@ -1511,12 +1581,275 @@ _CORNERSTONE_FINDINGS_PER_SOURCE_LIMIT = 500
 # stays on the regular extraction path and the #177 report-padding
 # regression doesn't come back. See ``_is_cornerstone_source``.
 _CORNERSTONE_FALLBACK_MIN_CHARS = 200_000
+_TRANSLATION_TIER = "frontier_speed"
+_TRANSLATION_TARGET_LANG = "en"
+_LANGUAGE_ALIASES: dict[str, str] = {
+    "ar": "ar",
+    "ara": "ar",
+    "arabic": "ar",
+    "de": "de",
+    "deu": "de",
+    "ger": "de",
+    "german": "de",
+    "en": "en",
+    "eng": "en",
+    "english": "en",
+    "es": "es",
+    "spa": "es",
+    "esp": "es",
+    "spanish": "es",
+    "espanol": "es",
+    "castellano": "es",
+    "fr": "fr",
+    "fra": "fr",
+    "fre": "fr",
+    "french": "fr",
+    "francais": "fr",
+    "it": "it",
+    "ita": "it",
+    "italian": "it",
+    "ja": "ja",
+    "jpn": "ja",
+    "japanese": "ja",
+    "nl": "nl",
+    "nld": "nl",
+    "dut": "nl",
+    "dutch": "nl",
+    "pt": "pt",
+    "por": "pt",
+    "portuguese": "pt",
+    "ru": "ru",
+    "rus": "ru",
+    "russian": "ru",
+    "zh": "zh",
+    "chi": "zh",
+    "zho": "zh",
+    "chinese": "zh",
+}
+_SOURCE_KIND_LANGUAGE_DEFAULTS: dict[str, str] = {
+    "bne_search": "es",
+    "gallica_search": "fr",
+    "persee_search": "fr",
+}
 
 
 def _truncate_for_prompt(text: str, limit: int = _EXTRACT_TEXT_LIMIT) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "\n\n[…truncated]"
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+    return None
+
+
+def _translation_enabled(job: Job, payload: dict[str, Any]) -> bool:
+    """Return True when this extract opted into non-English translation."""
+    if _TRANSLATE_NON_ENGLISH_KEY in payload:
+        explicit = _coerce_optional_bool(payload.get(_TRANSLATE_NON_ENGLISH_KEY))
+        if explicit is not None:
+            return explicit
+    intake = job.intake or {}
+    configured = _coerce_optional_bool(intake.get(_TRANSLATE_NON_ENGLISH_KEY))
+    if configured is not None:
+        return configured
+    nested = intake.get("config")
+    if isinstance(nested, dict):
+        configured = _coerce_optional_bool(nested.get(_TRANSLATE_NON_ENGLISH_KEY))
+        if configured is not None:
+            return configured
+    return False
+
+
+def _normalize_language(value: Any) -> str | None:
+    """Normalize common ISO-639 and human language labels to ISO-639-1."""
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            normalized = _normalize_language(item)
+            if normalized:
+                return normalized
+        return None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    for raw_part in re.split(r"[;,|/]+", text):
+        part = raw_part.strip().casefold()
+        if not part:
+            continue
+        part = part.split("_", 1)[0].split("-", 1)[0].strip()
+        alias = _LANGUAGE_ALIASES.get(part)
+        if alias:
+            return alias
+        if re.fullmatch(r"[a-z]{2}", part):
+            return part
+        if re.fullmatch(r"[a-z]{3}", part):
+            return _LANGUAGE_ALIASES.get(part)
+    return None
+
+
+def _source_language(meta: dict[str, Any]) -> str | None:
+    for mapping in (meta, meta.get("metadata")):
+        if not isinstance(mapping, dict):
+            continue
+        for key in _LANGUAGE_HINT_KEYS:
+            normalized = _normalize_language(mapping.get(key))
+            if normalized:
+                return normalized
+    kind = meta.get("source_kind")
+    if isinstance(kind, str):
+        return _SOURCE_KIND_LANGUAGE_DEFAULTS.get(kind)
+    return None
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, int(len(text) / 4) + 1)
+
+
+def _translation_usage(system_prompt: str, body: str) -> Any:
+    from research_agent.llm.budgets import TokenUsage
+
+    return TokenUsage(
+        input_tokens=_estimate_tokens(system_prompt) + _estimate_tokens(body),
+        output_tokens=_estimate_tokens(body),
+    )
+
+
+def _translation_would_exceed_budget(router: Any, system_prompt: str, body: str) -> bool:
+    budget = getattr(router, "budget", None)
+    would_exceed = getattr(budget, "would_exceed", None)
+    if not callable(would_exceed):
+        return False
+    return bool(would_exceed(_TRANSLATION_TIER, _translation_usage(system_prompt, body)))
+
+
+def _emit_translation_skipped_budget(
+    job: Job,
+    *,
+    finding_id: int,
+    source_lang: str,
+    reason: str,
+) -> None:
+    emit(
+        job,
+        "INFO",
+        "loop",
+        "translation_skipped_budget",
+        {
+            "finding_id": finding_id,
+            "source_lang": source_lang,
+            "target_lang": _TRANSLATION_TARGET_LANG,
+            "tier": _TRANSLATION_TIER,
+            "reason": reason,
+        },
+    )
+
+
+async def _translate_finding(
+    job: Job,
+    *,
+    router: Any,
+    finding: dict[str, Any],
+    source_lang: str,
+) -> tuple[str | None, bool]:
+    from pydantic_ai import Agent
+
+    from research_agent.llm.budgets import BudgetExceeded
+    from research_agent.prompts.loader import load_prompt
+    from research_agent.storage.markdown import write_finding_translation
+
+    finding_id = finding.get("finding_id")
+    claim = finding.get("claim")
+    if not isinstance(finding_id, int) or not isinstance(claim, str) or not claim.strip():
+        return None, False
+
+    rendered = load_prompt(
+        "translator",
+        job=job,
+        source_lang=source_lang,
+        target_lang=_TRANSLATION_TARGET_LANG,
+    )
+    body = claim.strip()
+    if _translation_would_exceed_budget(router, rendered, body):
+        _emit_translation_skipped_budget(
+            job,
+            finding_id=finding_id,
+            source_lang=source_lang,
+            reason="estimate_would_exceed_cap",
+        )
+        return None, True
+
+    agent = Agent(
+        router.model_for(_TRANSLATION_TIER),
+        output_type=str,
+        system_prompt=rendered,
+    )
+    try:
+        result = await router.call(
+            _TRANSLATION_TIER,
+            agent,
+            f"Finding {finding_id:06d}:\n{body}",
+        )
+    except BudgetExceeded:
+        _emit_translation_skipped_budget(
+            job,
+            finding_id=finding_id,
+            source_lang=source_lang,
+            reason="precheck_exceeded_cap",
+        )
+        return None, True
+
+    translated = result.output if isinstance(result.output, str) else str(result.output)
+    translated = translated.strip()
+    if not translated:
+        return None, False
+    path = write_finding_translation(
+        job,
+        finding_id=finding_id,
+        translated_body=translated,
+        source_lang=source_lang,
+        target_lang=_TRANSLATION_TARGET_LANG,
+    )
+    return str(path.relative_to(job.root)), False
+
+
+async def _maybe_translate_findings(
+    job: Job,
+    *,
+    router: Any,
+    meta: dict[str, Any],
+    payload: dict[str, Any],
+    written_findings: list[dict[str, Any]],
+) -> tuple[list[str], int]:
+    if not written_findings or not _translation_enabled(job, payload):
+        return [], 0
+    source_lang = _source_language(meta)
+    if not source_lang or source_lang == _TRANSLATION_TARGET_LANG:
+        return [], 0
+
+    paths: list[str] = []
+    skipped_budget = 0
+    for finding in written_findings:
+        path, skipped = await _translate_finding(
+            job,
+            router=router,
+            finding=finding,
+            source_lang=source_lang,
+        )
+        if path is not None:
+            paths.append(path)
+        if skipped:
+            skipped_budget += 1
+    return paths, skipped_budget
 
 
 def _normalize_url_for_compare(url: str | None) -> str | None:
@@ -1777,6 +2110,13 @@ async def _run_single_extract(
         findings_limit=findings_limit,
         extra_tags=extra_tags,
     )
+    translation_paths, translations_skipped_budget = await _maybe_translate_findings(
+        job,
+        router=router,
+        meta=meta,
+        payload=payload,
+        written_findings=written_findings,
+    )
 
     result_dict: dict[str, Any] = {
         "source_id": source_id,
@@ -1786,6 +2126,11 @@ async def _run_single_extract(
         "raw_path": raw_path,
         "follow_up_questions": follow_up_questions,
     }
+    if translation_paths:
+        result_dict["translations_written"] = len(translation_paths)
+        result_dict["translation_paths"] = translation_paths
+    if translations_skipped_budget:
+        result_dict["translations_skipped_budget"] = translations_skipped_budget
 
     follow_ups = _build_second_order_fanout(job, written_findings, payload)
     if follow_ups:

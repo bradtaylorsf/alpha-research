@@ -87,7 +87,7 @@ def _write_prompt(
 
 @pytest.mark.parametrize(
     "name",
-    ["planner", "researcher", "synthesizer", "critic", "intake_followup"],
+    ["planner", "researcher", "synthesizer", "critic", "intake_followup", "translator"],
 )
 def test_shipped_prompt_loads_with_valid_frontmatter(name: str) -> None:
     meta = load_prompt_meta(name)

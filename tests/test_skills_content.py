@@ -2,8 +2,7 @@
 
 Loader behavior is covered in ``test_skills_loader.py``; this file validates
 the *content* of the 5 initial connector skills (congress, edgar, fedregister,
-courtlistener, fec) and the 3 initial strategy skills (modern-policy-era-
-filtering, cornerstone-extraction, triangulation) — frontmatter completeness,
+courtlistener, fec) and the shipped strategy skills — frontmatter completeness,
 presence of required body sections, and that any knobs the skill names match
 the connector's actual ``search()`` signature.
 """
@@ -25,6 +24,7 @@ STRATEGY_SKILLS = (
     "modern-policy-era-filtering",
     "cornerstone-extraction",
     "triangulation",
+    "multilingual-source-handling",
 )
 
 REQUIRED_BODY_SECTIONS = ("Knobs available", "Anti-patterns")

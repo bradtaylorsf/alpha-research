@@ -235,6 +235,30 @@ def test_start_skip_intake_creates_job(isolated_jobs_repo: Path, monkeypatch):
     assert row["budget_cap_usd"] == 5.0
 
 
+def test_start_translate_non_english_flag_is_persisted(
+    isolated_jobs_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 12345)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        [
+            "start",
+            "--skip-intake",
+            "--goal",
+            "Translate archival findings",
+            "--translate-non-english",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    job_root = isolated_jobs_repo / "jobs" / f"{today}-translate-archival-findings"
+    intake_data = json.loads((job_root / "intake.json").read_text(encoding="utf-8"))
+    assert intake_data["translate_non_english"] is True
+
+
 def test_start_runs_intake_when_not_skipped(isolated_jobs_repo: Path, monkeypatch):
     canned = {
         "goal": "Investigate widgets",
