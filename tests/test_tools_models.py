@@ -46,6 +46,7 @@ EXPECTED_SOURCE_KINDS = (
     "loc",
     "trove_search",
     "wikidata_search",
+    "commons_search",
 )
 
 

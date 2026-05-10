@@ -548,6 +548,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "calaccess",
     "scholar",
     "linkedin",
+    "commons",
     "iarchive",
     "trove",
     "wikidata",
@@ -559,6 +560,7 @@ _CONNECTOR_SOURCE_KIND: dict[str, str] = {p: p for p in CONNECTOR_KIND_PREFIXES}
 _CONNECTOR_SOURCE_KIND["edgar"] = "sec"
 _CONNECTOR_SOURCE_KIND["trove"] = "trove_search"
 _CONNECTOR_SOURCE_KIND["wikidata"] = "wikidata_search"
+_CONNECTOR_SOURCE_KIND["commons"] = "commons_search"
 
 
 def test_default_handlers_covers_every_task_kind() -> None:

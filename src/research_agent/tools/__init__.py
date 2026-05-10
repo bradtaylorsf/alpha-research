@@ -22,6 +22,7 @@ from research_agent.tools.models import SearchResult, Source, SourceKind
 from research_agent.tools import (  # noqa: F401, E402 — side-effecting registration
     bbb,
     calaccess,
+    commons,
     congress,
     courtlistener,
     edgar,
@@ -709,6 +710,62 @@ def _smoke_wikidata_search(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_commons_search(query: str) -> str:
+    """Smoke wrapper: Wikimedia Commons media search with required license metadata."""
+    import sys
+
+    async def _run() -> str:
+        results = await commons.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool commons_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title
+            for hit in results
+            if not hit.title or not hit.url or not hit.extras.get("license")
+        ]
+        if missing:
+            print(
+                "_smoke-tool commons_search: missing title/url/license on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        source = await commons.fetch(results[0].url)
+        if source is None or not source.metadata.get("license"):
+            print(
+                "_smoke-tool commons_search: fetch(top_hit) did not populate "
+                'Source.metadata["license"]',
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"commons_search: returned {len(results)} license-bearing hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  license: {hit.extras.get('license')} "
+                f"({hit.extras.get('license_short') or '?'})\n"
+                f"  mime_type: {hit.extras.get('mime_type') or '?'}\n"
+                f"  snippet: {snippet}"
+            )
+        lines.append(
+            f"fetched metadata.license: {source.metadata['license']}"
+        )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_sos(query: str) -> str:
     """Smoke wrapper: California Secretary of State business registry.
 
@@ -1349,6 +1406,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "audio": _smoke_audio,
     "bbb": _smoke_bbb,
     "calaccess": _smoke_calaccess,
+    "commons_search": _smoke_commons_search,
     "edgar": _smoke_edgar,
     "courtlistener": _smoke_courtlistener,
     "scholar": _smoke_scholar,
