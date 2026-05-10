@@ -117,6 +117,8 @@ TaskKind = Literal[
     "openlibrary_fetch",
     "persee_search",
     "persee_fetch",
+    "bne_search",
+    "bne_fetch",
 ]
 
 ScopeClass = Literal["narrow", "medium", "broad", "comprehensive"]

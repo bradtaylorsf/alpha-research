@@ -556,6 +556,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "wikisource",
     "openlibrary",
     "persee",
+    "bne",
 )
 
 # Connector module name → ``source_kind`` Literal value. Most connectors
@@ -569,6 +570,7 @@ _CONNECTOR_SOURCE_KIND["commons"] = "commons_search"
 _CONNECTOR_SOURCE_KIND["wikisource"] = "wikisource_search"
 _CONNECTOR_SOURCE_KIND["openlibrary"] = "openlibrary_search"
 _CONNECTOR_SOURCE_KIND["persee"] = "persee_search"
+_CONNECTOR_SOURCE_KIND["bne"] = "bne_search"
 
 
 def test_default_handlers_covers_every_task_kind() -> None:

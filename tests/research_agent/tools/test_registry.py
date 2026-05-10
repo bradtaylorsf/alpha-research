@@ -237,6 +237,7 @@ def test_live_registry_has_all_registered_connectors() -> None:
 
     expected = {
         "bbb_search",
+        "bne_search",
         "calaccess_search",
         "commons_search",
         "congress_search",
@@ -279,6 +280,7 @@ def test_live_registry_skill_name_assignment() -> None:
     }
     assert skilled == {
         "congress_search": "congress",
+        "bne_search": "bne",
         "commons_search": "commons",
         "courtlistener_search": "courtlistener",
         "edgar_search": "edgar",
