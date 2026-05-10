@@ -88,6 +88,7 @@ Requires `DPLA_API_KEY`. Request a free key with:
 curl -X POST https://api.dp.la/v2/api_key/<your-email>
 ```
 
-Registration is an HTTP POST, not a web form. The 32-character key is sent by
-email and rides on API requests as `?api_key=<key>`. Without the key,
-`dpla_search` and `_smoke-tool dpla_search` skip cleanly.
+Registration is an HTTP POST, not a web form. Key delivery is typically
+instant, but still arrives by email; the 32-character key rides on API
+requests as `?api_key=<key>`. Without the key, `dpla_search` and
+`_smoke-tool dpla_search` skip cleanly.
