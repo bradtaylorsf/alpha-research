@@ -554,6 +554,14 @@ def test_browser_module_imported_lazily(monkeypatch):
         ("https://www.loc.gov/item/2020630599/", "loc"),
         ("https://catalog.archives.gov/id/123456", "nara"),
         ("https://gallica.bnf.fr/ark:/12148/bpt6k1234567", "gallica"),
+        (
+            "https://www.europeana.eu/en/item/9200429/BibliographicResource_3000135723944",
+            "europeana",
+        ),
+        (
+            "https://api.europeana.eu/record/v2/9200429/BibliographicResource_3000135723944.json",
+            "europeana",
+        ),
         ("https://commons.wikimedia.org/wiki/File:Algerian_war.jpg", "commons"),
         ("https://upload.wikimedia.org/wikipedia/commons/a/ab/Algerian_war.jpg", "commons"),
         ("https://www.wikidata.org/wiki/Q90", "wikidata"),
