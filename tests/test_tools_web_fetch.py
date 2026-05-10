@@ -556,6 +556,8 @@ def test_browser_module_imported_lazily(monkeypatch):
         ("https://en.wikisource.org/wiki/Treaty_of_Versailles", "wikisource"),
         ("https://fr.wikisource.org/wiki/La_Marseillaise", "wikisource"),
         ("https://catalog.hathitrust.org/Record/000578050", "hathitrust"),
+        ("https://openlibrary.org/works/OL123W/The_Pullman_Strike", "openlibrary"),
+        ("https://www.openlibrary.org/oclc/424023", "openlibrary"),
     ],
 )
 async def test_fetch_dispatches_to_connector_by_host(monkeypatch, url, module_name):

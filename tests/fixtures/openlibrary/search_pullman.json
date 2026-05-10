@@ -1,0 +1,44 @@
+{
+  "numFound": 2,
+  "start": 0,
+  "docs": [
+    {
+      "key": "/works/OL123W",
+      "title": "The Pullman Strike of 1894",
+      "subtitle": "A Study in Labor History",
+      "author_name": ["Richard Schneirov"],
+      "author_key": ["OL111A"],
+      "first_publish_year": 1999,
+      "edition_count": 4,
+      "isbn": ["0252067555", "9780252067556"],
+      "oclc": ["424023"],
+      "lccn": ["98045231"],
+      "ia": ["pullmanstrike1894"],
+      "has_fulltext": true,
+      "public_scan_b": true,
+      "publisher": ["University of Illinois Press"],
+      "publish_year": [1999, 2002],
+      "language": ["eng"],
+      "edition_key": ["OL365877M"],
+      "cover_edition_key": "OL365877M"
+    },
+    {
+      "key": "OL456W",
+      "title": "Pullman Strike Papers",
+      "author_name": ["Jane Archivist"],
+      "author_key": ["OL222A"],
+      "first_publish_year": 1894,
+      "edition_count": 1,
+      "isbn": [],
+      "oclc": ["123456"],
+      "lccn": [],
+      "ia": ["pullmanstrikepapers"],
+      "has_fulltext": false,
+      "public_scan_b": true,
+      "publisher": ["Chicago Historical Society"],
+      "publish_year": [1894],
+      "language": ["eng"],
+      "edition_key": ["OL987M"]
+    }
+  ]
+}
