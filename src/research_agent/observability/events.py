@@ -72,6 +72,7 @@ EventKind = Literal[
     "cornerstone_query_run",
     "cornerstone_dedup",
     "cornerstone_followups_emitted",
+    "translation_skipped_budget",
     "second_order_fanout",
     "source_list_reconciled",
     "synth_status_from_prose",

@@ -58,6 +58,7 @@ def write_source(
     kind: str | None,
     archive_url: str | None = None,
     fetched_at: int | None = None,
+    metadata: dict[str, Any] | None = None,
     embedding: bytes | None = None,
     parent_source_id: int | None = None,
 ) -> int:
@@ -87,6 +88,8 @@ def write_source(
         raise ValueError(f"kind must be a string or None; got {type(kind).__name__}")
     if archive_url is not None and not isinstance(archive_url, str):
         raise ValueError(f"archive_url must be a string or None; got {type(archive_url).__name__}")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ValueError(f"metadata must be a dict or None; got {type(metadata).__name__}")
     if embedding is not None and not isinstance(embedding, bytes):
         raise ValueError(f"embedding must be bytes or None; got {type(embedding).__name__}")
     if parent_source_id is not None and not isinstance(parent_source_id, int):
@@ -118,6 +121,7 @@ def write_source(
                 "archive_url": archive_url or "",
                 "kind": kind,
                 "md_path": md_rel,
+                "metadata": metadata or {},
             }
 
             if existing is None:
@@ -156,7 +160,7 @@ def write_source(
                 target = job.root / md_rel
                 if not target.exists():
                     _atomic_write_text(target, cleaned + "\n")
-                    _atomic_write_json(job.root / json_rel, sidecar)
+                _atomic_write_json(job.root / json_rel, sidecar)
                 # If the row was pruned (md_path NULLed by the disk-cap
                 # watcher), repoint to the freshly-written file.
                 if not existing["md_path"]:

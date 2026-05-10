@@ -157,6 +157,37 @@ def write_finding(
     return finding_id
 
 
+def write_finding_translation(
+    job: Job,
+    *,
+    finding_id: int,
+    translated_body: str,
+    source_lang: str,
+    target_lang: str = "en",
+) -> Path:
+    """Write ``findings/NNNNNN.translation.md`` beside the original finding."""
+    if isinstance(finding_id, bool) or not isinstance(finding_id, int) or finding_id < 1:
+        raise ValueError(f"finding_id must be a positive int; got {finding_id!r}")
+    if not isinstance(translated_body, str) or not translated_body.strip():
+        raise ValueError("translated_body must be a non-empty string")
+    if not isinstance(source_lang, str) or not source_lang.strip():
+        raise ValueError("source_lang must be a non-empty string")
+    if not isinstance(target_lang, str) or not target_lang.strip():
+        raise ValueError("target_lang must be a non-empty string")
+
+    rel = f"findings/{finding_id:06d}.translation.md"
+    body = (
+        "---\n"
+        f"source_lang: {source_lang.strip()}\n"
+        f"target_lang: {target_lang.strip()}\n"
+        "---\n\n"
+        f"{translated_body.strip()}\n"
+    )
+    path = job.root / rel
+    _atomic_write_text(path, body)
+    return path
+
+
 def _next_version(conn: Any, table: str, job_id: str) -> int:
     row = conn.execute(
         f"SELECT COALESCE(MAX(version), 0) + 1 AS next FROM {table} WHERE job_id = ?",
@@ -447,6 +478,7 @@ def write_report(job: Job, content: str) -> Path:
 __all__ = [
     "write_critique",
     "write_finding",
+    "write_finding_translation",
     "write_plan",
     "write_report",
     "write_synthesis",

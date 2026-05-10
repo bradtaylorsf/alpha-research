@@ -99,6 +99,16 @@ def test_precheck_post_cap_continues_to_raise(job: Job, db_path: Path) -> None:
         bt.precheck("frontier_speed")
 
 
+def test_would_exceed_uses_estimated_cost_without_charging(job: Job, db_path: Path) -> None:
+    bt = BudgetTracker(job.id, cap_usd=0.01, pricing=PRICING, db_path=db_path)
+    bt.spent = 0.009
+    usage = TokenUsage(input_tokens=1_000, output_tokens=1_000)
+
+    assert bt.estimate_cost("frontier_speed", usage) == pytest.approx(0.006)
+    assert bt.would_exceed("frontier_speed", usage) is True
+    assert bt.spent == pytest.approx(0.009)
+
+
 # ---------------------------------------------------------------------------
 # 90% warning
 # ---------------------------------------------------------------------------

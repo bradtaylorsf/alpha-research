@@ -419,7 +419,8 @@ Lockfiles (`uv.lock`) are committed.
 
 ```bash
 research start --skip-intake --goal "<goal>" \
-    [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes] [--disk-cap-gb 10]
+    [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes] \
+    [--disk-cap-gb 10] [--translate-non-english]
 
 research list                      # newest first; Rich on a TTY, JSON otherwise
 research list --json
@@ -466,6 +467,14 @@ DB row, and spawns a detached daemon via
 `subprocess.Popen(start_new_session=True)`. The PID is written atomically
 to `jobs/<id>/daemon.pid`; the daemon's stdout/stderr land in
 `jobs/<id>/daemon.{out,err}.log`.
+
+`--translate-non-english` is off by default. When enabled, extracted
+findings whose source metadata is non-English get a
+`findings/NNNNNN.translation.md` English mirror via `frontier_speed`; the
+original finding remains unchanged. Plan YAML can also opt in per task
+with `payload.translate_non_english: true`. See
+[`docs/CONFIG.md`](docs/CONFIG.md) for the per-job knob and budget
+behavior.
 
 `research search` defaults to a hybrid pass: FTS5 on `findings_fts` /
 `sources_fts` plus semantic cosine over `embeddings` blobs, deduped and
