@@ -195,6 +195,41 @@ async def test_malformed_live_xml_recovers_records(
     assert "Malformed embedded metadata" in results[0].snippet
 
 
+async def test_malformed_recovery_skips_lxml_non_element_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = """<?xml version="1.0" encoding="UTF-8"?>
+    <searchRetrieveResponse xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <records>
+        <!-- lxml recovery keeps comment nodes whose tag is not a string. -->
+        <record>
+          <recordData>
+            <dc:title>Journal d'Alger</dc:title>
+            <dc:description>Malformed <i>embedded</b> metadata</dc:description>
+            <dc:identifier>https://gallica.bnf.fr/ark:/12148/bpt6k2222222</dc:identifier>
+            <dc:type>periodique</dc:type>
+            <dc:date>1958</dc:date>
+            <dc:language>fre</dc:language>
+            <dc:source>Gallica</dc:source>
+          </recordData>
+        </record>
+      </records>
+    </searchRetrieveResponse>
+    """
+
+    def _respond(url, params):
+        return _FakeResp(200, payload)
+
+    _patch_httpx(monkeypatch, responder=_respond)
+
+    results = await gallica.search("guerre d'Algerie", max_results=5)
+
+    assert len(results) == 1
+    assert results[0].title == "Journal d'Alger"
+    assert results[0].url == "https://gallica.bnf.fr/ark:/12148/bpt6k2222222"
+    assert results[0].extras["dc:date"] == "1958"
+
+
 async def test_rate_limit_gate_sleeps_to_enforce_one_rps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -114,7 +114,9 @@ def _build_identifier_cql(ark: str) -> str:
     return f"dc.identifier all {_cql_quote(ark)}"
 
 
-def _local_name(tag: str) -> str:
+def _local_name(tag: object) -> str:
+    if not isinstance(tag, str):
+        return ""
     if "}" in tag:
         return tag.rsplit("}", 1)[1]
     if ":" in tag:
