@@ -376,6 +376,9 @@ _OPENCORPORATES_HOSTS = frozenset(
 _LOC_HOSTS = frozenset({"www.loc.gov"})
 _NARA_HOSTS = frozenset({"catalog.archives.gov"})
 _GALLICA_HOSTS = frozenset({"gallica.bnf.fr"})
+_EUROPEANA_HOSTS = frozenset(
+    {"api.europeana.eu", "europeana.eu", "www.europeana.eu"}
+)
 _COMMONS_HOSTS = frozenset({"commons.wikimedia.org", "upload.wikimedia.org"})
 _WIKIDATA_HOSTS = frozenset({"www.wikidata.org", "wikidata.org"})
 _OPENALEX_HOSTS = frozenset({"openalex.org", "www.openalex.org", "api.openalex.org"})
@@ -762,6 +765,11 @@ async def fetch(
         from research_agent.tools import gallica
 
         return await gallica.fetch(url)
+
+    if netloc in _EUROPEANA_HOSTS:
+        from research_agent.tools import europeana
+
+        return await europeana.fetch(url)
 
     if netloc in _WIKIDATA_HOSTS:
         from research_agent.tools import wikidata

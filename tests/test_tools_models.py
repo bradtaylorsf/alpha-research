@@ -51,6 +51,7 @@ EXPECTED_SOURCE_KINDS = (
     "commons_search",
     "cspan_search",
     "dpla_search",
+    "europeana_search",
     "wikisource_search",
     "openalex_search",
     "openlibrary_search",

@@ -95,6 +95,7 @@ from `src/research_agent/tools/_registry.py` via
 | `cspan_search` | C-SPAN Video Library US political broadcast video with transcripts (Playwright scrape, no auth) | `max_results`, `type=House\|Senate` | `Project 2025` |
 | `dpla_search` | Digital Public Library of America item metadata across US cultural institutions; requires DPLA_API_KEY | `max_results`, `provider` | `Maya land claims` |
 | `edgar_search` | SEC filings (10-K, 10-Q, 8-K, Form 4) — requires `RESEARCH_USER_AGENT` w/ contact email | `form_type: 10-K\|8-K\|...` | `Cisco cybersecurity` |
+| `europeana_search` | Europeana multilingual European cultural-heritage item metadata across museums, libraries, and archives; requires EUROPEANA_API_KEY | `max_results`, `lang` | `Algerian war 1954` |
 | `fec_search` | Candidates, committees, schedule A/E filings (OpenFEC) | `kind: candidates\|committees\|schedules/schedule_a\|schedules/schedule_e` | `Trump 2024 committee` |
 | `fedregister_search` | Federal Register rules, proposed rules, agency notices since 1994 (no auth) | `since: YYYY-MM-DD`, `agencies: [...]` | `Schedule F` |
 | `gallica_search` | Gallica/BnF SRU XML search for French national-library newspapers, books, manuscripts, maps, and other digitized primary sources | `max_results` (SRU maximumRecords capped at 50) | `guerre d'Algerie` |
@@ -244,6 +245,7 @@ that list, so there is no drift.
 | `TROVE_API_KEY` | no | Trove/National Library of Australia API key — used by `tools/trove.py`. Keys expire after 12 months and require renewal by email. Sent as `X-API-KEY`, not a URL parameter. Connector defaults to metadata-only; no automatic full-text downloads. |
 | `NARA_API_KEY` | no | National Archives Catalog OPA v2 API key — used by `tools/nara.py`. Request by emailing `Catalog_API@nara.gov`; registration takes about 24h. Sent as `x-api-key`. Default limit is 10,000 queries/month; connector and smoke skip cleanly when unset. |
 | `DPLA_API_KEY` | no | Digital Public Library of America API key — used by `tools/dpla.py`. Request with `curl -X POST https://api.dp.la/v2/api_key/<your-email>`; the emailed 32-character key is sent as `?api_key=<key>`. Connector and smoke skip cleanly when unset. |
+| `EUROPEANA_API_KEY` | no | Europeana API key — used by `tools/europeana.py`. Create a free key in your Europeana account under Manage API keys (migrated there on 2025-05-28). Sent as `?wskey=<key>` to `https://api.europeana.eu/api/v2/search.json`; connector enforces 1 RPS and smoke skips cleanly when unset. |
 | `SERPAPI_KEY` | no | SERPAPI key — required by `tools/scholar.py` (Google Scholar engine, case law + academic). Plans start at $75/mo for 5k searches across all engines; per-query ≈ $0.015. Sign up at <https://serpapi.com/>. |
 | `LINKEDIN_DATA_API_KEY` | no | LinkedIn data-broker key (default broker: Proxycurl) — required by `tools/linkedin.py`. Per-lookup ≈ $0.01–$0.05; gate fetches behind explicit planner tasks. Sign up at <https://nubela.co/proxycurl/>. |
 | `LINKEDIN_BROKER` | no | Broker recipe used by `tools/linkedin.py`. `proxycurl` (default) or `lix`; switching to `lix` consults `LIX_API_KEY` instead of `LINKEDIN_DATA_API_KEY`. |

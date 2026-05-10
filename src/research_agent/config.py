@@ -175,6 +175,15 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         ),
     ),
     EnvKey(
+        name="EUROPEANA_API_KEY",
+        required=False,
+        description=(
+            "Europeana API key for tools/europeana.py. Create a free key in"
+            " your Europeana account under Manage API keys; migrated there on"
+            " 2025-05-28. Sent as wskey=<key>."
+        ),
+    ),
+    EnvKey(
         name="SERPAPI_KEY",
         required=False,
         description=(

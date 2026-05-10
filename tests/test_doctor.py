@@ -315,6 +315,37 @@ def test_run_all_checks_includes_dpla_note(tmp_path):
     assert any(r.name == "dpla_api_note" for r in results)
 
 
+def test_check_europeana_api_note_skips_when_key_missing(monkeypatch):
+    monkeypatch.delenv("EUROPEANA_API_KEY", raising=False)
+
+    result = doctor.check_europeana_api_note()
+
+    assert result.name == "europeana_api_note"
+    assert result.status == "skip"
+    assert result.required is False
+    assert "Manage API keys" in result.detail
+    assert "?wskey=<key>" in result.detail
+    assert "1 RPS" in result.detail
+
+
+def test_check_europeana_api_note_masks_present_key(monkeypatch):
+    monkeypatch.setenv("EUROPEANA_API_KEY", "europeana-test-key-abcdef")
+
+    result = doctor.check_europeana_api_note()
+
+    assert result.status == "ok"
+    assert "...cdef" in result.detail
+    assert "europeana-test-key" not in result.detail
+    assert "/api/v2/search.json" in result.detail
+
+
+def test_run_all_checks_includes_europeana_note(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.yaml").write_text("tiers: {}\n", encoding="utf-8")
+    results = doctor.run_all_checks([], repo_root=tmp_path)
+    assert any(r.name == "europeana_api_note" for r in results)
+
+
 def test_check_result_dataclass_shape():
     from dataclasses import FrozenInstanceError
 

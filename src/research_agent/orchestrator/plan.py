@@ -113,6 +113,8 @@ TaskKind = Literal[
     "cspan_fetch",
     "dpla_search",
     "dpla_fetch",
+    "europeana_search",
+    "europeana_fetch",
     "iarchive_search",
     "iarchive_fetch",
     "trove_search",
