@@ -135,6 +135,15 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         ),
     ),
     EnvKey(
+        name="OPENALEX_API_KEY",
+        required=False,
+        description=(
+            "Free OpenAlex API key for tools/openalex.py. Optional for"
+            " low-volume smoke/demos, recommended for regular use since the"
+            " February 2026 free-key policy. Sent as `api_key=<key>`."
+        ),
+    ),
+    EnvKey(
         name="TROVE_API_KEY",
         required=False,
         description=(

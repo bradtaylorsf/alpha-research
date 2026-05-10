@@ -204,6 +204,8 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
         "fechaDesde",
         "fechaHasta",
         "localizacion",
+        "filter",
+        "sort",
     }
 )
 

@@ -87,6 +87,7 @@ from `src/research_agent/tools/_registry.py` via
 | Kind | What it covers | Optional payload knobs | Example query |
 |---|---|---|---|
 | `bbb_search` | Better Business Bureau profiles + ratings (Playwright, no auth) | — | `SBI Builders` |
+| `bne_search` | BNE Hemeroteca Digital Spanish historical press (Playwright scrape, no auth) | `max_results`, `fechaDesde`, `fechaHasta`, `localizacion` | `guerra civil 1936` |
 | `calaccess_search` | California Cal-Access campaign finance (Playwright) | `kind: contributions\|independent_expenditures` | `Newsom` |
 | `commons_search` | Wikimedia Commons free media files with imageinfo license, author, MIME type, original URL, and thumbnail metadata | `max_results` | `Algerian war photographs` |
 | `congress_search` | Bills, members, committees, hearings, congressional record (Congress.gov v3 API) | `kind: bill\|member\|committee\|hearing\|congressional-record` | `Inflation Reduction Act` |
@@ -103,6 +104,7 @@ from `src/research_agent/tools/_registry.py` via
 | `littlesis_search` | Power-mapping database — entities, donations, board seats, family ties (lead, not evidence) | `kind: entities\|relationships` | `Peter Thiel` |
 | `loc_search` | Library of Congress digital collections, including Chronicling America through the unified loc.gov API | `collection: chronicling-america\|prints\|manuscripts\|recordings\|maps`, `page: <int>` | `battle of algiers` |
 | `nonprofits_search` | ProPublica Nonprofit Explorer (Form 990 filings, no auth) | — | `Heritage Foundation` |
+| `openalex_search` | OpenAlex Works scholarly articles, abstracts, DOIs, citations, authors, venues, and open-access URLs | `max_results`, `filter`, `sort` | `Project 2025 unitary executive theory` |
 | `opencorporates_search` | Global company registry — requires `OPENCORPORATES_API_KEY` | `jurisdiction: us_ca\|gb\|...` | `Acme Holdings` |
 | `openlibrary_search` | Open Library book metadata, ISBN/OCLC/LCCN identifiers, and Internet Archive scan IDs through search.json | `max_results` | `Pullman Strike 1894` |
 | `persee_search` | Persee French academic journals in humanities and social sciences (Playwright scrape, no auth) | `max_results` | `guerre d'Algerie` |
@@ -234,6 +236,7 @@ that list, so there is no drift.
 | `DATA_GOV_API_KEY` | no | api.data.gov key (free w/ signup at <https://api.data.gov/signup/>) — used by `tools/fec.py` (OpenFEC). Authenticated tier is 1,000 req/hr; falls back to `DEMO_KEY` (~40 req/hr per IP) when unset. |
 | `LDA_API_KEY` | no | Senate Lobbying Disclosure Act API key (free, optional, register at <https://lda.senate.gov/api/register/>) — used by `tools/lda.py`. Anonymous works for low-volume; authenticated raises rate limits. Sent via `Authorization: Token <key>`. |
 | `OPENCORPORATES_API_KEY` | no | OpenCorporates API token — used by `tools/opencorporates.py`. **Required for any live request:** anonymous v0.4 access is now gated (returns HTTP 401), so without a key the connector returns no results and smoke skips cleanly. Token rides as `?api_token=<key>`. Public-benefit access by emailing service desk; commercial pricing £2,250–£12,000/yr. |
+| `OPENALEX_API_KEY` | no | Free OpenAlex API key — used by `tools/openalex.py`. Optional for low-volume smoke/demos; recommended for regular use since the February 2026 free-key policy. Sent as `?api_key=<key>`. |
 | `TROVE_API_KEY` | no | Trove/National Library of Australia API key — used by `tools/trove.py`. Keys expire after 12 months and require renewal by email. Sent as `X-API-KEY`, not a URL parameter. Connector defaults to metadata-only; no automatic full-text downloads. |
 | `SERPAPI_KEY` | no | SERPAPI key — required by `tools/scholar.py` (Google Scholar engine, case law + academic). Plans start at $75/mo for 5k searches across all engines; per-query ≈ $0.015. Sign up at <https://serpapi.com/>. |
 | `LINKEDIN_DATA_API_KEY` | no | LinkedIn data-broker key (default broker: Proxycurl) — required by `tools/linkedin.py`. Per-lookup ≈ $0.01–$0.05; gate fetches behind explicit planner tasks. Sign up at <https://nubela.co/proxycurl/>. |

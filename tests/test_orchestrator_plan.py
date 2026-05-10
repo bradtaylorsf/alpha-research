@@ -67,6 +67,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "trove",
     "wikidata",
     "wikisource",
+    "openalex",
     "openlibrary",
     "persee",
     "bne",
