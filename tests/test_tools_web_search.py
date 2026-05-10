@@ -353,7 +353,7 @@ async def test_search_auto_ddg_fallback_with_lang_zero_results_is_quiet(
     assert not list((tmp_path / "data" / "diagnostics" / "web_search").glob("*.png"))
     messages = [record.getMessage() for record in caplog.records]
     assert any("lang='fr' ignored" in message for message in messages)
-    assert any("returned 0 results" in message for message in messages)
+    assert not any("returned 0 results" in message for message in messages)
     assert not any(
         record.levelno >= logging.WARNING and "selector drift" in record.getMessage()
         for record in caplog.records
@@ -378,7 +378,7 @@ async def test_search_auto_ddg_fallback_with_lang_session_failure_is_quiet(
     assert results == []
     messages = [record.getMessage() for record in caplog.records]
     assert any("lang='fr' ignored" in message for message in messages)
-    assert any("browser session failed" in message for message in messages)
+    assert not any("browser session failed" in message for message in messages)
     assert not any(record.levelno >= logging.WARNING for record in caplog.records)
 
 
