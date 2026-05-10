@@ -113,6 +113,8 @@ TaskKind = Literal[
     "wikidata_fetch",
     "wikisource_search",
     "wikisource_fetch",
+    "openalex_search",
+    "openalex_fetch",
     "openlibrary_search",
     "openlibrary_fetch",
     "persee_search",

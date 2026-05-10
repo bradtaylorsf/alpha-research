@@ -30,6 +30,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     littlesis,
     loc,
     nonprofits,
+    openalex,
     opencorporates,
     openlibrary,
     persee,
@@ -877,6 +878,71 @@ def _smoke_openlibrary_search(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_openalex_search(query: str) -> str:
+    """Smoke wrapper: OpenAlex Works search with DOI/OpenAlex URL checks."""
+    import sys
+
+    async def _run() -> str:
+        results = await openalex.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool openalex_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url
+            for hit in results
+            if (
+                not hit.title
+                or not hit.url
+                or not (
+                    hit.extras.get("doi")
+                    or hit.url.startswith("https://openalex.org/")
+                )
+            )
+        ]
+        if missing:
+            print(
+                "_smoke-tool openalex_search: missing title and DOI/OpenAlex URL on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        query_text = " ".join(query.split())
+        lines = [
+            f"openalex_search: returned {len(results)} hits for query: {query_text}"
+        ]
+        for hit in results:
+            metadata_lines: list[str] = []
+            for label, key in (
+                ("doi", "doi"),
+                ("openalex_id", "openalex_id"),
+                ("year", "pub_year"),
+                ("venue", "host_venue"),
+                ("citations", "citation_count"),
+                ("open_access_url", "open_access_url"),
+            ):
+                value = hit.extras.get(key)
+                if value not in (None, "", []):
+                    metadata_lines.append(f"  {label}: {value}")
+            authors = hit.extras.get("authors")
+            if isinstance(authors, list) and authors:
+                metadata_lines.append(f"  authors: {', '.join(map(str, authors[:4]))}")
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 220:
+                snippet = snippet[:220] + "..."
+            hit_lines = [f"- {hit.title}", f"  url: {hit.url}"]
+            hit_lines.extend(metadata_lines)
+            hit_lines.append(f"  snippet: {snippet}")
+            lines.append("\n".join(hit_lines))
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_gallica_search(query: str) -> str:
     """Smoke wrapper: Gallica SRU XML search with non-empty title/URL checks."""
     import sys
@@ -1706,6 +1772,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "lda": _smoke_lda,
     "littlesis": _smoke_littlesis,
     "opencorporates": _smoke_opencorporates,
+    "openalex_search": _smoke_openalex_search,
     "trove_search": _smoke_trove_search,
     "wikidata_search": _smoke_wikidata_search,
     "wikisource_search": _smoke_wikisource_search,

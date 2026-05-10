@@ -554,6 +554,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "trove",
     "wikidata",
     "wikisource",
+    "openalex",
     "openlibrary",
     "persee",
     "bne",
@@ -568,6 +569,7 @@ _CONNECTOR_SOURCE_KIND["trove"] = "trove_search"
 _CONNECTOR_SOURCE_KIND["wikidata"] = "wikidata_search"
 _CONNECTOR_SOURCE_KIND["commons"] = "commons_search"
 _CONNECTOR_SOURCE_KIND["wikisource"] = "wikisource_search"
+_CONNECTOR_SOURCE_KIND["openalex"] = "openalex_search"
 _CONNECTOR_SOURCE_KIND["openlibrary"] = "openlibrary_search"
 _CONNECTOR_SOURCE_KIND["persee"] = "persee_search"
 _CONNECTOR_SOURCE_KIND["bne"] = "bne_search"
