@@ -239,6 +239,29 @@ def check_trove_api_note() -> CheckResult:
     )
 
 
+def check_dpla_api_note() -> CheckResult:
+    """Surface DPLA key registration and URL-param auth in doctor output."""
+    name = "dpla_api_note"
+    raw = os.environ.get("DPLA_API_KEY")
+    if not raw:
+        return CheckResult(
+            name,
+            "skip",
+            required=False,
+            detail=(
+                "DPLA_API_KEY unset - dpla_search disabled; request a free key"
+                " with curl -X POST https://api.dp.la/v2/api_key/<your-email>;"
+                " key rides as ?api_key=<key>"
+            ),
+        )
+    return CheckResult(
+        name,
+        "ok",
+        required=False,
+        detail=f"present ({mask_secret(raw)}); sent as ?api_key=<key>; 1 RPS",
+    )
+
+
 def check_models_yaml(path: Path) -> CheckResult:
     """Parse ``config/models.yaml`` — fail if missing or invalid YAML."""
     name = "models_yaml"
@@ -551,6 +574,7 @@ def run_all_checks(
     results.append(check_tesseract())
     results.append(check_serpapi_cost_note())
     results.append(check_trove_api_note())
+    results.append(check_dpla_api_note())
     results.extend(check_sanctions_refresh())
     results.append(check_planner_allowlist_coherence())
     results.append(check_task_kind_registry_coherence())
