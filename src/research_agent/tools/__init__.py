@@ -954,11 +954,9 @@ def _smoke_persee_search(query: str) -> str:
             )
             raise SystemExit(1)
 
-        lines = [f"persee_search: returned {len(results)} hits"]
+        query_text = " ".join(query.split())
+        lines = [f"persee_search: returned {len(results)} hits for query: {query_text}"]
         for hit in results:
-            snippet = hit.snippet.replace("\n", " ")
-            if len(snippet) > 200:
-                snippet = snippet[:200] + "..."
             authors = hit.extras.get("authors")
             metadata_lines: list[str] = []
             journal = str(hit.extras.get("journal") or "").strip()
@@ -978,7 +976,6 @@ def _smoke_persee_search(query: str) -> str:
                     metadata_lines.append(f"  authors: {authors_text}")
             hit_lines = [f"- {hit.title}", f"  url: {hit.url}"]
             hit_lines.extend(metadata_lines)
-            hit_lines.append(f"  snippet: {snippet}")
             lines.append("\n".join(hit_lines))
         return "\n".join(lines)
 

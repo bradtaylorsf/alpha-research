@@ -255,11 +255,12 @@ def test_smoke_wrapper_requires_non_empty_persee_title_and_url(
 
     out = TOOL_REGISTRY["persee_search"]("guerre d'Algerie")
 
-    assert "persee_search: returned 1 hits" in out
+    assert "persee_search: returned 1 hits for query: guerre d'Algerie" in out
     assert "La Guerre d'Algerie" in out
     assert "https://www.persee.fr/doc/mat_0769-3206_1992_num_26_1_404869" in out
     assert "journal: Materiaux pour l'histoire de notre temps" in out
     assert "doi: 10.3406/mat.1992.404869" in out
+    assert "snippet:" not in out
 
 
 def test_smoke_wrapper_omits_missing_optional_metadata(
@@ -289,7 +290,9 @@ def test_smoke_wrapper_omits_missing_optional_metadata(
 
     out = TOOL_REGISTRY["persee_search"]("guerre d'Algerie")
 
+    assert "query: guerre d'Algerie" in out
     assert "none listed" not in out
+    assert "..." not in out
     assert "doi:" not in out
     assert "authors:" not in out
     assert "journal: Vingtieme Siecle. Revue d'histoire" in out
