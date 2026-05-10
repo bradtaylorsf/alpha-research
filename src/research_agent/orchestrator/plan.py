@@ -115,6 +115,8 @@ TaskKind = Literal[
     "wikisource_fetch",
     "openlibrary_search",
     "openlibrary_fetch",
+    "persee_search",
+    "persee_fetch",
 ]
 
 ScopeClass = Literal["narrow", "medium", "broad", "comprehensive"]

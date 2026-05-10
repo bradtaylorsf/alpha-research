@@ -5,14 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
-from research_agent.tools._registry import (
-    BaseSearchPayload,
-    KindEntry,
-    iter_kinds,
-    register_kind,
-)
-from research_agent.tools.models import SearchResult, Source, SourceKind
-
 # Import every direct-connector module so its module-level `register_kind`
 # call runs and the kind shows up in `iter_kinds()`. The import order is
 # alphabetical for readability, but the registry sorts on read so output
@@ -37,8 +29,9 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     littlesis,
     loc,
     nonprofits,
-    openlibrary,
     opencorporates,
+    openlibrary,
+    persee,
     sanctions,
     scholar,
     sos,
@@ -47,6 +40,13 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     wikidata,
     wikisource,
 )
+from research_agent.tools._registry import (
+    BaseSearchPayload,
+    KindEntry,
+    iter_kinds,
+    register_kind,
+)
+from research_agent.tools.models import SearchResult, Source, SourceKind
 
 
 def _smoke_web_search(query: str) -> str:
@@ -925,6 +925,59 @@ def _smoke_gallica_search(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_persee_search(query: str) -> str:
+    """Smoke wrapper: Persee Playwright search with non-empty title/URL checks."""
+    import sys
+
+    async def _run() -> str:
+        results = await persee.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool persee_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url
+            for hit in results
+            if not hit.title
+            or not hit.url
+            or "persee.fr/" not in hit.url
+            or not hit.url.startswith(("https://www.persee.fr/", "https://persee.fr/"))
+        ]
+        if missing:
+            print(
+                "_smoke-tool persee_search: missing title/persee.fr URL on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"persee_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            authors = hit.extras.get("authors")
+            if isinstance(authors, list):
+                authors_text = "; ".join(str(author) for author in authors) or "none listed"
+            else:
+                authors_text = "none listed"
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  journal: {hit.extras.get('journal') or 'none listed'}\n"
+                f"  year: {hit.extras.get('pub_year') or 'none listed'}\n"
+                f"  doi: {hit.extras.get('doi') or 'none listed'}\n"
+                f"  authors: {authors_text}\n"
+                f"  snippet: {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_sos(query: str) -> str:
     """Smoke wrapper: California Secretary of State business registry.
 
@@ -1584,6 +1637,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "wikidata_search": _smoke_wikidata_search,
     "wikisource_search": _smoke_wikisource_search,
     "openlibrary_search": _smoke_openlibrary_search,
+    "persee_search": _smoke_persee_search,
     "sos": _smoke_sos,
     "licensing": _smoke_licensing,
     "sanctions": _smoke_sanctions,

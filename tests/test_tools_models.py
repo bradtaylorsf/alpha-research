@@ -50,6 +50,7 @@ EXPECTED_SOURCE_KINDS = (
     "commons_search",
     "wikisource_search",
     "openlibrary_search",
+    "persee_search",
     "hathitrust",
 )
 

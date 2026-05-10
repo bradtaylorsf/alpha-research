@@ -56,6 +56,7 @@ SourceKind = Literal[
     "commons_search",
     "wikisource_search",
     "openlibrary_search",
+    "persee_search",
     "hathitrust",
 ]
 
