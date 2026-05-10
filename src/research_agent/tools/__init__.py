@@ -960,19 +960,26 @@ def _smoke_persee_search(query: str) -> str:
             if len(snippet) > 200:
                 snippet = snippet[:200] + "..."
             authors = hit.extras.get("authors")
+            metadata_lines: list[str] = []
+            journal = str(hit.extras.get("journal") or "").strip()
+            if journal:
+                metadata_lines.append(f"  journal: {journal}")
+            pub_year = str(hit.extras.get("pub_year") or "").strip()
+            if pub_year:
+                metadata_lines.append(f"  year: {pub_year}")
+            doi = str(hit.extras.get("doi") or "").strip()
+            if doi:
+                metadata_lines.append(f"  doi: {doi}")
             if isinstance(authors, list):
-                authors_text = "; ".join(str(author) for author in authors) or "none listed"
-            else:
-                authors_text = "none listed"
-            lines.append(
-                f"- {hit.title}\n"
-                f"  url: {hit.url}\n"
-                f"  journal: {hit.extras.get('journal') or 'none listed'}\n"
-                f"  year: {hit.extras.get('pub_year') or 'none listed'}\n"
-                f"  doi: {hit.extras.get('doi') or 'none listed'}\n"
-                f"  authors: {authors_text}\n"
-                f"  snippet: {snippet}"
-            )
+                authors_text = "; ".join(
+                    str(author).strip() for author in authors if str(author).strip()
+                )
+                if authors_text:
+                    metadata_lines.append(f"  authors: {authors_text}")
+            hit_lines = [f"- {hit.title}", f"  url: {hit.url}"]
+            hit_lines.extend(metadata_lines)
+            hit_lines.append(f"  snippet: {snippet}")
+            lines.append("\n".join(hit_lines))
         return "\n".join(lines)
 
     return asyncio.run(_run())

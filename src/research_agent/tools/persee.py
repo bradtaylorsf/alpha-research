@@ -101,8 +101,14 @@ def _absolute_url(base: str, href: str | None) -> str:
     if not text:
         return ""
     if text.startswith("//"):
-        return "https:" + text
-    return urljoin(base, text)
+        text = "https:" + text
+    absolute = urljoin(base, text)
+    parsed = urlparse(absolute)
+    if (parsed.hostname or "").casefold() in _ACCEPTED_HOSTS and parsed.path.startswith(
+        "/doc/"
+    ):
+        return parsed._replace(scheme="https", query="", fragment="").geturl()
+    return absolute
 
 
 def _is_persee_article_url(url: str) -> bool:
@@ -171,6 +177,10 @@ def _doi_from_values(values: list[str]) -> str:
         if match is not None:
             return _normalize_doi(match.group(1))
     return ""
+
+
+def _clean_journal(value: str | None) -> str:
+    return _clean_text(value).strip(" ./,-")
 
 
 def _candidate_lines(node: HtmlElement) -> list[str]:
@@ -249,14 +259,14 @@ def _extract_journal_volume_year(card: HtmlElement, url: str) -> tuple[str, str,
 
     for line in _candidate_lines(card):
         match = re.search(
-            r"(?P<journal>.+?)\s+(?:Ann[eé]e|Annee)\s+"
+            r"(?P<journal>.+?)\s*/?\s+(?:Ann[eé]e|Annee)\s+"
             r"(?P<year>(?:18|19|20)\d{2})"
-            r"(?:\s+(?P<volume>[A-Za-z0-9_.-]+))?",
+            r"(?:\s*/?\s*(?P<volume>[A-Za-z0-9_.-]+))?",
             line,
             flags=re.IGNORECASE,
         )
         if match is not None:
-            journal = _clean_text(match.group("journal")).strip(" .,-")
+            journal = _clean_journal(match.group("journal"))
             year = year or match.group("year")
             volume = volume or _clean_text(match.group("volume"))
             break
@@ -268,7 +278,7 @@ def _extract_journal_volume_year(card: HtmlElement, url: str) -> tuple[str, str,
             flags=re.IGNORECASE,
         )
         if match is not None and not journal:
-            journal = _clean_text(match.group("journal")).strip(" .,-")
+            journal = _clean_journal(match.group("journal"))
 
     if not year:
         text = _node_text(card)
@@ -509,7 +519,7 @@ def _source_title(root: HtmlElement) -> str:
         title = _ARTICLE_TYPE_RE.sub("", value).strip()
         if title:
             return title
-    return "Persee article"
+    return ""
 
 
 def _source_markdown(title: str, metadata: dict[str, Any], body_text: str) -> str:

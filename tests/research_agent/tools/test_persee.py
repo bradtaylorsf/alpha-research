@@ -122,6 +122,24 @@ async def test_fetch_happy_path_populates_source_metadata(
     assert "debats de presse" in source.cleaned_text
 
 
+async def test_fetch_selector_drift_warning_writes_diagnostic_dump(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    url = "https://www.persee.fr/doc/mat_0769-3206_1992_num_26_1_404869"
+    _patch_browser(monkeypatch, "<html lang='fr'><body><main></main></body></html>")
+    monkeypatch.setattr(persee, "_DIAGNOSTICS_DIR", tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        source = await persee.fetch(url)
+
+    assert source is None
+    assert "persee fetch selector drift" in caplog.text
+    assert list(tmp_path.glob("fetch-selector-drift-*.html"))
+    assert list(tmp_path.glob("fetch-selector-drift-*.png"))
+
+
 async def test_search_empty_fixture_returns_empty_without_drift_warning(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -242,6 +260,39 @@ def test_smoke_wrapper_requires_non_empty_persee_title_and_url(
     assert "https://www.persee.fr/doc/mat_0769-3206_1992_num_26_1_404869" in out
     assert "journal: Materiaux pour l'histoire de notre temps" in out
     assert "doi: 10.3406/mat.1992.404869" in out
+
+
+def test_smoke_wrapper_omits_missing_optional_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_agent.tools import TOOL_REGISTRY
+
+    async def fake_search(query: str, *, max_results: int = 20):
+        assert query == "guerre d'Algerie"
+        assert max_results == 5
+        return [
+            SearchResult(
+                url="https://www.persee.fr/doc/xxs_0294-1759_2001_num_70_1_1356",
+                title="La guerre d'Algerie",
+                snippet="La guerre d'Algerie",
+                source_kind="persee_search",
+                extras={
+                    "doi": "",
+                    "journal": "Vingtieme Siecle. Revue d'histoire",
+                    "pub_year": "2001",
+                    "authors": [],
+                },
+            )
+        ]
+
+    monkeypatch.setattr(persee, "search", fake_search)
+
+    out = TOOL_REGISTRY["persee_search"]("guerre d'Algerie")
+
+    assert "none listed" not in out
+    assert "doi:" not in out
+    assert "authors:" not in out
+    assert "journal: Vingtieme Siecle. Revue d'histoire" in out
 
 
 def test_registered_kind_links_persee_skill() -> None:
