@@ -335,6 +335,53 @@ async def test_search_auto_ddg_fallback_logs_lang_ignored_and_proceeds(
     )
 
 
+async def test_search_auto_ddg_fallback_with_lang_zero_results_is_quiet(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    page = FakePage("<html><body>no matches here</body></html>")
+    _patch_browser_session(monkeypatch, page)
+
+    caplog.set_level(logging.INFO, logger="research_agent.tools.web_search")
+    results = await web_search.search("test", max_results=1, lang="fr")
+
+    assert results == []
+    assert page.goto_calls
+    assert not list((tmp_path / "data" / "diagnostics" / "web_search").glob("*.png"))
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("lang='fr' ignored" in message for message in messages)
+    assert any("returned 0 results" in message for message in messages)
+    assert not any(
+        record.levelno >= logging.WARNING and "selector drift" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_search_auto_ddg_fallback_with_lang_session_failure_is_quiet(
+    monkeypatch,
+    caplog,
+):
+    @asynccontextmanager
+    async def _broken_session(headful=None, block_media=True):
+        raise web_search.PlaywrightError("launch denied")
+        yield
+
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+    monkeypatch.setattr(browser, "browser_session", _broken_session)
+
+    caplog.set_level(logging.INFO, logger="research_agent.tools.web_search")
+    results = await web_search.search("test", max_results=1, lang="fr")
+
+    assert results == []
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("lang='fr' ignored" in message for message in messages)
+    assert any("browser session failed" in message for message in messages)
+    assert not any(record.levelno >= logging.WARNING for record in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Module wiring
 # ---------------------------------------------------------------------------

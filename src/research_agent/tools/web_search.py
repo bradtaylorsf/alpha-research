@@ -463,12 +463,29 @@ async def search(
                     await browser.navigate(page, url)
                     html = await page.content()
                 except PlaywrightError as exc:
+                    if normalized_lang:
+                        logger.info(
+                            "web_search %s navigation failed after ignoring Brave-only lang=%r: %s",
+                            engine,
+                            normalized_lang,
+                            exc,
+                        )
+                        return []
                     logger.warning("web_search %s navigation failed: %s", engine, exc)
                     return []
 
                 parsed = parser(html)
 
                 if not parsed:
+                    if normalized_lang:
+                        logger.info(
+                            "web_search %s returned 0 results for %r after ignoring "
+                            "Brave-only lang=%r",
+                            engine,
+                            query,
+                            normalized_lang,
+                        )
+                        return []
                     screenshot = await _capture_diagnostic(page, engine)
                     logger.warning(
                         "web_search %s returned 0 results for %r — selector drift? screenshot=%s",
@@ -480,6 +497,14 @@ async def search(
             finally:
                 await page.close()
     except PlaywrightError as exc:
+        if normalized_lang:
+            logger.info(
+                "web_search %s browser session failed after ignoring Brave-only lang=%r: %s",
+                engine,
+                normalized_lang,
+                exc,
+            )
+            return []
         logger.warning("web_search %s browser session failed: %s", engine, exc)
         return []
 
