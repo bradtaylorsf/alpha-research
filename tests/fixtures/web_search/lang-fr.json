@@ -1,0 +1,16 @@
+{
+  "query": {
+    "original": "guerre d'Algerie",
+    "more_results_available": false
+  },
+  "web": {
+    "results": [
+      {
+        "title": "La guerre d'Algerie dans la presse francaise",
+        "url": "https://gallica.bnf.fr/ark:/12148/bpt6k1234567",
+        "description": "Resultat en francais issu d'une archive de presse.",
+        "page_age": "1956-01-01T00:00:00Z"
+      }
+    ]
+  }
+}

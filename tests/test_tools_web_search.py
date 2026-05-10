@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,6 +22,42 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 def _load(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+def _load_json(name: str) -> dict:
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+
+class _FakeResp:
+    def __init__(self, status_code: int, payload: dict, *, text: str = "") -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text or json.dumps(payload)
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def _patch_brave_httpx(monkeypatch: pytest.MonkeyPatch, *, payload: dict):
+    captured: dict[str, list] = {
+        "urls": [],
+        "headers": [],
+        "params": [],
+    }
+
+    @asynccontextmanager
+    async def _client_factory(*args, **kwargs):
+        class _Client:
+            async def get(self, url, *, headers=None, params=None):
+                captured["urls"].append(url)
+                captured["headers"].append(headers or {})
+                captured["params"].append(params or {})
+                return _FakeResp(200, payload)
+
+        yield _Client()
+
+    monkeypatch.setattr(web_search.httpx, "AsyncClient", _client_factory)
+    return captured
 
 
 def test_parse_ddg_extracts_three_results_and_unwraps_redirect():
@@ -190,6 +227,24 @@ async def test_search_zero_results_writes_screenshot_and_warns(monkeypatch, tmp_
     assert saved[0].name in matches[0].getMessage()
 
 
+async def test_search_browser_session_failure_returns_empty(monkeypatch, caplog):
+    @asynccontextmanager
+    async def _broken_session(headful=None, block_media=True):
+        raise web_search.PlaywrightError("launch denied")
+        yield
+
+    monkeypatch.setattr(browser, "browser_session", _broken_session)
+
+    caplog.set_level(logging.WARNING, logger="research_agent.tools.web_search")
+    results = await web_search.search("openai gpt-5", engine="ddg")
+
+    assert results == []
+    assert any(
+        "browser session failed" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 async def test_search_navigation_url_includes_query(monkeypatch):
     page = FakePage(_load("web_search_ddg.html"))
     _patch_browser_session(monkeypatch, page)
@@ -205,6 +260,79 @@ async def test_search_google_navigation_url_includes_hl(monkeypatch):
 
     await web_search.search("hello", engine="google")
     assert "google.com/search?q=hello&hl=en" in page.goto_calls[0]
+
+
+# ---------------------------------------------------------------------------
+# Brave language targeting
+# ---------------------------------------------------------------------------
+
+
+async def test_search_brave_includes_search_lang_when_set(monkeypatch):
+    payload = _load_json("web_search/lang-fr.json")
+    captured = _patch_brave_httpx(monkeypatch, payload=payload)
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+
+    results = await web_search.search(
+        "guerre d'Algerie",
+        max_results=1,
+        engine="brave",
+        lang=" fr ",
+    )
+
+    assert len(results) == 1
+    assert results[0].url == "https://gallica.bnf.fr/ark:/12148/bpt6k1234567"
+    assert results[0].extras["source_engine"] == "brave"
+    assert captured["urls"] == [web_search.BRAVE_SEARCH_URL]
+    assert captured["headers"][0]["X-Subscription-Token"] == "test-key"
+    assert captured["params"][0]["q"] == "guerre d'Algerie"
+    assert captured["params"][0]["count"] == "1"
+    assert captured["params"][0]["search_lang"] == "fr"
+
+
+async def test_search_brave_omits_search_lang_when_unset(monkeypatch):
+    payload = _load_json("web_search/lang-fr.json")
+    captured = _patch_brave_httpx(monkeypatch, payload=payload)
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+
+    results = await web_search.search("guerre d'Algerie", max_results=5, engine="brave")
+
+    assert len(results) == 1
+    assert captured["params"][0]["q"] == "guerre d'Algerie"
+    assert captured["params"][0]["count"] == "5"
+    assert "search_lang" not in captured["params"][0]
+
+
+async def test_search_auto_brave_includes_lang_when_key_set(monkeypatch):
+    payload = _load_json("web_search/lang-fr.json")
+    captured = _patch_brave_httpx(monkeypatch, payload=payload)
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+
+    results = await web_search.search("gallica presse", max_results=1, lang="fr")
+
+    assert len(results) == 1
+    assert results[0].extras["source_engine"] == "brave"
+    assert captured["params"][0]["search_lang"] == "fr"
+
+
+async def test_search_auto_ddg_fallback_logs_lang_ignored_and_proceeds(
+    monkeypatch,
+    caplog,
+):
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+    page = FakePage(_load("web_search_ddg.html"))
+    _patch_browser_session(monkeypatch, page)
+
+    caplog.set_level(logging.INFO, logger="research_agent.tools.web_search")
+    results = await web_search.search("openai gpt-5", max_results=2, lang="fr")
+
+    assert len(results) == 2
+    assert all(hit.extras["source_engine"] == "ddg" for hit in results)
+    assert page.goto_calls
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "lang='fr' ignored" in message and "engine=ddg" in message
+        for message in messages
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +389,7 @@ def test_smoke_web_search_brave_path_labels_engine(monkeypatch):
         extras={"source_engine": "brave"},
     )
 
-    async def _fake_brave(query, max_results):
+    async def _fake_brave(query, max_results, *, lang=None):
         return [fake_hit]
 
     monkeypatch.setattr(web_search, "_search_brave", _fake_brave)

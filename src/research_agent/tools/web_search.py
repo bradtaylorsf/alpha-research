@@ -1,8 +1,8 @@
-"""Web search via headless DuckDuckGo / Google SERPs (no paid APIs).
+"""Web search via opt-in Brave API or headless DuckDuckGo / Google SERPs.
 
 Issue #14 — first browser-driven connector. DDG's ``html.duckduckgo.com``
-SERP is the default because it doesn't aggressively bot-block; Google is
-the fallback when DDG misses. Both go through the shared
+SERP is the no-key default because it doesn't aggressively bot-block;
+Google is the fallback when DDG misses. Both go through the shared
 :mod:`research_agent.tools.browser` so per-host rate limits stick.
 
 Selectors live in inline constants near the parsers — when the SERP HTML
@@ -323,11 +323,25 @@ def _brave_api_key() -> str | None:
     return config.get("BRAVE_SEARCH_API_KEY")
 
 
-async def _search_brave(query: str, max_results: int) -> list[SearchResult]:
+def _normalize_lang(lang: str | None) -> str | None:
+    """Return a non-empty Brave language token, or None when unset."""
+    if not isinstance(lang, str):
+        return None
+    normalized = lang.strip()
+    return normalized or None
+
+
+async def _search_brave(
+    query: str,
+    max_results: int,
+    *,
+    lang: str | None = None,
+) -> list[SearchResult]:
     """Hit the Brave Search Web API and return up to ``max_results`` hits.
 
     Uses httpx, no Playwright — clean JSON, no fingerprinting risk, no
-    selector drift. The free tier allows ~2000 queries/month.
+    selector drift. The free tier allows ~2000 queries/month. ``lang`` is
+    Brave's optional ``search_lang`` content-language filter.
     """
     api_key = _brave_api_key()
     if not api_key:
@@ -340,6 +354,8 @@ async def _search_brave(query: str, max_results: int) -> list[SearchResult]:
     }
     # `count` is capped at 20 by the Brave API; clamp + we only return max_results.
     params = {"q": query, "count": str(min(max_results, 20))}
+    if normalized_lang := _normalize_lang(lang):
+        params["search_lang"] = normalized_lang
     try:
         async with httpx.AsyncClient(timeout=BRAVE_HTTP_TIMEOUT_S) as client:
             resp = await client.get(BRAVE_SEARCH_URL, headers=headers, params=params)
@@ -393,6 +409,8 @@ async def search(
     query: str,
     max_results: int = 10,
     engine: Engine = "auto",
+    *,
+    lang: str | None = None,
 ) -> list[SearchResult]:
     """Search ``query`` against ``engine`` and return up to ``max_results`` hits.
 
@@ -405,16 +423,26 @@ async def search(
 
     ``score`` and ``published_at`` are unset for SERP-scraped engines (they
     don't expose either consistently); Brave includes ``page_age`` when the
-    crawler knows it.
+    crawler knows it. ``lang`` is a Brave-only content-language filter; DDG
+    and Google log-and-ignore it.
     """
     if not query.strip():
         return []
+
+    normalized_lang = _normalize_lang(lang)
 
     if engine == "auto":
         engine = "brave" if _brave_api_key() else "ddg"
 
     if engine == "brave":
-        return await _search_brave(query, max_results)
+        return await _search_brave(query, max_results, lang=normalized_lang)
+
+    if normalized_lang:
+        logger.info(
+            "web_search lang=%r ignored for engine=%s; lang is Brave-only",
+            normalized_lang,
+            engine,
+        )
 
     _ensure_serp_rates()
 
@@ -427,29 +455,33 @@ async def search(
     else:  # pragma: no cover — Literal type covers this
         raise ValueError(f"unknown engine: {engine!r}")
 
-    async with browser.browser_session() as ctx:
-        page = await ctx.new_page()
-        try:
+    try:
+        async with browser.browser_session() as ctx:
+            page = await ctx.new_page()
             try:
-                await browser.navigate(page, url)
-                html = await page.content()
-            except PlaywrightError as exc:
-                logger.warning("web_search %s navigation failed: %s", engine, exc)
-                return []
+                try:
+                    await browser.navigate(page, url)
+                    html = await page.content()
+                except PlaywrightError as exc:
+                    logger.warning("web_search %s navigation failed: %s", engine, exc)
+                    return []
 
-            parsed = parser(html)
+                parsed = parser(html)
 
-            if not parsed:
-                screenshot = await _capture_diagnostic(page, engine)
-                logger.warning(
-                    "web_search %s returned 0 results for %r — selector drift? screenshot=%s",
-                    engine,
-                    query,
-                    screenshot,
-                )
-                return []
-        finally:
-            await page.close()
+                if not parsed:
+                    screenshot = await _capture_diagnostic(page, engine)
+                    logger.warning(
+                        "web_search %s returned 0 results for %r — selector drift? screenshot=%s",
+                        engine,
+                        query,
+                        screenshot,
+                    )
+                    return []
+            finally:
+                await page.close()
+    except PlaywrightError as exc:
+        logger.warning("web_search %s browser session failed: %s", engine, exc)
+        return []
 
     results: list[SearchResult] = []
     for row in parsed[:max_results]:
