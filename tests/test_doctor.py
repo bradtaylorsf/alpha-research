@@ -510,6 +510,43 @@ def test_check_registry_skill_coherence_skips_grandfathered() -> None:
     assert openlibrary_row.status == "ok"
 
 
+def test_check_registry_skill_summary_coherence_passes() -> None:
+    rows = [
+        doctor.CheckResult("registry_skill:ok_search", "ok", required=True, detail="ok"),
+        doctor.CheckResult(
+            "registry_skill:old_search",
+            "skip",
+            required=False,
+            detail="grandfathered",
+        ),
+    ]
+
+    result = doctor.check_registry_skill_summary_coherence(rows)
+
+    assert result.name == "registry_skill_coherence"
+    assert result.status == "ok"
+    assert result.required is True
+    assert "1 connector skill file(s) parse" in result.detail
+
+
+def test_check_registry_skill_summary_coherence_fails_on_required_row() -> None:
+    rows = [
+        doctor.CheckResult(
+            "registry_skill:ghost_search",
+            "fail",
+            required=True,
+            detail="missing",
+        )
+    ]
+
+    result = doctor.check_registry_skill_summary_coherence(rows)
+
+    assert result.name == "registry_skill_coherence"
+    assert result.status == "fail"
+    assert result.required is True
+    assert "registry_skill:ghost_search" in result.detail
+
+
 def test_check_registry_skill_coherence_fails_when_skill_file_missing(
     monkeypatch, tmp_path
 ) -> None:
@@ -553,4 +590,5 @@ def test_run_all_checks_includes_registry_coherence(tmp_path) -> None:
     names = {r.name for r in results}
     assert "planner_allowlist_coherence" in names
     assert "task_kind_registry_coherence" in names
+    assert "registry_skill_coherence" in names
     assert any(n.startswith("registry_skill:") for n in names)

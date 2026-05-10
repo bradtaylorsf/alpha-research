@@ -30,6 +30,7 @@ import json
 import logging
 import time
 from datetime import UTC, date, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -40,6 +41,8 @@ from research_agent import config
 from research_agent.tools import archive
 from research_agent.tools._registry import (
     BaseSearchPayload as _BaseSearchPayload,
+)
+from research_agent.tools._registry import (
     register_kind as _register_kind,
 )
 from research_agent.tools.models import SearchResult, Source
@@ -52,6 +55,8 @@ _BASE_URL = "https://www.loc.gov"
 _HOST = "www.loc.gov"
 # AC: polite per-host rate of 1 RPS.
 _RATE_LIMIT_INTERVAL = 1.0
+_MAX_HTTP_ATTEMPTS = 3
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _CACHE_DIR = Path("corpus/.cache/loc")
 
 # Maps the operator-facing ``collection`` knob to the loc.gov endpoint that
@@ -96,6 +101,61 @@ async def _rate_limit_gate() -> None:
             if wait > 0:
                 await asyncio.sleep(wait)
         _last_call_monotonic = time.monotonic()
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a Retry-After header into seconds."""
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        seconds = (retry_at - datetime.now(UTC)).total_seconds()
+    return max(0.0, seconds)
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = _parse_retry_after(headers.get("Retry-After"))
+    if retry_after is not None:
+        return retry_after
+    return min(4.0, 0.5 * (2**attempt))
+
+
+async def _get_with_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict[str, Any] | None,
+    context: str,
+) -> httpx.Response:
+    """GET once, then retry transient/rate-limit HTTP responses politely."""
+    for attempt in range(_MAX_HTTP_ATTEMPTS):
+        response = await client.get(url, params=params)
+        if (
+            response.status_code not in _RETRYABLE_STATUSES
+            or attempt == _MAX_HTTP_ATTEMPTS - 1
+        ):
+            return response
+        delay = _retry_delay(response, attempt)
+        logger.warning(
+            "loc %s returned HTTP %s; retrying in %.2fs",
+            context,
+            response.status_code,
+            delay,
+        )
+        await asyncio.sleep(delay)
+        await _rate_limit_gate()
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +330,12 @@ async def search(
             timeout=timeout,
             headers=_headers(),
         ) as client:
-            response = await client.get(url, params=params)
+            response = await _get_with_retries(
+                client,
+                url,
+                params=params,
+                context=f"search for {query!r}",
+            )
     except (httpx.HTTPError, OSError) as exc:
         logger.warning("loc search failed for %r: %s", query, exc)
         return []
@@ -362,7 +427,12 @@ async def _http_get_json(
             timeout=timeout,
             headers=_headers(),
         ) as client:
-            response = await client.get(url, params=params)
+            response = await _get_with_retries(
+                client,
+                url,
+                params=params,
+                context=f"fetch {url}",
+            )
     except (httpx.HTTPError, OSError) as exc:
         logger.warning("loc fetch failed for %s: %s", url, exc)
         return None, None

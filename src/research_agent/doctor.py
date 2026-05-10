@@ -582,6 +582,47 @@ def check_registry_skill_coherence() -> list[CheckResult]:
     return results
 
 
+def check_registry_skill_summary_coherence(
+    rows: list[CheckResult] | None = None,
+) -> CheckResult:
+    """Summarize registry/skill coherence as a single required doctor row.
+
+    The per-kind ``registry_skill:<kind>`` rows remain useful diagnostics,
+    but AC-X1 also requires a stable aggregate row that downstream checks can
+    assert by name.
+    """
+    name = "registry_skill_coherence"
+    try:
+        detail_rows = rows if rows is not None else check_registry_skill_coherence()
+        failures = [row for row in detail_rows if row.required and row.status == "fail"]
+        skipped = [row for row in detail_rows if row.status == "skip"]
+        ok_count = sum(1 for row in detail_rows if row.status == "ok")
+        if failures:
+            failed_names = ", ".join(row.name for row in failures)
+            return CheckResult(
+                name,
+                "fail",
+                required=True,
+                detail=f"{len(failures)} registry skill check(s) failed: {failed_names}",
+            )
+        return CheckResult(
+            name,
+            "ok",
+            required=True,
+            detail=(
+                f"{ok_count} connector skill file(s) parse;"
+                f" {len(skipped)} grandfathered skip(s)"
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            name,
+            "fail",
+            required=True,
+            detail=f"coherence check raised {type(exc).__name__}: {exc}",
+        )
+
+
 def run_all_checks(
     loaded_env_files: list[Path],
     *,
@@ -606,7 +647,9 @@ def run_all_checks(
     results.extend(check_sanctions_refresh())
     results.append(check_planner_allowlist_coherence())
     results.append(check_task_kind_registry_coherence())
-    results.extend(check_registry_skill_coherence())
+    registry_skill_rows = check_registry_skill_coherence()
+    results.append(check_registry_skill_summary_coherence(registry_skill_rows))
+    results.extend(registry_skill_rows)
     return results
 
 

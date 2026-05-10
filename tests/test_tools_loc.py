@@ -43,15 +43,22 @@ def cache_dir(tmp_path: Path, monkeypatch) -> Path:
 def _patch_httpx(monkeypatch, *, responder):
     """Replace ``httpx.AsyncClient`` with a fake driven by ``responder(url, params)``.
 
-    ``responder`` returns ``(status_code, body_text)``; raise from inside
-    the responder to simulate transport errors.
+    ``responder`` returns ``(status_code, body_text)`` or
+    ``(status_code, body_text, headers)``; raise from inside the responder
+    to simulate transport errors.
     """
     captured: dict[str, list] = {"urls": [], "headers": [], "params": []}
 
     class _FakeResp:
-        def __init__(self, status: int, text: str) -> None:
+        def __init__(
+            self,
+            status: int,
+            text: str,
+            headers: dict[str, str] | None = None,
+        ) -> None:
             self.status_code = status
             self.text = text
+            self.headers = headers or {}
 
         def json(self):
             return json.loads(self.text)
@@ -64,8 +71,13 @@ def _patch_httpx(monkeypatch, *, responder):
             async def get(self, url, *, params=None, **_kwargs):
                 captured["urls"].append(url)
                 captured["params"].append(params)
-                status, text = responder(url, params)
-                return _FakeResp(status, text)
+                result = responder(url, params)
+                if len(result) == 2:
+                    status, text = result
+                    headers = None
+                else:
+                    status, text, headers = result
+                return _FakeResp(status, text, headers)
 
         yield _Client()
 
@@ -227,6 +239,49 @@ async def test_search_returns_empty_on_5xx(monkeypatch):
     _patch_httpx(monkeypatch, responder=_respond)
 
     assert await loc.search("anything") == []
+
+
+async def test_search_retries_5xx_then_returns_results(monkeypatch):
+    payload = json.dumps(_load_fixture("search-battle-of-algiers.json"))
+    calls = 0
+
+    def _respond(url, params):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 503, ""
+        return 200, payload
+
+    captured = _patch_httpx(monkeypatch, responder=_respond)
+
+    results = await loc.search("battle of algiers", max_results=2)
+
+    assert len(results) == 2
+    assert calls == 2
+    assert len(captured["urls"]) == 2
+
+
+async def test_search_honors_429_retry_after_then_returns_results(monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(loc.asyncio, "sleep", sleep)
+    payload = json.dumps(_load_fixture("search-battle-of-algiers.json"))
+    calls = 0
+
+    def _respond(url, params):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 429, "", {"Retry-After": "2"}
+        return 200, payload
+
+    captured = _patch_httpx(monkeypatch, responder=_respond)
+
+    results = await loc.search("battle of algiers", max_results=2)
+
+    assert len(results) == 2
+    assert calls == 2
+    assert len(captured["urls"]) == 2
+    sleep.assert_any_await(2.0)
 
 
 async def test_search_returns_empty_on_transport_error(monkeypatch):
