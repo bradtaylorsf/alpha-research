@@ -558,6 +558,10 @@ def test_browser_module_imported_lazily(monkeypatch):
         ("https://catalog.hathitrust.org/Record/000578050", "hathitrust"),
         ("https://openlibrary.org/works/OL123W/The_Pullman_Strike", "openlibrary"),
         ("https://www.openlibrary.org/oclc/424023", "openlibrary"),
+        (
+            "https://www.c-span.org/program/public-affairs-event/project-2025/654321",
+            "cspan",
+        ),
     ],
 )
 async def test_fetch_dispatches_to_connector_by_host(monkeypatch, url, module_name):

@@ -92,6 +92,7 @@ from `src/research_agent/tools/_registry.py` via
 | `commons_search` | Wikimedia Commons free media files with imageinfo license, author, MIME type, original URL, and thumbnail metadata | `max_results` | `Algerian war photographs` |
 | `congress_search` | Bills, members, committees, hearings, congressional record (Congress.gov v3 API) | `kind: bill\|member\|committee\|hearing\|congressional-record` | `Inflation Reduction Act` |
 | `courtlistener_search` | Federal & state court opinions, dockets (RECAP), oral arguments — requires `COURTLISTENER_API_TOKEN` | `kind: opinions\|dockets\|oral_arguments` | `Schedule F appellate` |
+| `cspan_search` | C-SPAN Video Library US political broadcast video with transcripts (Playwright scrape, no auth) | `max_results`, `type=House\|Senate` | `Project 2025` |
 | `edgar_search` | SEC filings (10-K, 10-Q, 8-K, Form 4) — requires `RESEARCH_USER_AGENT` w/ contact email | `form_type: 10-K\|8-K\|...` | `Cisco cybersecurity` |
 | `fec_search` | Candidates, committees, schedule A/E filings (OpenFEC) | `kind: candidates\|committees\|schedules/schedule_a\|schedules/schedule_e` | `Trump 2024 committee` |
 | `fedregister_search` | Federal Register rules, proposed rules, agency notices since 1994 (no auth) | `since: YYYY-MM-DD`, `agencies: [...]` | `Schedule F` |

@@ -105,6 +105,8 @@ TaskKind = Literal[
     "linkedin_fetch",
     "commons_search",
     "commons_fetch",
+    "cspan_search",
+    "cspan_fetch",
     "iarchive_search",
     "iarchive_fetch",
     "trove_search",

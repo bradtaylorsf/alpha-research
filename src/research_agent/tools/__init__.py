@@ -18,6 +18,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     commons,
     congress,
     courtlistener,
+    cspan,
     edgar,
     fec,
     fedregister,
@@ -1116,6 +1117,98 @@ def _smoke_bne_search(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_cspan_search(query: str) -> str:
+    """Smoke wrapper: C-SPAN Video Library search plus transcript fetch."""
+    import sys
+
+    from research_agent.tools import browser as _browser
+
+    async def _run() -> str:
+        try:
+            results = await cspan.search(query, max_results=5)
+            if not results:
+                print(
+                    f"_smoke-tool cspan_search: search({query!r}) returned 0 results",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            missing = [
+                hit.title or hit.url
+                for hit in results
+                if (
+                    not hit.title
+                    or not hit.url
+                    or not hit.url.startswith(
+                        (
+                            "https://www.c-span.org/",
+                            "https://c-span.org/",
+                            "https://www.cspan.org/",
+                            "https://cspan.org/",
+                        )
+                    )
+                )
+            ]
+            if missing:
+                print(
+                    "_smoke-tool cspan_search: missing title/C-SPAN URL on "
+                    f"{len(missing)} result(s): {missing[:3]}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            fetched = None
+            for hit in results:
+                source = await cspan.fetch(hit.url)
+                if source is not None and "## Transcript" in source.cleaned_text:
+                    gap = "No transcript text was available" in source.cleaned_text
+                    if source.cleaned_text.strip() and not gap:
+                        fetched = source
+                        break
+            if fetched is None:
+                print(
+                    "_smoke-tool cspan_search: no transcript-bearing fetched source "
+                    f"among {len(results)} result(s)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            query_text = " ".join(query.split())
+            lines = [f"cspan_search: returned {len(results)} hits for query: {query_text}"]
+            for hit in results:
+                metadata_lines: list[str] = []
+                for label, key in (
+                    ("program_id", "program_id"),
+                    ("air_date", "air_date"),
+                    ("duration_seconds", "duration_seconds"),
+                ):
+                    value = hit.extras.get(key)
+                    if value not in (None, "", []):
+                        metadata_lines.append(f"  {label}: {value}")
+                hit_lines = [f"- {hit.title}", f"  url: {hit.url}"]
+                hit_lines.extend(metadata_lines)
+                lines.append("\n".join(hit_lines))
+
+            preview = fetched.cleaned_text.replace("\n", " ")
+            if len(preview) > 240:
+                preview = preview[:240] + "..."
+            lines.append(
+                f"fetched_transcript: {fetched.title}\n"
+                f"  url: {fetched.url}\n"
+                f"  program_id: {fetched.metadata.get('program_id') or '?'}\n"
+                f"  speakers: {', '.join(fetched.metadata.get('speakers') or []) or '?'}\n"
+                f"  preview: {preview}"
+            )
+            return "\n".join(lines)
+        finally:
+            try:
+                await _browser.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+
+    return asyncio.run(_run())
+
+
 def _smoke_sos(query: str) -> str:
     """Smoke wrapper: California Secretary of State business registry.
 
@@ -1758,6 +1851,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "bne_search": _smoke_bne_search,
     "calaccess": _smoke_calaccess,
     "commons_search": _smoke_commons_search,
+    "cspan_search": _smoke_cspan_search,
     "edgar": _smoke_edgar,
     "courtlistener": _smoke_courtlistener,
     "scholar": _smoke_scholar,

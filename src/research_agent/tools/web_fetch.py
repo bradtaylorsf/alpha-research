@@ -404,6 +404,7 @@ _WIKISOURCE_HOSTS = frozenset(
 )
 _HATHITRUST_HOSTS = frozenset({"catalog.hathitrust.org"})
 _OPENLIBRARY_HOSTS = frozenset({"openlibrary.org", "www.openlibrary.org"})
+_CSPAN_HOSTS = frozenset({"c-span.org", "www.c-span.org", "cspan.org", "www.cspan.org"})
 
 _PDF_CONTENT_TYPE = "application/pdf"
 
@@ -749,6 +750,11 @@ async def fetch(
         from research_agent.tools import openlibrary
 
         return await openlibrary.fetch(url)
+
+    if netloc in _CSPAN_HOSTS:
+        from research_agent.tools import cspan
+
+        return await cspan.fetch(url)
 
     user_agent = _resolve_user_agent()
 
