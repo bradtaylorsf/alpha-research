@@ -90,6 +90,7 @@ async def test_search_happy_path_parses_sru_dublin_core_xml(
     assert params["version"] == "1.2"
     assert params["query"] == 'gallica all "guerre d\'Algerie"'
     assert params["maximumRecords"] == 50
+    assert params["suggest"] == 0
     assert captured["headers"][0]["Accept"].startswith("application/xml")
     assert captured["headers"][0]["User-Agent"] == "operator@example.test"
 
@@ -151,6 +152,47 @@ async def test_xml_namespace_handling_accepts_default_sru_namespace(
     assert results[0].title == "Journal de la Republique francaise"
     assert results[0].extras["ark"] == "ark:/12148/bpt6k9999999"
     assert results[0].extras["dc:type"] == "periodique"
+
+
+async def test_malformed_live_xml_recovers_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live Gallica can return HTTP 200 with mismatched tags in metadata."""
+    payload = """<?xml version="1.0" encoding="UTF-8"?>
+    <srw:searchRetrieveResponse
+      xmlns:srw="http://www.loc.gov/zing/srw/"
+      xmlns:oai_dc="http://www.openarchives.org/OAI/2.0/oai_dc/"
+      xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <srw:records>
+        <srw:record>
+          <srw:recordData>
+            <oai_dc:dc>
+              <dc:title>La <em>guerre</em> d'Algerie</dc:title>
+              <dc:description>Malformed <i>embedded</b> metadata</dc:description>
+              <dc:identifier>https://gallica.bnf.fr/ark:/12148/bpt6k1111111</dc:identifier>
+              <dc:type>texte</dc:type>
+              <dc:date>1957</dc:date>
+              <dc:language>fre</dc:language>
+              <dc:source>Gallica</dc:source>
+            </oai_dc:dc>
+          </srw:recordData>
+        </srw:record>
+      </srw:records>
+    </srw:searchRetrieveResponse>
+    """
+
+    def _respond(url, params):
+        return _FakeResp(200, payload)
+
+    _patch_httpx(monkeypatch, responder=_respond)
+
+    results = await gallica.search("guerre d'Algerie", max_results=5)
+
+    assert len(results) == 1
+    assert results[0].title == "La guerre d'Algerie"
+    assert results[0].url == "https://gallica.bnf.fr/ark:/12148/bpt6k1111111"
+    assert results[0].extras["ark"] == "ark:/12148/bpt6k1111111"
+    assert "Malformed embedded metadata" in results[0].snippet
 
 
 async def test_rate_limit_gate_sleeps_to_enforce_one_rps(
@@ -228,6 +270,7 @@ async def test_fetch_ark_url_returns_source_metadata(
     def _respond(url, params):
         assert params["query"] == 'dc.identifier all "ark:/12148/bpt6k1234567"'
         assert params["maximumRecords"] == 1
+        assert params["suggest"] == 0
         return _FakeResp(200, _fixture("search-guerre-algerie.xml"))
 
     _patch_httpx(monkeypatch, responder=_respond)

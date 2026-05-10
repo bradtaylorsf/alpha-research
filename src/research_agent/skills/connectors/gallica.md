@@ -14,8 +14,10 @@ Francophone, European, bibliographic, or historical press angle and BnF metadata
 is a better first pass than generic web search.
 
 SRU returns XML, not JSON. This is the only XML-response connector in the tree
-and it uses `xml.etree.ElementTree` to parse SRU/Dublin Core namespaces. Do not
-copy JSON-first connector patterns such as `nonprofits.py`.
+and it uses `xml.etree.ElementTree` to parse SRU/Dublin Core namespaces, with a
+recovering lxml fallback for live Gallica payloads that contain malformed
+embedded metadata tags. Do not copy JSON-first connector patterns such as
+`nonprofits.py`.
 
 Endpoint: `gallica.bnf.fr/services/engine/search/sru?operation=searchRetrieve&version=1.2&query=<CQL>`.
 This is not `gallica.bnf.fr/SRU?operation=searchRetrieve`; that older/common

@@ -9,12 +9,15 @@ Public surface:
   back through SRU metadata and returns a compact Dublin Core record card.
 
 Gallica is the first XML-response connector in this tree. The SRU endpoint
-returns namespaced XML, not JSON; this module parses it with stdlib
-``xml.etree.ElementTree``. Namespace handling deliberately combines explicit
-SRU/Dublin Core namespace constants with local-name fallback so fixtures using
-prefixes (``srw:record``) and default namespaces (``<record>`` under the SRU
-namespace) parse the same way. Do not fork JSON-first connector patterns such
-as ``nonprofits.py`` for this surface.
+returns namespaced XML, not JSON; this module first parses it with stdlib
+``xml.etree.ElementTree``. Live Gallica responses occasionally contain
+malformed embedded metadata, so malformed payloads fall back to lxml's
+recovering XML parser without changing the element-walking code. Namespace
+handling deliberately combines explicit SRU/Dublin Core namespace constants
+with local-name fallback so fixtures using prefixes (``srw:record``) and
+default namespaces (``<record>`` under the SRU namespace) parse the same way.
+Do not fork JSON-first connector patterns such as ``nonprofits.py`` for this
+surface.
 
 No auth required. Polite per-host rate of 1 RPS.
 """
@@ -136,7 +139,7 @@ def _field_values(root: ET.Element, field: str) -> list[str]:
     for node in root.iter():
         if _local_name(node.tag) != field:
             continue
-        text = _clean_text(node.text)
+        text = _clean_text(" ".join(node.itertext()))
         if not text or text in seen:
             continue
         seen.add(text)
@@ -322,8 +325,39 @@ async def _request_xml(
     try:
         return ET.fromstring(response.text)
     except ET.ParseError as exc:
-        logger.warning("gallica request returned malformed XML: %s", exc)
+        logger.warning(
+            "gallica request returned malformed XML; retrying with recovery: %s",
+            exc,
+        )
+        return _recover_malformed_xml(response.text)
+
+
+def _recover_malformed_xml(xml_text: str) -> ET.Element | None:
+    """Parse live Gallica SRU responses that contain malformed metadata tags."""
+    try:
+        from lxml import etree
+    except ImportError:
+        logger.warning("gallica malformed XML recovery unavailable: lxml missing")
         return None
+
+    parser = etree.XMLParser(
+        recover=True,
+        resolve_entities=False,
+        no_network=True,
+    )
+    try:
+        root = etree.fromstring(xml_text.encode("utf-8"), parser=parser)
+    except (etree.XMLSyntaxError, ValueError) as exc:
+        logger.warning("gallica malformed XML recovery failed: %s", exc)
+        return None
+    if root is None:
+        return None
+    if parser.error_log:
+        logger.info(
+            "gallica malformed XML recovered with %s parser error(s)",
+            len(parser.error_log),
+        )
+    return root
 
 
 async def search(
@@ -343,6 +377,7 @@ async def search(
             "version": "1.2",
             "query": build_cql_query(q),
             "maximumRecords": min(max_results, _PAGE_SIZE_CAP),
+            "suggest": 0,
         },
         timeout=timeout,
     )
@@ -384,6 +419,7 @@ async def fetch(url: str, *, timeout: float = 15.0) -> Source | None:
             "version": "1.2",
             "query": _build_identifier_cql(ark),
             "maximumRecords": 1,
+            "suggest": 0,
         },
         timeout=timeout,
     )
