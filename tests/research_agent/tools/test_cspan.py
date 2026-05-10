@@ -308,7 +308,7 @@ def test_smoke_wrapper_requires_non_empty_title_url_and_transcript(
 
     async def fake_search(query: str, *, max_results: int = 20):
         assert query == "Project 2025"
-        assert max_results == 5
+        assert max_results == 20
         return [
             SearchResult(
                 url="https://www.c-span.org/program/public-affairs-event/project-2025/654321",
@@ -357,6 +357,64 @@ def test_smoke_wrapper_requires_non_empty_title_url_and_transcript(
     assert "program_id: 654321" in out
     assert "fetched_transcript:" in out
     assert "Jamie Raskin" in out
+
+
+def test_smoke_wrapper_checks_beyond_first_five_for_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_agent.tools import TOOL_REGISTRY
+
+    hits = [
+        SearchResult(
+            url=f"https://www.c-span.org/video/?65432{index}-1/project-2025-{index}",
+            title=f"Project 2025 Result {index}",
+            snippet="Project 2025",
+            source_kind="cspan_search",
+            extras={"program_id": f"65432{index}"},
+        )
+        for index in range(6)
+    ]
+    fetched_urls: list[str] = []
+
+    async def fake_search(query: str, *, max_results: int = 20):
+        assert query == "Project 2025"
+        assert max_results == 20
+        return hits
+
+    async def fake_fetch(url: str):
+        fetched_urls.append(url)
+        if url != hits[-1].url:
+            return Source(
+                url=url,
+                title="No transcript yet",
+                cleaned_text=(
+                    "# No transcript yet\n\n## Transcript\n\n"
+                    "No transcript text was available."
+                ),
+                fetched_at=datetime.now(UTC),
+                source_kind="cspan_search",
+            )
+        return Source(
+            url=url,
+            title="Transcript-bearing Project 2025 Clip",
+            cleaned_text="# Project 2025\n\n## Transcript\n\nWitness: transcript text",
+            fetched_at=datetime.now(UTC),
+            source_kind="cspan_search",
+            metadata={"speakers": ["Witness"]},
+        )
+
+    async def fake_shutdown() -> None:
+        return None
+
+    monkeypatch.setattr(cspan, "search", fake_search)
+    monkeypatch.setattr(cspan, "fetch", fake_fetch)
+    monkeypatch.setattr(cspan.browser, "shutdown", fake_shutdown)
+
+    out = TOOL_REGISTRY["cspan_search"]("Project 2025")
+
+    assert fetched_urls == [hit.url for hit in hits]
+    assert "cspan_search: returned 6 hits for query: Project 2025" in out
+    assert "Transcript-bearing Project 2025 Clip" in out
 
 
 def test_registered_kind_links_cspan_skill() -> None:

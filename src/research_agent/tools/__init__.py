@@ -1125,7 +1125,7 @@ def _smoke_cspan_search(query: str) -> str:
 
     async def _run() -> str:
         try:
-            results = await cspan.search(query, max_results=5)
+            results = await cspan.search(query, max_results=20)
             if not results:
                 print(
                     f"_smoke-tool cspan_search: search({query!r}) returned 0 results",
@@ -1158,7 +1158,9 @@ def _smoke_cspan_search(query: str) -> str:
                 raise SystemExit(1)
 
             fetched = None
+            checked_count = 0
             for hit in results:
+                checked_count += 1
                 source = await cspan.fetch(hit.url)
                 if source is not None and "## Transcript" in source.cleaned_text:
                     gap = "No transcript text was available" in source.cleaned_text
@@ -1168,7 +1170,7 @@ def _smoke_cspan_search(query: str) -> str:
             if fetched is None:
                 print(
                     "_smoke-tool cspan_search: no transcript-bearing fetched source "
-                    f"among {len(results)} result(s)",
+                    f"among {checked_count} result(s)",
                     file=sys.stderr,
                 )
                 raise SystemExit(1)
