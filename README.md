@@ -94,6 +94,7 @@ from `src/research_agent/tools/_registry.py` via
 | `edgar_search` | SEC filings (10-K, 10-Q, 8-K, Form 4) — requires `RESEARCH_USER_AGENT` w/ contact email | `form_type: 10-K\|8-K\|...` | `Cisco cybersecurity` |
 | `fec_search` | Candidates, committees, schedule A/E filings (OpenFEC) | `kind: candidates\|committees\|schedules/schedule_a\|schedules/schedule_e` | `Trump 2024 committee` |
 | `fedregister_search` | Federal Register rules, proposed rules, agency notices since 1994 (no auth) | `since: YYYY-MM-DD`, `agencies: [...]` | `Schedule F` |
+| `gallica_search` | Gallica/BnF SRU XML search for French national-library newspapers, books, manuscripts, maps, and other digitized primary sources | `max_results` (SRU maximumRecords capped at 50) | `guerre d'Algerie` |
 | `gdelt_search` | GDELT — Global news event aggregator, no `site:` operator (no auth) | `since: YYYY-MM-DD`, `language: english` | `Project 2025 mainstream coverage` |
 | `iarchive_search` | Internet Archive texts, audio, movies, and web-archive collection metadata through advancedsearch.php | `mediatype: texts\|audio\|movies\|web`, `page: <int>` | `Pullman Strike` |
 | `lda_search` | Senate Lobbying Disclosure Act filings (registrants, contributions) | `kind: filings\|registrants\|contributions` | `Heritage Foundation` |

@@ -28,6 +28,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     edgar,
     fec,
     fedregister,
+    gallica,
     gdelt,
     iarchive,
     lda,
@@ -875,6 +876,55 @@ def _smoke_openlibrary_search(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_gallica_search(query: str) -> str:
+    """Smoke wrapper: Gallica SRU XML search with non-empty title/URL checks."""
+    import sys
+
+    async def _run() -> str:
+        results = await gallica.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool gallica_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url
+            for hit in results
+            if (
+                not hit.title
+                or not hit.url
+                or "gallica.bnf.fr/" not in hit.url
+                or not hit.extras.get("ark")
+            )
+        ]
+        if missing:
+            print(
+                "_smoke-tool gallica_search: missing title/gallica URL/ARK on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"gallica_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  ark: {hit.extras.get('ark')}\n"
+                f"  date: {hit.extras.get('dc:date') or 'none listed'}\n"
+                f"  language: {hit.extras.get('dc:language') or 'none listed'}\n"
+                f"  snippet: {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_sos(query: str) -> str:
     """Smoke wrapper: California Secretary of State business registry.
 
@@ -1522,6 +1572,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "linkedin": _smoke_linkedin,
     "loc_search": _smoke_loc,
     "fedregister": _smoke_fedregister,
+    "gallica_search": _smoke_gallica_search,
     "iarchive_search": _smoke_iarchive,
     "nonprofits": _smoke_nonprofits,
     "fec": _smoke_fec,

@@ -75,6 +75,8 @@ TaskKind = Literal[
     "courtlistener_fetch",
     "fedregister_search",
     "fedregister_fetch",
+    "gallica_search",
+    "gallica_fetch",
     "lda_search",
     "lda_fetch",
     "usaspending_search",

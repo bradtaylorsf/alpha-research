@@ -29,6 +29,7 @@ EXPECTED_SOURCE_KINDS = (
     "fec",
     "courtlistener",
     "fedregister",
+    "gallica_search",
     "nonprofits",
     "congress",
     "lda",
