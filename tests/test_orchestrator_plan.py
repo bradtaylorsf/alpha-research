@@ -54,6 +54,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "gdelt",
     "littlesis",
     "loc",
+    "nara",
     "nonprofits",
     "opencorporates",
     "sanctions",

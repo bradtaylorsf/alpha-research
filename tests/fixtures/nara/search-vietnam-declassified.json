@@ -1,0 +1,120 @@
+{
+  "body": {
+    "hits": {
+      "total": {
+        "value": 2,
+        "relation": "eq"
+      },
+      "max_score": 42.7,
+      "hits": [
+        {
+          "_index": "nac-records2",
+          "_id": "123456",
+          "_score": 42.7,
+          "_source": {
+            "record": {
+              "naId": 123456,
+              "recordType": "description",
+              "levelOfDescription": "item",
+              "title": "Vietnam War declassified diplomatic cable, 1968",
+              "localIdentifier": "POL 27 VIET S/2-1568",
+              "recordGroupNumber": "59",
+              "generalRecordsTypes": [
+                "Textual Records"
+              ],
+              "scopeAndContentNote": "Declassified Department of State cable concerning Vietnam War negotiations in February 1968.",
+              "accessRestriction": {
+                "status": "Unrestricted"
+              },
+              "useRestriction": {
+                "status": "Unrestricted"
+              },
+              "productionDates": [
+                {
+                  "year": 1968,
+                  "month": 2,
+                  "day": 15,
+                  "logicalDate": "1968-02-15"
+                }
+              ],
+              "ancestors": [
+                {
+                  "distance": 3,
+                  "levelOfDescription": "recordGroup",
+                  "title": "General Records of the Department of State",
+                  "recordGroupNumber": "59",
+                  "naId": 1234
+                },
+                {
+                  "distance": 2,
+                  "levelOfDescription": "series",
+                  "title": "Central Foreign Policy Files, 1967-1969",
+                  "naId": 654321
+                },
+                {
+                  "distance": 1,
+                  "levelOfDescription": "fileUnit",
+                  "title": "Vietnam, February 1968",
+                  "naId": 456789
+                }
+              ],
+              "digitalObjects": [
+                {
+                  "objectFilename": "state-vietnam-1968.pdf",
+                  "objectUrl": "https://catalog.archives.gov/OpaAPI/media/123456/content/dc-metro/rg-059/state-vietnam-1968.pdf",
+                  "objectFileSize": 12345,
+                  "objectId": "123456-1",
+                  "objectType": "Portable Document File"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "_index": "nac-records2",
+          "_id": "789012",
+          "_score": 31.1,
+          "_source": {
+            "record": {
+              "naId": 789012,
+              "recordType": "description",
+              "levelOfDescription": "fileUnit",
+              "title": "CIA intelligence publications on Vietnam, 1966-1972",
+              "recordGroupNumber": "263",
+              "scopeAndContentNote": "Partially declassified intelligence publication file on military and political developments in Vietnam.",
+              "accessRestriction": {
+                "status": "Restricted"
+              },
+              "useRestriction": {
+                "status": "Unrestricted"
+              },
+              "productionDates": [
+                {
+                  "year": 1972,
+                  "logicalDate": "1972"
+                }
+              ],
+              "ancestors": [
+                {
+                  "distance": 2,
+                  "levelOfDescription": "recordGroup",
+                  "title": "Records of the Central Intelligence Agency",
+                  "recordGroupNumber": "263",
+                  "naId": 728
+                },
+                {
+                  "distance": 1,
+                  "levelOfDescription": "series",
+                  "title": "Intelligence Publications Files",
+                  "naId": 900001
+                }
+              ],
+              "digitalObjects": []
+            }
+          }
+        }
+      ]
+    }
+  },
+  "statusCode": 200
+}

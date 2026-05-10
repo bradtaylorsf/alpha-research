@@ -105,6 +105,8 @@ TaskKind = Literal[
     "linkedin_fetch",
     "loc_search",
     "loc_fetch",
+    "nara_search",
+    "nara_fetch",
     "commons_search",
     "commons_fetch",
     "cspan_search",

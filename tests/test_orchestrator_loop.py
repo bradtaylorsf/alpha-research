@@ -540,6 +540,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "gdelt",
     "littlesis",
     "loc",
+    "nara",
     "nonprofits",
     "opencorporates",
     "sanctions",
@@ -566,6 +567,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
 _CONNECTOR_SOURCE_KIND: dict[str, str] = {p: p for p in CONNECTOR_KIND_PREFIXES}
 _CONNECTOR_SOURCE_KIND["edgar"] = "sec"
 _CONNECTOR_SOURCE_KIND["gallica"] = "gallica_search"
+_CONNECTOR_SOURCE_KIND["nara"] = "nara_search"
 _CONNECTOR_SOURCE_KIND["trove"] = "trove_search"
 _CONNECTOR_SOURCE_KIND["wikidata"] = "wikidata_search"
 _CONNECTOR_SOURCE_KIND["commons"] = "commons_search"

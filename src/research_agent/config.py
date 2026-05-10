@@ -154,6 +154,16 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         ),
     ),
     EnvKey(
+        name="NARA_API_KEY",
+        required=False,
+        description=(
+            "National Archives Catalog OPA v2 API key for tools/nara.py."
+            " Request by emailing Catalog_API@nara.gov; registration takes"
+            " about 24h. Sent as x-api-key. Default limit is 10,000"
+            " queries/month; connector skips live calls when unset."
+        ),
+    ),
+    EnvKey(
         name="SERPAPI_KEY",
         required=False,
         description=(
