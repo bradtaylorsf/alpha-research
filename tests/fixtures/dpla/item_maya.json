@@ -1,0 +1,64 @@
+{
+  "docs": [
+    {
+      "@context": "http://dp.la/api/items/context",
+      "@id": "http://dp.la/api/items/11112222333344445555666677778888",
+      "id": "11112222333344445555666677778888",
+      "provider": {
+        "@id": "http://dp.la/api/contributor/nypl",
+        "name": "New York Public Library"
+      },
+      "dataProvider": "The New York Public Library",
+      "isShownAt": "https://digitalcollections.nypl.org/items/510d47da-aaaa",
+      "object": "https://images.nypl.org/index.php?id=510d47da-aaaa&t=w",
+      "sourceResource": {
+        "title": "Maya land claims in Chiapas",
+        "description": [
+          "Pamphlet documenting Maya land claims and organizing in Chiapas."
+        ],
+        "date": [
+          {
+            "displayDate": "1978",
+            "begin": "1978",
+            "end": "1978"
+          }
+        ],
+        "type": [
+          "text"
+        ],
+        "subject": [
+          {
+            "name": "Maya peoples"
+          },
+          {
+            "name": "Land tenure"
+          }
+        ],
+        "creator": [
+          "Comite de Defensa de Tierras"
+        ],
+        "format": [
+          "pamphlets"
+        ],
+        "language": [
+          {
+            "name": "Spanish"
+          }
+        ],
+        "spatial": [
+          {
+            "name": "Chiapas (Mexico)"
+          }
+        ],
+        "rights": [
+          "No known copyright restrictions"
+        ],
+        "collection": [
+          {
+            "title": "Latin American pamphlets"
+          }
+        ]
+      }
+    }
+  ]
+}

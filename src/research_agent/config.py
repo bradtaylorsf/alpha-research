@@ -108,9 +108,11 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         name="DATA_GOV_API_KEY",
         required=False,
         description=(
-            "api.data.gov key used by tools/fec.py (OpenFEC). Authenticated"
-            " tier: 1,000 req/hr; falls back to DEMO_KEY (~40 req/hr per IP)"
-            " when unset. Free signup at https://api.data.gov/signup/."
+            "api.data.gov key used by tools/fec.py (OpenFEC),"
+            " tools/congress.py, and tools/smithsonian.py. Authenticated"
+            " tier varies by API; falls back to DEMO_KEY for FEC/Congress/"
+            "Smithsonian smoke when unset. Free signup at"
+            " https://api.data.gov/signup/."
         ),
     ),
     EnvKey(
@@ -132,6 +134,53 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
             " returns no results and smoke skips cleanly. Public-benefit"
             " access by emailing service desk; commercial pricing"
             " £2,250–£12,000/yr."
+        ),
+    ),
+    EnvKey(
+        name="OPENALEX_API_KEY",
+        required=False,
+        description=(
+            "Free OpenAlex API key for tools/openalex.py. Optional for"
+            " low-volume smoke/demos, recommended for regular use since the"
+            " February 2026 free-key policy. Sent as `api_key=<key>`."
+        ),
+    ),
+    EnvKey(
+        name="TROVE_API_KEY",
+        required=False,
+        description=(
+            "Trove API key for tools/trove.py (National Library of"
+            " Australia). Keys expire after 12 months. Sent as X-API-KEY;"
+            " connector stays metadata-only because NLA has revoked keys"
+            " for default full-text downloading."
+        ),
+    ),
+    EnvKey(
+        name="NARA_API_KEY",
+        required=False,
+        description=(
+            "National Archives Catalog OPA v2 API key for tools/nara.py."
+            " Request by emailing Catalog_API@nara.gov; registration takes"
+            " about 24h. Sent as x-api-key. Default limit is 10,000"
+            " queries/month; connector skips live calls when unset."
+        ),
+    ),
+    EnvKey(
+        name="DPLA_API_KEY",
+        required=False,
+        description=(
+            "Digital Public Library of America API key for tools/dpla.py."
+            " Request with curl -X POST https://api.dp.la/v2/api_key/<your-email>;"
+            " the emailed 32-character key is sent as api_key=<key>."
+        ),
+    ),
+    EnvKey(
+        name="EUROPEANA_API_KEY",
+        required=False,
+        description=(
+            "Europeana API key for tools/europeana.py. Create a free key in"
+            " your Europeana account under Manage API keys; migrated there on"
+            " 2025-05-28. Sent as wskey=<key>."
         ),
     ),
     EnvKey(

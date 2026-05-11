@@ -164,6 +164,40 @@ def load_prompt_meta(name: str, *, job: Job | None = None) -> Prompt:
     return _get_or_load(name, job=job)
 
 
+def _render_registry_vars() -> dict[str, str]:
+    """Render the connector-registry placeholders for the planner prompt.
+
+    Returns a dict keyed by ``direct_kinds_table``, ``kinds_allowlist``, and
+    ``tactical_replan_kinds`` — the three placeholders ``planner.md`` shares
+    with the registry. Importing :mod:`research_agent.tools` triggers each
+    connector module's ``register_kind`` call so the rendered output reflects
+    the live registry. Importing here keeps the prompt loader free of an
+    eager dependency on the connector modules; tests that monkey-patch the
+    registry can reset and re-import as needed.
+
+    Issue #223: the rendered values are the only path the planner prompt
+    has to the registry — drift between this and ``iter_kinds()`` would
+    re-introduce the multi-PR merge-conflict surface this refactor exists
+    to retire. ``research doctor`` enforces the round-trip.
+    """
+    from research_agent.tools._registry import (
+        render_direct_kinds_table,
+        render_kinds_allowlist,
+        render_tactical_replan_kinds,
+    )
+    # Eagerly import the tools package so connector modules register
+    # themselves before we render. Done here (not at module top) so
+    # ``prompts.loader`` stays importable even when the connector graph is
+    # being rebuilt under test.
+    import research_agent.tools  # noqa: F401 — side-effecting registration
+
+    return {
+        "direct_kinds_table": render_direct_kinds_table(),
+        "kinds_allowlist": render_kinds_allowlist(),
+        "tactical_replan_kinds": render_tactical_replan_kinds(),
+    }
+
+
 def load_prompt(name: str, *, job: Job | None = None, **vars: object) -> str:
     """Load ``<name>.md`` and render its ``{{var}}`` placeholders.
 
@@ -174,8 +208,19 @@ def load_prompt(name: str, *, job: Job | None = None, **vars: object) -> str:
     Substitution is whitespace-tolerant: ``{{ goal }}`` and ``{{goal}}`` both
     resolve to the same key. Missing keys raise :class:`PromptVariableMissing`.
     Unused ``vars`` are silently ignored — the caller may pass a superset.
+
+    For the ``planner`` prompt the loader injects three connector-registry
+    rendered values (``direct_kinds_table``, ``kinds_allowlist``,
+    ``tactical_replan_kinds``) ahead of caller-supplied vars; the caller
+    can still override any of them by passing a same-named kwarg, which is
+    handy in tests.
     """
     prompt = _get_or_load(name, job=job)
+
+    if name == "planner":
+        merged: dict[str, object] = dict(_render_registry_vars())
+        merged.update(vars)
+        vars = merged  # type: ignore[assignment]
 
     def _sub(match: re.Match[str]) -> str:
         key = match.group(1)

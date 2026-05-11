@@ -1,0 +1,49 @@
+{
+  "responseHeader": {
+    "status": 0,
+    "QTime": 14,
+    "params": {
+      "q": "Pullman Strike",
+      "fields": "identifier,title,description,creator,date,mediatype,downloads,publicdate",
+      "rows": "20",
+      "start": 0,
+      "wt": "json"
+    }
+  },
+  "response": {
+    "numFound": 124,
+    "start": 0,
+    "docs": [
+      {
+        "identifier": "pullmanstrikestor00lind",
+        "title": "The Pullman strike: the story of a unique experiment and of a great labor upheaval",
+        "creator": "Lindsey, Almont",
+        "date": "1942",
+        "description": "Comprehensive narrative of the 1894 Pullman Strike and its national consequences for U.S. labor law.",
+        "mediatype": "texts",
+        "downloads": 4523,
+        "publicdate": "2008-03-12T01:23:55Z"
+      },
+      {
+        "identifier": "pullman_strike_1894_radio",
+        "title": "Voices of Labor: Pullman Strike retrospective (1949 broadcast)",
+        "creator": "American Federation of Labor",
+        "date": "1949",
+        "description": "55th anniversary radio retrospective featuring oral histories from surviving participants.",
+        "mediatype": "audio",
+        "downloads": 812,
+        "publicdate": "2014-07-01T09:00:00Z"
+      },
+      {
+        "identifier": "pullmanstrike1894",
+        "title": "The great strike on the Chicago, Burlington & Quincy",
+        "creator": "Hogan, Charles M.",
+        "date": "1895",
+        "description": "Contemporary account of the 1894 strike from a railroad-management perspective.",
+        "mediatype": "texts",
+        "downloads": 1107,
+        "publicdate": "2010-11-19T18:42:11Z"
+      }
+    ]
+  }
+}

@@ -257,6 +257,95 @@ def test_run_all_checks_includes_tesseract(tmp_path):
     assert any(r.name == "tesseract" for r in results)
 
 
+def test_check_trove_api_note_skips_when_key_missing(monkeypatch):
+    monkeypatch.delenv("TROVE_API_KEY", raising=False)
+
+    result = doctor.check_trove_api_note()
+
+    assert result.name == "trove_api_note"
+    assert result.status == "skip"
+    assert result.required is False
+    assert "metadata-only" in result.detail
+    assert "12 months" in result.detail
+
+
+def test_check_trove_api_note_masks_present_key(monkeypatch):
+    monkeypatch.setenv("TROVE_API_KEY", "trove-test-key-abcdef")
+
+    result = doctor.check_trove_api_note()
+
+    assert result.status == "ok"
+    assert "...cdef" in result.detail
+    assert "trove-test-key" not in result.detail
+
+
+def test_run_all_checks_includes_trove_note(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.yaml").write_text("tiers: {}\n", encoding="utf-8")
+    results = doctor.run_all_checks([], repo_root=tmp_path)
+    assert any(r.name == "trove_api_note" for r in results)
+
+
+def test_check_dpla_api_note_skips_when_key_missing(monkeypatch):
+    monkeypatch.delenv("DPLA_API_KEY", raising=False)
+
+    result = doctor.check_dpla_api_note()
+
+    assert result.name == "dpla_api_note"
+    assert result.status == "skip"
+    assert result.required is False
+    assert "curl -X POST https://api.dp.la/v2/api_key/<your-email>" in result.detail
+    assert "?api_key=<key>" in result.detail
+
+
+def test_check_dpla_api_note_masks_present_key(monkeypatch):
+    monkeypatch.setenv("DPLA_API_KEY", "1234567890abcdef1234567890abcdef")
+
+    result = doctor.check_dpla_api_note()
+
+    assert result.status == "ok"
+    assert "...cdef" in result.detail
+    assert "1234567890abcdef" not in result.detail
+
+
+def test_run_all_checks_includes_dpla_note(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.yaml").write_text("tiers: {}\n", encoding="utf-8")
+    results = doctor.run_all_checks([], repo_root=tmp_path)
+    assert any(r.name == "dpla_api_note" for r in results)
+
+
+def test_check_europeana_api_note_skips_when_key_missing(monkeypatch):
+    monkeypatch.delenv("EUROPEANA_API_KEY", raising=False)
+
+    result = doctor.check_europeana_api_note()
+
+    assert result.name == "europeana_api_note"
+    assert result.status == "skip"
+    assert result.required is False
+    assert "Manage API keys" in result.detail
+    assert "?wskey=<key>" in result.detail
+    assert "1 RPS" in result.detail
+
+
+def test_check_europeana_api_note_masks_present_key(monkeypatch):
+    monkeypatch.setenv("EUROPEANA_API_KEY", "europeana-test-key-abcdef")
+
+    result = doctor.check_europeana_api_note()
+
+    assert result.status == "ok"
+    assert "...cdef" in result.detail
+    assert "europeana-test-key" not in result.detail
+    assert "/api/v2/search.json" in result.detail
+
+
+def test_run_all_checks_includes_europeana_note(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.yaml").write_text("tiers: {}\n", encoding="utf-8")
+    results = doctor.run_all_checks([], repo_root=tmp_path)
+    assert any(r.name == "europeana_api_note" for r in results)
+
+
 def test_check_result_dataclass_shape():
     from dataclasses import FrozenInstanceError
 
@@ -333,3 +422,173 @@ def test_run_all_checks_includes_sanctions_refresh(tmp_path):
     results = doctor.run_all_checks([], repo_root=tmp_path)
     names = {r.name for r in results}
     assert {"sanctions:SDN", "sanctions:EU", "sanctions:UK"}.issubset(names)
+
+
+# ---------------------------------------------------------------------------
+# Issue #223 — registry coherence checks.
+# ---------------------------------------------------------------------------
+
+
+def test_check_planner_allowlist_coherence_passes_for_live_registry() -> None:
+    """The shipping registry + planner prompt must round-trip cleanly."""
+    result = doctor.check_planner_allowlist_coherence()
+    assert result.status == "ok", result.detail
+    assert result.required is True
+
+
+def test_check_task_kind_registry_coherence_passes_for_live_registry() -> None:
+    """Every registry-rendered connector kind must also validate as TaskKind."""
+    result = doctor.check_task_kind_registry_coherence()
+    assert result.status == "ok", result.detail
+    assert result.required is True
+
+
+def test_check_planner_allowlist_coherence_flags_orphan(monkeypatch) -> None:
+    """A kind in the allowlist that isn't registered is a hard fail.
+
+    The rendered allowlist is the source of truth for the model — if it
+    contains a kind the registry doesn't know about, the planner can emit
+    a task the orchestrator can't dispatch. We patch the renderer to
+    inject a synthetic orphan and confirm the check raises ``fail``.
+    """
+    from research_agent.prompts import loader as prompts_loader
+
+    real = prompts_loader._render_registry_vars
+
+    def _orphan_render() -> dict[str, str]:
+        out = real()
+        out["kinds_allowlist"] = out["kinds_allowlist"] + ", `phantom_search`"
+        return out
+
+    monkeypatch.setattr(prompts_loader, "_render_registry_vars", _orphan_render)
+    result = doctor.check_planner_allowlist_coherence()
+
+    assert result.status == "fail"
+    assert "in allowlist but not registered" in result.detail
+    assert "phantom_search" in result.detail
+
+
+def test_check_planner_allowlist_coherence_flags_missing_table_row(monkeypatch) -> None:
+    """A registered kind missing from the Direct kinds table fails."""
+    from research_agent.prompts import loader as prompts_loader
+
+    real = prompts_loader._render_registry_vars
+
+    def _truncated() -> dict[str, str]:
+        out = real()
+        out["direct_kinds_table"] = (
+            "| Kind | What it covers | Optional payload knobs | Example query |\n"
+            "|---|---|---|---|"
+        )  # header only, zero rows
+        return out
+
+    monkeypatch.setattr(prompts_loader, "_render_registry_vars", _truncated)
+    result = doctor.check_planner_allowlist_coherence()
+
+    assert result.status == "fail"
+    assert "no Direct-kinds-table row" in result.detail
+
+
+def test_check_registry_skill_coherence_skips_grandfathered() -> None:
+    """Kinds with ``skill_name=None`` produce ``skip`` rows, not ``fail``."""
+    rows = doctor.check_registry_skill_coherence()
+    by_name = {r.name: r for r in rows}
+    # ``bbb_search`` is grandfathered (skill_name=None in the live registry).
+    skipped = by_name["registry_skill:bbb_search"]
+    assert skipped.status == "skip"
+    assert "grandfathered" in skipped.detail
+    # ``congress_search`` ships a skill — must be ok.
+    ok_row = by_name["registry_skill:congress_search"]
+    assert ok_row.status == "ok"
+    commons_row = by_name["registry_skill:commons_search"]
+    assert commons_row.status == "ok"
+    wikidata_row = by_name["registry_skill:wikidata_search"]
+    assert wikidata_row.status == "ok"
+    wikisource_row = by_name["registry_skill:wikisource_search"]
+    assert wikisource_row.status == "ok"
+    openlibrary_row = by_name["registry_skill:openlibrary_search"]
+    assert openlibrary_row.status == "ok"
+
+
+def test_check_registry_skill_summary_coherence_passes() -> None:
+    rows = [
+        doctor.CheckResult("registry_skill:ok_search", "ok", required=True, detail="ok"),
+        doctor.CheckResult(
+            "registry_skill:old_search",
+            "skip",
+            required=False,
+            detail="grandfathered",
+        ),
+    ]
+
+    result = doctor.check_registry_skill_summary_coherence(rows)
+
+    assert result.name == "registry_skill_coherence"
+    assert result.status == "ok"
+    assert result.required is True
+    assert "1 connector skill file(s) parse" in result.detail
+
+
+def test_check_registry_skill_summary_coherence_fails_on_required_row() -> None:
+    rows = [
+        doctor.CheckResult(
+            "registry_skill:ghost_search",
+            "fail",
+            required=True,
+            detail="missing",
+        )
+    ]
+
+    result = doctor.check_registry_skill_summary_coherence(rows)
+
+    assert result.name == "registry_skill_coherence"
+    assert result.status == "fail"
+    assert result.required is True
+    assert "registry_skill:ghost_search" in result.detail
+
+
+def test_check_registry_skill_coherence_fails_when_skill_file_missing(
+    monkeypatch, tmp_path
+) -> None:
+    """A registered kind with skill_name pointing at a missing file fails."""
+    from research_agent.skills import loader as skills_loader
+    from research_agent.tools import _registry
+
+    fake_dir = tmp_path / "skills" / "connectors"
+    fake_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        skills_loader, "_skills_dir", lambda category: tmp_path / "skills" / category
+    )
+
+    fake_entry = _registry.KindEntry(
+        name="ghost_search",
+        payload_schema=_registry.BaseSearchPayload,
+        search_fn=lambda *a, **kw: None,
+        fetch_fn=None,
+        host_patterns=(),
+        skill_name="ghost",
+        description="",
+        optional_payload_knobs="",
+        example_query="",
+        module_name="ghost",
+    )
+    monkeypatch.setattr(_registry, "iter_kinds", lambda: [fake_entry])
+
+    rows = doctor.check_registry_skill_coherence()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.status == "fail"
+    assert row.required is True
+    assert "missing skills/connectors/ghost.md" in row.detail
+
+
+def test_run_all_checks_includes_registry_coherence(tmp_path) -> None:
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "models.yaml").write_text("tiers: {}\n", encoding="utf-8")
+    results = doctor.run_all_checks([], repo_root=tmp_path)
+    names = {r.name for r in results}
+    assert "planner_allowlist_coherence" in names
+    assert "task_kind_registry_coherence" in names
+    assert "registry_skill_coherence" in names
+    assert any(n.startswith("registry_skill:") for n in names)

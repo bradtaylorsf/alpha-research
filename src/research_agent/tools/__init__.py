@@ -5,6 +5,56 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
+# Import every direct-connector module so its module-level `register_kind`
+# call runs and the kind shows up in `iter_kinds()`. The import order is
+# alphabetical for readability, but the registry sorts on read so output
+# stays deterministic regardless of import order. Issue #223: this is the
+# single source of truth — the planner prompt, the orchestrator dispatcher,
+# the README table, and `research doctor` all walk this list.
+from research_agent.tools import (  # noqa: F401, E402 — side-effecting registration
+    bbb,
+    bne,
+    calaccess,
+    commons,
+    congress,
+    courtlistener,
+    cspan,
+    dpla,
+    edgar,
+    europeana,
+    fec,
+    fedregister,
+    gallica,
+    gdelt,
+    iarchive,
+    iwm,
+    lda,
+    licensing,
+    linkedin,
+    littlesis,
+    loc,
+    nara,
+    nonprofits,
+    openalex,
+    opencorporates,
+    openlibrary,
+    persee,
+    sanctions,
+    scholar,
+    smithsonian,
+    sos,
+    trove,
+    ukna,
+    usaspending,
+    wikidata,
+    wikisource,
+)
+from research_agent.tools._registry import (
+    BaseSearchPayload,
+    KindEntry,
+    iter_kinds,
+    register_kind,
+)
 from research_agent.tools.models import SearchResult, Source, SourceKind
 
 
@@ -295,6 +345,109 @@ def _smoke_nonprofits(query: str) -> str:
     return asyncio.run(_run())
 
 
+def _smoke_loc(query: str) -> str:
+    """Smoke wrapper: Library of Congress unified search.
+
+    Per AC: ``research _smoke-tool loc_search "battle of algiers"`` should
+    return ≥1 result with a non-empty title and a ``www.loc.gov`` URL.
+    Each line shows the title, URL, and source_kind so an operator can
+    eyeball whether the loc.gov JSON API is reachable.
+    """
+    from research_agent.tools import loc
+
+    async def _run() -> str:
+        results = await loc.search(query, max_results=5)
+        if not results:
+            return f"loc search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — source_kind={hit.source_kind}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_iarchive(query: str) -> str:
+    """Smoke wrapper: Internet Archive advancedsearch returning the top-5 hits.
+
+    Per AC: ``research _smoke-tool iarchive_search "Pullman Strike"`` should
+    surface IA items with title, identifier, mediatype, downloads, permalink,
+    and a short snippet so an operator can eyeball whether the public API
+    is reachable.
+    """
+    from research_agent.tools import iarchive
+
+    async def _run() -> str:
+        results = await iarchive.search(query, max_results=5)
+        if not results:
+            return f"iarchive search returned no results for {query!r}"
+        lines: list[str] = []
+        for hit in results:
+            identifier = hit.extras.get("identifier") or "?"
+            mediatype = hit.extras.get("mediatype") or "?"
+            downloads = hit.extras.get("downloads")
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "…"
+            lines.append(
+                f"- {hit.title} — {identifier} — {mediatype} —"
+                f" downloads={downloads}\n"
+                f"  {hit.url}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_nara_search(query: str) -> str:
+    """Smoke wrapper: NARA Catalog OPA v2 search, skipping when no key is set."""
+    from research_agent import config
+
+    if not (config.get("NARA_API_KEY") or "").strip():
+        return (
+            "_smoke-tool nara_search: would need NARA_API_KEY; "
+            "live test skipped"
+        )
+
+    async def _run() -> str:
+        results = await nara.search(query, max_results=5)
+        if not results:
+            raise RuntimeError(
+                f"_smoke-tool nara_search: search({query!r}) returned 0 results"
+            )
+        lines: list[str] = [f"nara_search: returned {len(results)} hits"]
+        for hit in results:
+            naid = hit.extras.get("nara_record_id") or "?"
+            record_group = hit.extras.get("record_group") or "?"
+            series_title = hit.extras.get("series_title") or "?"
+            access = hit.extras.get("access_restriction") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 180:
+                snippet = snippet[:180] + "..."
+            if not hit.title or not hit.url:
+                raise RuntimeError(
+                    "_smoke-tool nara_search: missing title/url on "
+                    f"result: {hit!r}"
+                )
+            lines.append(
+                f"- {hit.title}\n"
+                f"  {hit.url}\n"
+                f"  NAID {naid} | {record_group} | {series_title} | access={access}\n"
+                f"  {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
 def _smoke_linkedin(query: str) -> str:
     """Smoke wrapper: LinkedIn person search + top-hit profile rollup.
 
@@ -543,6 +696,838 @@ def _smoke_opencorporates(query: str) -> str:
                 f"  {snippet}"
             )
         return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_trove_search(query: str) -> str:
+    """Smoke wrapper: Trove metadata search, skipping when no API key is set."""
+    from research_agent import config
+
+    if not (config.get("TROVE_API_KEY") or "").strip():
+        return (
+            "_smoke-tool trove_search: skipped; would need TROVE_API_KEY "
+            "(keys expire after 12 months; connector is metadata-only)"
+        )
+
+    from research_agent.tools import trove
+
+    async def _run() -> str:
+        results = await trove.search(query, max_results=5)
+        if not results:
+            raise RuntimeError(
+                f"_smoke-tool trove_search: search({query!r}) returned 0 results"
+            )
+        lines: list[str] = [
+            f"trove_search metadata-only: returned {len(results)} hits"
+        ]
+        for hit in results:
+            trove_id = hit.extras.get("trove_id") or "?"
+            zone = hit.extras.get("zone") or "?"
+            pub_date = hit.extras.get("pub_date") or "?"
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 180:
+                snippet = snippet[:180] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  trove_id: {trove_id} | zone: {zone} | pub_date: {pub_date}\n"
+                f"  snippet: {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_wikidata_search(query: str) -> str:
+    """Smoke wrapper: raw SPARQL query against Wikidata Query Service."""
+    import sys
+
+    async def _run() -> str:
+        results = await wikidata.search(query, max_results=10)
+        if not results:
+            print(
+                f"_smoke-tool wikidata_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        lines = [f"wikidata_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 240:
+                snippet = snippet[:240] + "..."
+            entity_id = hit.extras.get("entity_id") or "?"
+            lines.append(f"- {hit.title} ({entity_id})\n  {hit.url}\n  {snippet}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_commons_search(query: str) -> str:
+    """Smoke wrapper: Wikimedia Commons media search with required license metadata."""
+    import sys
+
+    async def _run() -> str:
+        results = await commons.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool commons_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title
+            for hit in results
+            if not hit.title or not hit.url or not hit.extras.get("license")
+        ]
+        if missing:
+            print(
+                "_smoke-tool commons_search: missing title/url/license on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        source = await commons.fetch(results[0].url)
+        if source is None or not source.metadata.get("license"):
+            print(
+                "_smoke-tool commons_search: fetch(top_hit) did not populate "
+                'Source.metadata["license"]',
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"commons_search: returned {len(results)} license-bearing hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  license: {hit.extras.get('license')} "
+                f"({hit.extras.get('license_short') or '?'})\n"
+                f"  mime_type: {hit.extras.get('mime_type') or '?'}\n"
+                f"  snippet: {snippet}"
+            )
+        lines.append(
+            f"fetched metadata.license: {source.metadata['license']}"
+        )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_wikisource_search(query: str) -> str:
+    """Smoke wrapper: Wikisource search plus top-hit full-text fetch."""
+    import sys
+
+    async def _run() -> str:
+        results = await wikisource.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool wikisource_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [hit.title for hit in results if not hit.title or not hit.url]
+        if missing:
+            print(
+                "_smoke-tool wikisource_search: missing title/url on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        source = await wikisource.fetch(results[0].url)
+        if (
+            source is None
+            or not source.cleaned_text.strip()
+            or not source.metadata.get("wikisource_lang")
+            or not source.metadata.get("page_title")
+            or source.metadata.get("revision_id") in (None, "")
+        ):
+            print(
+                "_smoke-tool wikisource_search: fetch(top_hit) did not populate "
+                "cleaned_text and required Wikisource metadata",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"wikisource_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  lang: {hit.extras.get('wikisource_lang') or '?'}\n"
+                f"  snippet: {snippet}"
+            )
+        preview = source.cleaned_text.replace("\n", " ")
+        if len(preview) > 240:
+            preview = preview[:240] + "..."
+        lines.append(
+            "fetched: "
+            f"title={source.title!r} "
+            f"lang={source.metadata['wikisource_lang']} "
+            f"revision_id={source.metadata['revision_id']} "
+            f"chars={len(source.cleaned_text)}"
+        )
+        lines.append(f"preview: {preview}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_openlibrary_search(query: str) -> str:
+    """Smoke wrapper: Open Library search with non-empty title/URL checks."""
+    import sys
+
+    async def _run() -> str:
+        results = await openlibrary.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool openlibrary_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url for hit in results if not hit.title or not hit.url
+        ]
+        if missing:
+            print(
+                "_smoke-tool openlibrary_search: missing title/url on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"openlibrary_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  ia_scan_id: "
+                f"{', '.join(hit.extras.get('ia_scan_id') or []) or '?'}\n"
+                f"  isbn: {', '.join(hit.extras.get('isbn') or []) or '?'}\n"
+                f"  oclc: {', '.join(hit.extras.get('oclc') or []) or '?'}\n"
+                f"  snippet: {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_si_search(query: str) -> str:
+    """Smoke wrapper: Smithsonian Open Access search with title/URL checks."""
+    import sys
+
+    async def _run() -> str:
+        results = await smithsonian.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool si_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url for hit in results if not hit.title or not hit.url
+        ]
+        if missing:
+            print(
+                "_smoke-tool si_search: missing title/url on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"si_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(f"- {hit.title}\n  url: {hit.url}")
+            for label, key in (
+                ("unit_code", "unit_code"),
+                ("object_type", "object_type"),
+                ("license", "license"),
+                ("image_url", "image_url"),
+            ):
+                value = str(hit.extras.get(key) or "").strip()
+                if value:
+                    lines.append(f"  {label}: {value}")
+            if snippet:
+                lines.append(f"  snippet: {snippet}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_dpla_search(query: str) -> str:
+    """Smoke wrapper: DPLA item search, skipping when no key is set."""
+    import sys
+
+    from research_agent import config
+
+    if not (config.get("DPLA_API_KEY") or "").strip():
+        return (
+            "_smoke-tool dpla_search: would need DPLA_API_KEY; request one "
+            "with curl -X POST https://api.dp.la/v2/api_key/<your-email>; "
+            "live test skipped"
+        )
+
+    async def _run() -> str:
+        results = await dpla.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool dpla_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url for hit in results if not hit.title or not hit.url
+        ]
+        if missing:
+            print(
+                "_smoke-tool dpla_search: missing title/url on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"dpla_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(f"- {hit.title}\n  url: {hit.url}")
+            for label, key in (
+                ("dpla_id", "dpla_id"),
+                ("provider", "provider"),
+                ("data_provider", "data_provider"),
+                ("license", "license"),
+                ("object_url", "object_url"),
+            ):
+                value = str(hit.extras.get(key) or "").strip()
+                if value:
+                    lines.append(f"  {label}: {value}")
+            if snippet:
+                lines.append(f"  snippet: {snippet}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_europeana_search(query: str) -> str:
+    """Smoke wrapper: Europeana item search, skipping when no key is set."""
+    import sys
+
+    from research_agent import config
+
+    if not (config.get("EUROPEANA_API_KEY") or "").strip():
+        return (
+            "_smoke-tool europeana_search: would need EUROPEANA_API_KEY; "
+            "create a free key in your Europeana account under Manage API "
+            "keys (migrated May 2025); live test skipped"
+        )
+
+    async def _run() -> str:
+        results = await europeana.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool europeana_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url for hit in results if not hit.title or not hit.url
+        ]
+        if missing:
+            print(
+                "_smoke-tool europeana_search: missing title/url on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"europeana_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(f"- {hit.title}\n  url: {hit.url}")
+            for label, key in (
+                ("europeana_id", "europeana_id"),
+                ("dataProvider", "dataProvider"),
+                ("country", "country"),
+                ("language", "language"),
+                ("rights", "rights"),
+                ("edmIsShownAt", "edmIsShownAt"),
+            ):
+                value = str(hit.extras.get(key) or "").strip()
+                if value:
+                    lines.append(f"  {label}: {value}")
+            if snippet:
+                lines.append(f"  snippet: {snippet}")
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_openalex_search(query: str) -> str:
+    """Smoke wrapper: OpenAlex Works search with DOI/OpenAlex URL checks."""
+    import sys
+
+    async def _run() -> str:
+        results = await openalex.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool openalex_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url
+            for hit in results
+            if (
+                not hit.title
+                or not hit.url
+                or not (
+                    hit.extras.get("doi")
+                    or hit.url.startswith("https://openalex.org/")
+                )
+            )
+        ]
+        if missing:
+            print(
+                "_smoke-tool openalex_search: missing title and DOI/OpenAlex URL on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        query_text = " ".join(query.split())
+        lines = [
+            f"openalex_search: returned {len(results)} hits for query: {query_text}"
+        ]
+        for hit in results:
+            metadata_lines: list[str] = []
+            for label, key in (
+                ("doi", "doi"),
+                ("openalex_id", "openalex_id"),
+                ("year", "pub_year"),
+                ("venue", "host_venue"),
+                ("citations", "citation_count"),
+                ("open_access_url", "open_access_url"),
+            ):
+                value = hit.extras.get(key)
+                if value not in (None, "", []):
+                    metadata_lines.append(f"  {label}: {value}")
+            authors = hit.extras.get("authors")
+            if isinstance(authors, list) and authors:
+                metadata_lines.append(f"  authors: {', '.join(map(str, authors[:4]))}")
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 220:
+                snippet = snippet[:220] + "..."
+            hit_lines = [f"- {hit.title}", f"  url: {hit.url}"]
+            hit_lines.extend(metadata_lines)
+            hit_lines.append(f"  snippet: {snippet}")
+            lines.append("\n".join(hit_lines))
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_gallica_search(query: str) -> str:
+    """Smoke wrapper: Gallica SRU XML search with non-empty title/URL checks."""
+    import sys
+
+    async def _run() -> str:
+        results = await gallica.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool gallica_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url
+            for hit in results
+            if (
+                not hit.title
+                or not hit.url
+                or "gallica.bnf.fr/" not in hit.url
+                or not hit.extras.get("ark")
+            )
+        ]
+        if missing:
+            print(
+                "_smoke-tool gallica_search: missing title/gallica URL/ARK on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"gallica_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 200:
+                snippet = snippet[:200] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  ark: {hit.extras.get('ark')}\n"
+                f"  date: {hit.extras.get('dc:date') or 'none listed'}\n"
+                f"  language: {hit.extras.get('dc:language') or 'none listed'}\n"
+                f"  snippet: {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_ukna_search(query: str) -> str:
+    """Smoke wrapper: UKNA Discovery search with catalogue metadata checks."""
+    import sys
+
+    async def _run() -> str:
+        results = await ukna.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool ukna_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url
+            for hit in results
+            if (
+                not hit.title
+                or not hit.url
+                or "discovery.nationalarchives.gov.uk/" not in hit.url
+                or not hit.extras.get("catalogue_reference")
+            )
+        ]
+        if missing:
+            print(
+                "_smoke-tool ukna_search: missing title/Discovery URL/catalogue "
+                f"reference on {len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        lines = [f"ukna_search: returned {len(results)} hits"]
+        for hit in results:
+            snippet = hit.snippet.replace("\n", " ")
+            if len(snippet) > 220:
+                snippet = snippet[:220] + "..."
+            lines.append(
+                f"- {hit.title}\n"
+                f"  url: {hit.url}\n"
+                f"  catalogue_reference: {hit.extras.get('catalogue_reference')}\n"
+                f"  covering_dates: {hit.extras.get('covering_dates') or 'none listed'}\n"
+                f"  held_by: {hit.extras.get('held_by') or 'none listed'}\n"
+                f"  snippet: {snippet}"
+            )
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_persee_search(query: str) -> str:
+    """Smoke wrapper: Persee Playwright search with non-empty title/URL checks."""
+    import sys
+
+    async def _run() -> str:
+        results = await persee.search(query, max_results=5)
+        if not results:
+            print(
+                f"_smoke-tool persee_search: search({query!r}) returned 0 results",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        missing = [
+            hit.title or hit.url
+            for hit in results
+            if not hit.title
+            or not hit.url
+            or "persee.fr/" not in hit.url
+            or not hit.url.startswith(("https://www.persee.fr/", "https://persee.fr/"))
+        ]
+        if missing:
+            print(
+                "_smoke-tool persee_search: missing title/persee.fr URL on "
+                f"{len(missing)} result(s): {missing[:3]}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        query_text = " ".join(query.split())
+        lines = [f"persee_search: returned {len(results)} hits for query: {query_text}"]
+        for hit in results:
+            authors = hit.extras.get("authors")
+            metadata_lines: list[str] = []
+            journal = str(hit.extras.get("journal") or "").strip()
+            if journal:
+                metadata_lines.append(f"  journal: {journal}")
+            pub_year = str(hit.extras.get("pub_year") or "").strip()
+            if pub_year:
+                metadata_lines.append(f"  year: {pub_year}")
+            doi = str(hit.extras.get("doi") or "").strip()
+            if doi:
+                metadata_lines.append(f"  doi: {doi}")
+            if isinstance(authors, list):
+                authors_text = "; ".join(
+                    str(author).strip() for author in authors if str(author).strip()
+                )
+                if authors_text:
+                    metadata_lines.append(f"  authors: {authors_text}")
+            hit_lines = [f"- {hit.title}", f"  url: {hit.url}"]
+            hit_lines.extend(metadata_lines)
+            lines.append("\n".join(hit_lines))
+        return "\n".join(lines)
+
+    return asyncio.run(_run())
+
+
+def _smoke_bne_search(query: str) -> str:
+    """Smoke wrapper: BNE Hemeroteca Digital Playwright search."""
+    import sys
+
+    from research_agent.tools import browser as _browser
+
+    async def _run() -> str:
+        try:
+            results = await bne.search(query, max_results=5)
+            if not results:
+                print(
+                    f"_smoke-tool bne_search: search({query!r}) returned 0 results",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            missing = [
+                hit.title or hit.url
+                for hit in results
+                if (
+                    not hit.title
+                    or not hit.url
+                    or not hit.url.startswith(
+                        (
+                            "https://hemerotecadigital.bne.es/",
+                            "https://www.hemerotecadigital.bne.es/",
+                            "https://bnedigital.bne.es/",
+                            "https://www.bnedigital.bne.es/",
+                        )
+                    )
+                )
+            ]
+            if missing:
+                print(
+                    "_smoke-tool bne_search: missing title/BNE URL on "
+                    f"{len(missing)} result(s): {missing[:3]}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            query_text = " ".join(query.split())
+            lines = [f"bne_search: returned {len(results)} hits for query: {query_text}"]
+            for hit in results:
+                metadata_lines: list[str] = []
+                for label, key in (
+                    ("publication", "publication"),
+                    ("date", "pub_date"),
+                    ("place", "place"),
+                    ("lang", "lang"),
+                    ("fulltext_url", "fulltext_url"),
+                ):
+                    value = str(hit.extras.get(key) or "").strip()
+                    if value:
+                        metadata_lines.append(f"  {label}: {value}")
+                hit_lines = [f"- {hit.title}", f"  url: {hit.url}"]
+                hit_lines.extend(metadata_lines)
+                lines.append("\n".join(hit_lines))
+            return "\n".join(lines)
+        finally:
+            try:
+                await _browser.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+
+    return asyncio.run(_run())
+
+
+def _smoke_iwm_search(query: str) -> str:
+    """Smoke wrapper: IWM public Collections Search through Playwright."""
+    import sys
+
+    from research_agent.tools import browser as _browser
+
+    async def _run() -> str:
+        try:
+            results = await iwm.search(query, max_results=5)
+            if not results:
+                print(
+                    f"_smoke-tool iwm_search: search({query!r}) returned 0 results",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            missing = [
+                hit.title or hit.url
+                for hit in results
+                if (
+                    not hit.title
+                    or not hit.url
+                    or not hit.url.startswith(
+                        (
+                            "https://www.iwm.org.uk/collections/item/object/",
+                            "https://iwm.org.uk/collections/item/object/",
+                        )
+                    )
+                )
+            ]
+            if missing:
+                print(
+                    "_smoke-tool iwm_search: missing title/IWM item URL on "
+                    f"{len(missing)} result(s): {missing[:3]}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            query_text = " ".join(query.split())
+            lines = [f"iwm_search: returned {len(results)} hits for query: {query_text}"]
+            for hit in results:
+                metadata_lines: list[str] = []
+                for label, key in (
+                    ("object_type", "object_type"),
+                    ("period", "period"),
+                    ("collection", "collection"),
+                    ("catalogue_id", "catalogue_id"),
+                    ("production_date", "production_date"),
+                    ("creator", "creator"),
+                ):
+                    value = str(hit.extras.get(key) or "").strip()
+                    if value:
+                        metadata_lines.append(f"  {label}: {value}")
+                hit_lines = [f"- {hit.title}", f"  url: {hit.url}"]
+                hit_lines.extend(metadata_lines)
+                lines.append("\n".join(hit_lines))
+            return "\n".join(lines)
+        finally:
+            try:
+                await _browser.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+
+    return asyncio.run(_run())
+
+
+def _smoke_cspan_search(query: str) -> str:
+    """Smoke wrapper: C-SPAN Video Library search plus transcript fetch."""
+    import sys
+
+    from research_agent.tools import browser as _browser
+
+    async def _run() -> str:
+        try:
+            results = await cspan.search(query, max_results=20)
+            if not results:
+                print(
+                    f"_smoke-tool cspan_search: search({query!r}) returned 0 results",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            missing = [
+                hit.title or hit.url
+                for hit in results
+                if (
+                    not hit.title
+                    or not hit.url
+                    or not hit.url.startswith(
+                        (
+                            "https://www.c-span.org/",
+                            "https://c-span.org/",
+                            "https://www.cspan.org/",
+                            "https://cspan.org/",
+                        )
+                    )
+                )
+            ]
+            if missing:
+                print(
+                    "_smoke-tool cspan_search: missing title/C-SPAN URL on "
+                    f"{len(missing)} result(s): {missing[:3]}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            fetched = None
+            checked_count = 0
+            for hit in results:
+                checked_count += 1
+                source = await cspan.fetch(hit.url)
+                if source is not None and "## Transcript" in source.cleaned_text:
+                    gap = "No transcript text was available" in source.cleaned_text
+                    if source.cleaned_text.strip() and not gap:
+                        fetched = source
+                        break
+            if fetched is None:
+                print(
+                    "_smoke-tool cspan_search: no transcript-bearing fetched source "
+                    f"among {checked_count} result(s)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+
+            query_text = " ".join(query.split())
+            lines = [f"cspan_search: returned {len(results)} hits for query: {query_text}"]
+            for hit in results:
+                metadata_lines: list[str] = []
+                for label, key in (
+                    ("program_id", "program_id"),
+                    ("air_date", "air_date"),
+                    ("duration_seconds", "duration_seconds"),
+                ):
+                    value = hit.extras.get(key)
+                    if value not in (None, "", []):
+                        metadata_lines.append(f"  {label}: {value}")
+                hit_lines = [f"- {hit.title}", f"  url: {hit.url}"]
+                hit_lines.extend(metadata_lines)
+                lines.append("\n".join(hit_lines))
+
+            preview = fetched.cleaned_text.replace("\n", " ")
+            if len(preview) > 240:
+                preview = preview[:240] + "..."
+            lines.append(
+                f"fetched_transcript: {fetched.title}\n"
+                f"  url: {fetched.url}\n"
+                f"  program_id: {fetched.metadata.get('program_id') or '?'}\n"
+                f"  speakers: {', '.join(fetched.metadata.get('speakers') or []) or '?'}\n"
+                f"  preview: {preview}"
+            )
+            return "\n".join(lines)
+        finally:
+            try:
+                await _browser.shutdown()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
 
     return asyncio.run(_run())
 
@@ -1186,18 +2171,36 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "arxiv": _smoke_arxiv,
     "audio": _smoke_audio,
     "bbb": _smoke_bbb,
+    "bne_search": _smoke_bne_search,
     "calaccess": _smoke_calaccess,
+    "commons_search": _smoke_commons_search,
+    "cspan_search": _smoke_cspan_search,
+    "dpla_search": _smoke_dpla_search,
     "edgar": _smoke_edgar,
+    "europeana_search": _smoke_europeana_search,
     "courtlistener": _smoke_courtlistener,
     "scholar": _smoke_scholar,
     "linkedin": _smoke_linkedin,
+    "loc_search": _smoke_loc,
     "fedregister": _smoke_fedregister,
+    "gallica_search": _smoke_gallica_search,
+    "iarchive_search": _smoke_iarchive,
+    "iwm_search": _smoke_iwm_search,
+    "nara_search": _smoke_nara_search,
     "nonprofits": _smoke_nonprofits,
     "fec": _smoke_fec,
     "congress": _smoke_congress,
     "lda": _smoke_lda,
     "littlesis": _smoke_littlesis,
     "opencorporates": _smoke_opencorporates,
+    "openalex_search": _smoke_openalex_search,
+    "trove_search": _smoke_trove_search,
+    "ukna_search": _smoke_ukna_search,
+    "wikidata_search": _smoke_wikidata_search,
+    "wikisource_search": _smoke_wikisource_search,
+    "openlibrary_search": _smoke_openlibrary_search,
+    "persee_search": _smoke_persee_search,
+    "si_search": _smoke_si_search,
     "sos": _smoke_sos,
     "licensing": _smoke_licensing,
     "sanctions": _smoke_sanctions,
@@ -1210,4 +2213,13 @@ TOOL_REGISTRY: dict[str, Callable[[str], object]] = {
     "youtube": _smoke_youtube,
 }
 
-__all__ = ["TOOL_REGISTRY", "SearchResult", "Source", "SourceKind"]
+__all__ = [
+    "BaseSearchPayload",
+    "KindEntry",
+    "SearchResult",
+    "Source",
+    "SourceKind",
+    "TOOL_REGISTRY",
+    "iter_kinds",
+    "register_kind",
+]

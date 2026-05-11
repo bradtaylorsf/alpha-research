@@ -37,6 +37,10 @@ from urllib.parse import urlparse
 import playwright.async_api
 
 from research_agent.tools import browser
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -425,4 +429,27 @@ def reset_for_tests() -> None:
     _register_host_rates()
 
 
-__all__ = ["fetch", "reset_for_tests", "search"]
+KIND = "bbb_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=("www.bbb.org", "bbb.org"),
+    skill_name=None,
+    description=(
+        "Better Business Bureau profiles + ratings (Playwright, no auth)"
+    ),
+    optional_payload_knobs="—",
+    example_query="SBI Builders",
+    module_name="bbb",
+)
+
+
+__all__ = ["KIND", "fetch", "reset_for_tests", "search"]

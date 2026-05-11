@@ -1,0 +1,75 @@
+{
+  "batchcomplete": true,
+  "query": {
+    "pages": [
+      {
+        "pageid": 1001,
+        "ns": 6,
+        "title": "File:Algerian war photograph 1957.jpg",
+        "imageinfo": [
+          {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/a/aa/Algerian_war_photograph_1957.jpg",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Algerian_war_photograph_1957.jpg",
+            "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/aa/Algerian_war_photograph_1957.jpg/640px-Algerian_war_photograph_1957.jpg",
+            "mime": "image/jpeg",
+            "mediatype": "BITMAP",
+            "extmetadata": {
+              "License": {
+                "value": "cc-by-sa-4.0"
+              },
+              "LicenseShortName": {
+                "value": "CC BY-SA 4.0"
+              },
+              "LicenseUrl": {
+                "value": "https://creativecommons.org/licenses/by-sa/4.0/"
+              },
+              "Artist": {
+                "value": "<a href=\"https://example.test/author\">Archive photographer</a>"
+              },
+              "ImageDescription": {
+                "value": "Street scene during the Algerian War"
+              },
+              "Credit": {
+                "value": "Wikimedia Commons"
+              },
+              "DateTimeOriginal": {
+                "value": "1957"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "pageid": 1002,
+        "ns": 6,
+        "title": "File:Battle of Algiers film still.ogv",
+        "imageinfo": [
+          {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/b/bb/Battle_of_Algiers_film_still.ogv",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:Battle_of_Algiers_film_still.ogv",
+            "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bb/Battle_of_Algiers_film_still.ogv/640px--Battle_of_Algiers_film_still.ogv.jpg",
+            "mime": "video/ogg",
+            "mediatype": "VIDEO",
+            "extmetadata": {
+              "License": {
+                "value": "cc0"
+              },
+              "LicenseShortName": {
+                "value": "CC0"
+              },
+              "LicenseUrl": {
+                "value": "https://creativecommons.org/publicdomain/zero/1.0/"
+              },
+              "Artist": {
+                "value": "Public archive"
+              },
+              "ImageDescription": {
+                "value": "Video clip related to the Battle of Algiers"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

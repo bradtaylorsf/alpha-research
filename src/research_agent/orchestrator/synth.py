@@ -157,16 +157,36 @@ def _load_top_findings(job: Job, n: int) -> list[dict[str, Any]]:
     for row in rows:
         source_ids_raw = row["source_ids"]
         tags_raw = row["tags"]
-        out.append(
-            {
-                "id": int(row["id"]),
-                "claim": row["claim"],
-                "confidence": float(row["confidence"]),
-                "source_ids": json.loads(source_ids_raw) if source_ids_raw else [],
-                "tags": json.loads(tags_raw) if tags_raw else [],
-            }
-        )
+        finding_id = int(row["id"])
+        original_claim = row["claim"]
+        translated_claim = _load_finding_translation(job, finding_id)
+        item = {
+            "id": finding_id,
+            "claim": translated_claim or original_claim,
+            "confidence": float(row["confidence"]),
+            "source_ids": json.loads(source_ids_raw) if source_ids_raw else [],
+            "tags": json.loads(tags_raw) if tags_raw else [],
+        }
+        if translated_claim is not None:
+            item["original_claim"] = original_claim
+            item["translated"] = True
+        out.append(item)
     return out
+
+
+def _load_finding_translation(job: Job, finding_id: int) -> str | None:
+    path = job.root / f"findings/{finding_id:06d}.translation.md"
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if text.startswith("---\n"):
+        end = text.find("\n---", 4)
+        if end != -1:
+            text = text[end + 4 :].strip()
+    return text or None
 
 
 def _load_sources_for(job: Job, finding_rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:

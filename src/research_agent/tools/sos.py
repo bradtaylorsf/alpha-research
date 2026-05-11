@@ -34,6 +34,10 @@ from urllib.parse import urlparse
 import playwright.async_api
 
 from research_agent.tools import browser
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -698,4 +702,36 @@ def reset_for_tests() -> None:
     _register_host_rates()
 
 
-__all__ = ["fetch", "reset_for_tests", "search"]
+KIND = "sos_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    state: str | None = None
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=(
+        "bizfileonline.sos.ca.gov",
+        "icis.corp.delaware.gov",
+        "esos.nv.gov",
+        "wyobiz.wyo.gov",
+        "search.sunbiz.org",
+        "apps.dos.ny.gov",
+    ),
+    skill_name=None,
+    description=(
+        "State Secretary-of-State business entity filings (Playwright; CA"
+        " wired, others stubs)"
+    ),
+    optional_payload_knobs="`state: CA\\|DE\\|NV\\|...`",
+    example_query="Acme Corp",
+    module_name="sos",
+)
+
+
+__all__ = ["KIND", "fetch", "reset_for_tests", "search"]

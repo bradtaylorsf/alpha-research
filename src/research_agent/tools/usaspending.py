@@ -37,6 +37,10 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from research_agent import config
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -741,4 +745,28 @@ def reset_for_tests() -> None:
     _rate_lock = asyncio.Lock()
 
 
-__all__ = ["fetch", "reset_for_tests", "search"]
+KIND = "usaspending_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    award_type: str | None = None
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=("usaspending.gov", "www.usaspending.gov", "api.usaspending.gov"),
+    skill_name=None,
+    description=(
+        "Federal contracts, grants, loans (award-level detail, no auth)"
+    ),
+    optional_payload_knobs="`award_type: contracts\\|grants\\|loans`",
+    example_query="Heritage Foundation contract",
+    module_name="usaspending",
+)
+
+
+__all__ = ["KIND", "fetch", "reset_for_tests", "search"]

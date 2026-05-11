@@ -1,0 +1,69 @@
+{
+  "meta": {
+    "count": 1,
+    "db_response_time_ms": 14,
+    "page": 1,
+    "per_page": 1
+  },
+  "results": [
+    {
+      "id": "https://openalex.org/W4401234567",
+      "doi": "https://doi.org/10.5555/project2025.2025.001",
+      "title": "Project 2025 and the unitary executive theory",
+      "display_name": "Project 2025 and the unitary executive theory",
+      "publication_year": 2025,
+      "publication_date": "2025-03-14",
+      "type": "article",
+      "language": "en",
+      "cited_by_count": 7,
+      "authorships": [
+        {
+          "author": {
+            "id": "https://openalex.org/A501",
+            "display_name": "Jane Doe"
+          }
+        },
+        {
+          "author": {
+            "id": "https://openalex.org/A502",
+            "display_name": "Alex Smith"
+          }
+        }
+      ],
+      "primary_location": {
+        "is_oa": false,
+        "landing_page_url": "https://doi.org/10.5555/project2025.2025.001",
+        "pdf_url": null,
+        "source": {
+          "id": "https://openalex.org/S123",
+          "display_name": "Journal of Constitutional Studies"
+        }
+      },
+      "best_oa_location": {
+        "is_oa": true,
+        "landing_page_url": "https://example.org/articles/project-2025-unitary-executive",
+        "pdf_url": "https://example.org/articles/project-2025-unitary-executive.pdf",
+        "source": {
+          "id": "https://openalex.org/S456",
+          "display_name": "Example Open Repository"
+        }
+      },
+      "open_access": {
+        "is_oa": true,
+        "oa_url": "https://example.org/articles/project-2025-unitary-executive"
+      },
+      "abstract_inverted_index": {
+        "Project": [0],
+        "2025": [1],
+        "applies": [2],
+        "unitary": [3],
+        "executive": [4],
+        "theory": [5],
+        "to": [6],
+        "administrative": [7],
+        "governance.": [8]
+      }
+    }
+  ],
+  "group_by": []
+}

@@ -157,6 +157,16 @@ class BudgetTracker:
         self.last_cost = cost
         return cost
 
+    def estimate_cost(self, tier: str, usage: TokenUsage) -> float:
+        """Return the configured USD estimate for ``usage`` without ledger writes."""
+        return self._compute_cost(tier, usage)
+
+    def would_exceed(self, tier: str, usage: TokenUsage) -> bool:
+        """Return True when estimated spend would push the job past its cap."""
+        if self.cap is None:
+            return False
+        return self.spent + self.estimate_cost(tier, usage) > self.cap
+
     def _compute_cost(self, tier: str, usage: TokenUsage) -> float:
         block = self.pricing.get(tier)
         if not block:

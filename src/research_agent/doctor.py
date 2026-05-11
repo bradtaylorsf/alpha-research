@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -212,6 +213,82 @@ def check_serpapi_cost_note() -> CheckResult:
     )
 
 
+def check_trove_api_note() -> CheckResult:
+    """Surface Trove renewal and metadata-only constraints in doctor output."""
+    name = "trove_api_note"
+    raw = os.environ.get("TROVE_API_KEY")
+    if not raw:
+        return CheckResult(
+            name,
+            "skip",
+            required=False,
+            detail=(
+                "TROVE_API_KEY unset - trove_search disabled; keys expire after"
+                " 12 months; connector is metadata-only to avoid full-text key"
+                " revocation risk"
+            ),
+        )
+    return CheckResult(
+        name,
+        "ok",
+        required=False,
+        detail=(
+            f"present ({mask_secret(raw)}); renew annually; metadata-only default,"
+            " no automatic full-text fetching"
+        ),
+    )
+
+
+def check_dpla_api_note() -> CheckResult:
+    """Surface DPLA key registration and URL-param auth in doctor output."""
+    name = "dpla_api_note"
+    raw = os.environ.get("DPLA_API_KEY")
+    if not raw:
+        return CheckResult(
+            name,
+            "skip",
+            required=False,
+            detail=(
+                "DPLA_API_KEY unset - dpla_search disabled; request a free key"
+                " with curl -X POST https://api.dp.la/v2/api_key/<your-email>;"
+                " key rides as ?api_key=<key>"
+            ),
+        )
+    return CheckResult(
+        name,
+        "ok",
+        required=False,
+        detail=f"present ({mask_secret(raw)}); sent as ?api_key=<key>; 1 RPS",
+    )
+
+
+def check_europeana_api_note() -> CheckResult:
+    """Surface Europeana key registration and wskey auth in doctor output."""
+    name = "europeana_api_note"
+    raw = os.environ.get("EUROPEANA_API_KEY")
+    if not raw:
+        return CheckResult(
+            name,
+            "skip",
+            required=False,
+            detail=(
+                "EUROPEANA_API_KEY unset - europeana_search disabled; create a"
+                " free key in your Europeana account under Manage API keys"
+                " (migrated 2025-05-28); key rides as ?wskey=<key>;"
+                " connector enforces 1 RPS"
+            ),
+        )
+    return CheckResult(
+        name,
+        "ok",
+        required=False,
+        detail=(
+            f"present ({mask_secret(raw)}); sent as ?wskey=<key> to"
+            " /api/v2/search.json; 1 RPS"
+        ),
+    )
+
+
 def check_models_yaml(path: Path) -> CheckResult:
     """Parse ``config/models.yaml`` — fail if missing or invalid YAML."""
     name = "models_yaml"
@@ -321,6 +398,231 @@ def check_sanctions_refresh() -> list[CheckResult]:
     return results
 
 
+def check_planner_allowlist_coherence() -> CheckResult:
+    """Assert the planner prompt + the connector registry agree on kinds.
+
+    Issue #223: the registry is the single source of truth and the planner
+    prompt is rendered from it. Drift between (a) registered kinds and the
+    Hard-rules allowlist, (b) the allowlist and the registry, or (c) the
+    Direct kinds table row count is a structural failure — it means a
+    planner that has fanned out to a connector kind the orchestrator can't
+    dispatch (or, more often, a kind that ships in the orchestrator but
+    the planner doesn't know about).
+
+    Required check: a registered kind missing from the allowlist would
+    leave the planner unable to use a shipped connector; an orphan
+    allowlist entry would let the planner emit a kind no handler exists
+    for. Either is a hard fail.
+    """
+    name = "planner_allowlist_coherence"
+    try:
+        from research_agent.prompts.loader import _render_registry_vars
+        from research_agent.tools._registry import iter_kinds
+
+        registered = {entry.name for entry in iter_kinds()}
+        # Render against the registry without touching the prompt cache —
+        # ``load_prompt_meta`` would emit ``prompt_loaded`` to stdout and
+        # contaminate ``doctor --json`` output for downstream consumers.
+        rendered = _render_registry_vars()
+        # The Hard-rules sentence carries the allowlist. We pull every
+        # backticked ``<x>_search`` token from the rendered allowlist and
+        # compare to the registry. The sentence-level rendering is what
+        # the model actually reads, so we validate against that.
+        allowlist_text = rendered["kinds_allowlist"]
+        listed = set(re.findall(r"`([a-z_]+_search)`", allowlist_text))
+        registered_missing = registered - listed
+        orphan = listed - registered
+        # The Direct kinds table must contain exactly one row per kind.
+        # Each rendered row begins with ``| `<x>_search` ``.
+        table_text = rendered["direct_kinds_table"]
+        table_kinds = re.findall(r"\|\s*`([a-z_]+_search)`\s*\|", table_text)
+        table_set = set(table_kinds)
+        table_dupes = [k for k in table_kinds if table_kinds.count(k) > 1]
+        table_missing = registered - table_set
+        problems: list[str] = []
+        if registered_missing:
+            problems.append(
+                f"registered but not in allowlist: {sorted(registered_missing)}"
+            )
+        if orphan:
+            problems.append(f"in allowlist but not registered: {sorted(orphan)}")
+        if table_missing:
+            problems.append(
+                f"registered but no Direct-kinds-table row: {sorted(table_missing)}"
+            )
+        if table_dupes:
+            problems.append(f"duplicate table rows: {sorted(set(table_dupes))}")
+        if problems:
+            return CheckResult(
+                name,
+                "fail",
+                required=True,
+                detail="; ".join(problems),
+            )
+        return CheckResult(
+            name,
+            "ok",
+            required=True,
+            detail=(
+                f"{len(registered)} kinds round-trip through allowlist + table"
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — surface every failure mode
+        return CheckResult(
+            name,
+            "fail",
+            required=True,
+            detail=f"coherence check raised {type(exc).__name__}: {exc}",
+        )
+
+
+def check_task_kind_registry_coherence() -> CheckResult:
+    """Assert every registered connector kind validates as a planner TaskKind."""
+    name = "task_kind_registry_coherence"
+    try:
+        from typing import get_args
+
+        import research_agent.tools  # noqa: F401 - populate the connector registry
+        from research_agent.orchestrator.plan import TaskKind
+        from research_agent.tools._registry import iter_kinds
+
+        allowed = set(get_args(TaskKind))
+        missing: list[str] = []
+        for entry in iter_kinds():
+            if entry.name not in allowed:
+                missing.append(entry.name)
+            fetch_kind = entry.name.replace("_search", "_fetch")
+            if fetch_kind not in allowed:
+                missing.append(fetch_kind)
+
+        if missing:
+            return CheckResult(
+                name,
+                "fail",
+                required=True,
+                detail=f"registered connector kinds missing from TaskKind: {missing}",
+            )
+        return CheckResult(
+            name,
+            "ok",
+            required=True,
+            detail=f"{len(list(iter_kinds()))} registered kinds validate as TaskKind",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            name,
+            "fail",
+            required=True,
+            detail=f"coherence check raised {type(exc).__name__}: {exc}",
+        )
+
+
+def check_registry_skill_coherence() -> list[CheckResult]:
+    """Assert each registered kind's skill file exists and parses.
+
+    Issue #223: every connector PR ships a ``skills/connectors/<name>.md``
+    file (per #211/#212). Kinds with ``skill_name=None`` are grandfathered
+    from the existing-connector skills backfill — they ``skip`` rather than
+    fail. Kinds whose ``skill_name`` is set but the file is missing are a
+    hard ``fail`` (the planner would fall back to a description-only path).
+    """
+    from research_agent.skills.loader import SkillParseError, _parse, _skills_dir
+    from research_agent.tools._registry import iter_kinds
+
+    results: list[CheckResult] = []
+    for entry in iter_kinds():
+        row = f"registry_skill:{entry.name}"
+        if entry.skill_name is None:
+            results.append(
+                CheckResult(
+                    row,
+                    "skip",
+                    required=False,
+                    detail=(
+                        f"{entry.name} grandfathered (skill_name=None);"
+                        " backfill pending"
+                    ),
+                )
+            )
+            continue
+        path = _skills_dir("connectors") / f"{entry.skill_name}.md"
+        if not path.exists():
+            results.append(
+                CheckResult(
+                    row,
+                    "fail",
+                    required=True,
+                    detail=(
+                        f"missing skills/connectors/{entry.skill_name}.md"
+                        f" for kind {entry.name}"
+                    ),
+                )
+            )
+            continue
+        try:
+            _parse("connectors", entry.skill_name, path)
+        except SkillParseError as exc:
+            results.append(
+                CheckResult(
+                    row,
+                    "fail",
+                    required=True,
+                    detail=f"{path}: {exc}",
+                )
+            )
+            continue
+        results.append(
+            CheckResult(
+                row,
+                "ok",
+                required=True,
+                detail=f"skills/connectors/{entry.skill_name}.md parses",
+            )
+        )
+    return results
+
+
+def check_registry_skill_summary_coherence(
+    rows: list[CheckResult] | None = None,
+) -> CheckResult:
+    """Summarize registry/skill coherence as a single required doctor row.
+
+    The per-kind ``registry_skill:<kind>`` rows remain useful diagnostics,
+    but AC-X1 also requires a stable aggregate row that downstream checks can
+    assert by name.
+    """
+    name = "registry_skill_coherence"
+    try:
+        detail_rows = rows if rows is not None else check_registry_skill_coherence()
+        failures = [row for row in detail_rows if row.required and row.status == "fail"]
+        skipped = [row for row in detail_rows if row.status == "skip"]
+        ok_count = sum(1 for row in detail_rows if row.status == "ok")
+        if failures:
+            failed_names = ", ".join(row.name for row in failures)
+            return CheckResult(
+                name,
+                "fail",
+                required=True,
+                detail=f"{len(failures)} registry skill check(s) failed: {failed_names}",
+            )
+        return CheckResult(
+            name,
+            "ok",
+            required=True,
+            detail=(
+                f"{ok_count} connector skill file(s) parse;"
+                f" {len(skipped)} grandfathered skip(s)"
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            name,
+            "fail",
+            required=True,
+            detail=f"coherence check raised {type(exc).__name__}: {exc}",
+        )
+
+
 def run_all_checks(
     loaded_env_files: list[Path],
     *,
@@ -339,7 +641,15 @@ def run_all_checks(
     results.append(check_models_yaml(root / "config" / "models.yaml"))
     results.append(check_tesseract())
     results.append(check_serpapi_cost_note())
+    results.append(check_trove_api_note())
+    results.append(check_dpla_api_note())
+    results.append(check_europeana_api_note())
     results.extend(check_sanctions_refresh())
+    results.append(check_planner_allowlist_coherence())
+    results.append(check_task_kind_registry_coherence())
+    registry_skill_rows = check_registry_skill_coherence()
+    results.append(check_registry_skill_summary_coherence(registry_skill_rows))
+    results.extend(registry_skill_rows)
     return results
 
 

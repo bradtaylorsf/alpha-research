@@ -87,7 +87,7 @@ def _write_prompt(
 
 @pytest.mark.parametrize(
     "name",
-    ["planner", "researcher", "synthesizer", "critic", "intake_followup"],
+    ["planner", "researcher", "synthesizer", "critic", "intake_followup", "translator"],
 )
 def test_shipped_prompt_loads_with_valid_frontmatter(name: str) -> None:
     meta = load_prompt_meta(name)
@@ -347,3 +347,96 @@ def test_load_without_job_does_not_emit(isolated_prompts_dir: Path, job: Job) ->
     # Job's events.jsonl is created at Job.create() and starts empty.
     text = (job.root / "events.jsonl").read_text(encoding="utf-8")
     assert text == ""
+
+
+# ---------------------------------------------------------------------------
+# Issue #223 — planner prompt renders the connector registry.
+# ---------------------------------------------------------------------------
+
+
+def test_load_planner_renders_registry_table(
+    isolated_prompts_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two fake registered kinds appear in both the table and allowlist."""
+    from pydantic import BaseModel
+
+    from research_agent.tools import _registry
+
+    class _PS(BaseModel):
+        query: str
+        sub_question: str
+
+    async def _noop_search(query: str, **_: object) -> list[object]:
+        return []
+
+    fake = [
+        _registry.KindEntry(
+            name="alpha_search",
+            payload_schema=_PS,
+            search_fn=_noop_search,
+            fetch_fn=None,
+            host_patterns=(),
+            skill_name="alpha",
+            description="Alpha desc.",
+            optional_payload_knobs="`kind: a\\|b`",
+            example_query="alpha example",
+            module_name="alpha",
+        ),
+        _registry.KindEntry(
+            name="beta_search",
+            payload_schema=_PS,
+            search_fn=_noop_search,
+            fetch_fn=None,
+            host_patterns=(),
+            skill_name=None,
+            description="Beta desc.",
+            optional_payload_knobs="—",
+            example_query="beta example",
+            module_name="beta",
+        ),
+    ]
+    monkeypatch.setattr(_registry, "iter_kinds", lambda: fake)
+
+    body = (
+        "kinds:\n"
+        "{{kinds_allowlist}}\n\n"
+        "table:\n"
+        "{{direct_kinds_table}}\n\n"
+        "replan:\n"
+        "{{tactical_replan_kinds}}\n"
+    )
+    path = isolated_prompts_dir / "planner.md"
+    path.write_text(
+        f"---\nversion: '1'\nmodel_tier: reasoner\ndescription: t\n---\n{body}",
+        encoding="utf-8",
+    )
+
+    rendered = load_prompt("planner")
+    assert "`alpha_search`" in rendered
+    assert "`beta_search`" in rendered
+    assert "Alpha desc." in rendered
+    assert "Beta desc." in rendered
+    # Allowlist is comma-joined alphabetical.
+    assert "`alpha_search`, `beta_search`" in rendered
+    # tactical_replan list mirrors the allowlist.
+    assert rendered.count("`alpha_search`, `beta_search`") >= 2
+    # Stub knob renders as ``—``.
+    assert "| `beta_search` | Beta desc. | — | `beta example` |" in rendered
+
+
+def test_load_planner_caller_can_override_registry_vars(
+    isolated_prompts_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caller-supplied vars win over the registry-rendered defaults."""
+    from research_agent.tools import _registry
+
+    monkeypatch.setattr(_registry, "iter_kinds", list)  # empty registry
+
+    path = isolated_prompts_dir / "planner.md"
+    path.write_text(
+        "---\nversion: '1'\nmodel_tier: reasoner\ndescription: t\n---\n"
+        "kinds={{kinds_allowlist}}",
+        encoding="utf-8",
+    )
+    rendered = load_prompt("planner", kinds_allowlist="OVERRIDE")
+    assert rendered.endswith("kinds=OVERRIDE")

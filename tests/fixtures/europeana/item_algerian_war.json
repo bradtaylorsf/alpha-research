@@ -1,0 +1,79 @@
+{
+  "apikey": "test",
+  "success": true,
+  "object": {
+    "about": "/9200429/BibliographicResource_3000135723944",
+    "country": [
+      "France"
+    ],
+    "language": [
+      "fr"
+    ],
+    "type": "TEXT",
+    "year": [
+      "1958"
+    ],
+    "proxies": [
+      {
+        "dcTitle": {
+          "fr": [
+            "Guerre d'Algerie, 1954-1962"
+          ]
+        },
+        "dcDescription": {
+          "fr": [
+            "Documents and photographs about the Algerian war."
+          ]
+        },
+        "dcCreator": {
+          "def": [
+            "Auteur inconnu"
+          ]
+        },
+        "dcSubject": {
+          "fr": [
+            "Guerre d'Algerie"
+          ]
+        },
+        "dcDate": {
+          "def": [
+            "1958"
+          ]
+        },
+        "dcFormat": {
+          "def": [
+            "printed text"
+          ]
+        }
+      }
+    ],
+    "aggregations": [
+      {
+        "edmDataProvider": {
+          "def": [
+            "Bibliotheque nationale de France"
+          ]
+        },
+        "edmProvider": {
+          "def": [
+            "The European Library"
+          ]
+        },
+        "edmIsShownAt": "https://gallica.bnf.fr/ark:/12148/bpt6k1234567",
+        "edmRights": {
+          "def": [
+            "http://creativecommons.org/publicdomain/mark/1.0/"
+          ]
+        }
+      }
+    ],
+    "europeanaAggregation": [
+      {
+        "edmLandingPage": "https://www.europeana.eu/en/item/9200429/BibliographicResource_3000135723944"
+      }
+    ],
+    "edmPreview": [
+      "https://api.europeana.eu/thumbnail/v3/400/abc.jpg"
+    ]
+  }
+}

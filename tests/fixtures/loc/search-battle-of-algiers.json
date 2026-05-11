@@ -1,0 +1,209 @@
+{
+  "pagination": {
+    "current": 1,
+    "first": null,
+    "from": 1,
+    "last": "https://www.loc.gov/search/?c=3&fo=json&q=battle+of+algiers&sp=4",
+    "next": "https://www.loc.gov/search/?c=3&fo=json&q=battle+of+algiers&sp=2",
+    "of": 93572,
+    "page_list": [
+      {
+        "number": 1,
+        "url": null
+      },
+      {
+        "number": 2,
+        "url": "https://www.loc.gov/search/?c=3&fo=json&q=battle+of+algiers&sp=2"
+      },
+      {
+        "number": 3,
+        "url": "https://www.loc.gov/search/?c=3&fo=json&q=battle+of+algiers&sp=3"
+      },
+      {
+        "number": "...",
+        "url": "https://www.loc.gov/search/?c=3&fo=json&q=battle+of+algiers&sp=4"
+      }
+    ],
+    "perpage": 3,
+    "perpage_options": [
+      25,
+      50,
+      100,
+      150
+    ],
+    "previous": null,
+    "results": "1 - 3",
+    "to": 3,
+    "total": 31191
+  },
+  "results": [
+    {
+      "access_restricted": true,
+      "aka": [
+        "https://www.loc.gov/pictures/item/2008679147/",
+        "http://www.loc.gov/item/2008679147/",
+        "http://www.loc.gov/pictures/item/2008679147/",
+        "https://www.loc.gov/pictures/collection/cph/item/2008679147/",
+        "http://www.loc.gov/pictures/collection/cph/item/2008679147/",
+        "http://www.loc.gov/resource/ppmsca.18547/",
+        "http://lccn.loc.gov/2008679147",
+        "https://hdl.loc.gov/loc.pnp/ppmsca.18547"
+      ],
+      "campaigns": [],
+      "date": "1943-01-01",
+      "dates": [
+        "1943"
+      ],
+      "description": [
+        "1 photographic print. | Photograph showing American soldiers listening to an \"orchestra\", some in chairs, others in building with wall bombed out, exposing rooms on several floors."
+      ],
+      "digitized": true,
+      "extract_timestamp": "2021-08-25T11:33:24.275Z",
+      "group": [
+        "cph",
+        "catalog-split-12",
+        "catalog",
+        "miscellaneous-items-high-demand",
+        "main-catalog-split-12",
+        "main-catalog"
+      ],
+      "hassegments": false,
+      "id": "http://www.loc.gov/item/2008679147/",
+      "image_url": [
+        "https://tile.loc.gov/storage-services/service/pnp/ppmsca/18500/18547_150px.jpg#h=119&w=150"
+      ],
+      "index": 1,
+      "language": [
+        "english"
+      ],
+      "location": [
+        "algeria",
+        "algiers"
+      ],
+      "mime_type": [
+        "image/gif",
+        "image/jpg",
+        "image/tif"
+      ],
+      "number": [
+        "2008679147",
+        "http://www.loc.gov/item/15308277",
+        "2008-07-14t09:37:01"
+      ],
+      "number_former_id": [
+        "http://www.loc.gov/item/15308277"
+      ],
+      "number_lccn": [
+        "2008679147"
+      ],
+      "number_source_modified": [
+        "2008-07-14t09:37:01"
+      ],
+      "online_format": [
+        "image"
+      ],
+      "original_format": [
+        "photo, print, drawing"
+      ],
+      "partof": [
+        "miscellaneous items in high demand",
+        "prints & photographs online catalog (library of congress)",
+        "prints and photographs division",
+        "catalog"
+      ],
+      "related": {
+        "neighbors": "https://www.loc.gov/pictures/related/?&co=cph&pk=2008679147&st=gallery&sb=call_number#focus"
+      },
+      "resources": [
+        {
+          "caption": "digital file from original photograph",
+          "files": 1,
+          "image": "https://tile.loc.gov/storage-services/service/pnp/ppmsca/18500/18547_150px.jpg",
+          "url": "https://www.loc.gov/resource/ppmsca.18547/"
+        }
+      ],
+      "shelf_id": "NYWTS - SUBJ/GEOG--War--European II Battles--Morocco [item] [P&P]",
+      "site": [
+        "pictures",
+        "catalog"
+      ],
+      "subject": [
+        "american",
+        "algiers",
+        "war damage",
+        "photographic prints",
+        "concerts",
+        "united states army band",
+        "world war",
+        "military bands",
+        "algeria"
+      ],
+      "timestamp": "2022-05-02T05:03:52.773Z",
+      "title": "'Diamond horseshoe' Algiers style",
+      "unrestricted": true,
+      "url": "https://www.loc.gov/item/2008679147/"
+    },
+    {
+      "access_restricted": false,
+      "aka": [
+        "http://www.loc.gov/item/amss-as113900/",
+        "http://www.loc.gov/resource/amss.as113900/",
+        "http://www.loc.gov/item/amss.as113900/"
+      ],
+      "campaigns": [],
+      "digitized": true,
+      "extract_timestamp": "2023-09-29T20:24:03.129Z",
+      "group": [
+        "amss",
+        "nineteenth-century-song-sheets"
+      ],
+      "hassegments": false,
+      "id": "http://www.loc.gov/item/amss-as113900/",
+      "image_url": [
+        "https://tile.loc.gov/image-services/iiif/service:rbc:amss:as:11:39:00:as113900:001a/full/pct:12.5/0/default.jpg#h=388&w=285",
+        "https://tile.loc.gov/image-services/iiif/service:rbc:amss:as:11:39:00:as113900:001a/full/pct:25/0/default.jpg#h=776&w=570",
+        "https://tile.loc.gov/image-services/iiif/service:rbc:amss:as:11:39:00:as113900:001a/full/pct:50/0/default.jpg#h=1552&w=1141",
+        "https://tile.loc.gov/image-services/iiif/service:rbc:amss:as:11:39:00:as113900:001a/full/pct:100/0/default.jpg#h=3105&w=2282"
+      ],
+      "index": 2,
+      "language": [
+        "english"
+      ],
+      "mime_type": [
+        "image/tiff",
+        "image/jpeg",
+        "image/jp2"
+      ],
+      "online_format": [
+        "image"
+      ],
+      "original_format": [
+        "book"
+      ],
+      "partof": [
+        "rare book and special collections division",
+        "american song sheets: series 1 volume 9",
+        "america singing: nineteenth-century song sheets",
+        "the library of congress celebrates the songs of america",
+        "american song sheets"
+      ],
+      "resources": [
+        {
+          "files": 1,
+          "image": "https://tile.loc.gov/image-services/iiif/service:rbc:amss:as:11:39:00:as113900:001a/full/pct:12.5/0/default.jpg",
+          "url": "https://www.loc.gov/resource/amss.as113900/"
+        }
+      ],
+      "shelf_id": "series: Series 1 Volume 9",
+      "subject": [
+        "musical scores"
+      ],
+      "timestamp": "2023-09-29T20:25:52.482Z",
+      "title": "The Trafalgar of Woolwich. Launched June 21st. 1841. Tune Battle of Algiers. Sharp, Printer, 30, Kent Street Borough, London. [1841]",
+      "type": [
+        "text"
+      ],
+      "url": "https://www.loc.gov/item/amss-as113900/"
+    }
+  ]
+}

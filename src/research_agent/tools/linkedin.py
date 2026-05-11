@@ -41,6 +41,10 @@ import httpx
 
 from research_agent import config
 from research_agent.tools._errors import MissingCredentialError
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -891,4 +895,29 @@ def reset_for_tests() -> None:
     _rate_lock = asyncio.Lock()
 
 
-__all__ = ["fetch", "reset_for_tests", "search"]
+KIND = "linkedin_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    kind: str | None = None
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=("linkedin.com", "www.linkedin.com"),
+    skill_name=None,
+    description=(
+        "LinkedIn person/company lookup via Proxycurl or Lix — requires"
+        " broker key"
+    ),
+    optional_payload_knobs="`kind: person\\|company`",
+    example_query="Sundar Pichai",
+    module_name="linkedin",
+)
+
+
+__all__ = ["KIND", "fetch", "reset_for_tests", "search"]

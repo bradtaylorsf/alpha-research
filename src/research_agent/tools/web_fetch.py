@@ -373,6 +373,60 @@ _BBB_HOSTS = frozenset({"www.bbb.org", "bbb.org"})
 _OPENCORPORATES_HOSTS = frozenset(
     {"opencorporates.com", "www.opencorporates.com"}
 )
+_LOC_HOSTS = frozenset({"www.loc.gov"})
+_NARA_HOSTS = frozenset({"catalog.archives.gov"})
+_GALLICA_HOSTS = frozenset({"gallica.bnf.fr"})
+_EUROPEANA_HOSTS = frozenset(
+    {"api.europeana.eu", "europeana.eu", "www.europeana.eu"}
+)
+_COMMONS_HOSTS = frozenset({"commons.wikimedia.org", "upload.wikimedia.org"})
+_WIKIDATA_HOSTS = frozenset({"www.wikidata.org", "wikidata.org"})
+_OPENALEX_HOSTS = frozenset({"openalex.org", "www.openalex.org", "api.openalex.org"})
+_OPENALEX_DOI_HOSTS = frozenset({"doi.org", "dx.doi.org"})
+_PERSEE_HOSTS = frozenset({"www.persee.fr", "persee.fr"})
+_BNE_HOSTS = frozenset(
+    {
+        "hemerotecadigital.bne.es",
+        "www.hemerotecadigital.bne.es",
+        "bnedigital.bne.es",
+        "www.bnedigital.bne.es",
+    }
+)
+_TROVE_HOSTS = frozenset(
+    {
+        "trove.nla.gov.au",
+        "www.trove.nla.gov.au",
+        "api.trove.nla.gov.au",
+        "nla.gov.au",
+        "www.nla.gov.au",
+    }
+)
+_UKNA_HOSTS = frozenset({"discovery.nationalarchives.gov.uk"})
+# ``archive.org`` is a multi-tenant host (details/, download/, web/, …).
+# Only the ``/details/<identifier>`` path is owned by the iarchive
+# connector — leave web.archive.org Wayback URLs and bare downloads on the
+# generic httpx + trafilatura path.
+_IARCHIVE_HOSTS = frozenset({"archive.org", "www.archive.org"})
+_IWM_HOSTS = frozenset({"iwm.org.uk", "www.iwm.org.uk"})
+_WIKISOURCE_HOSTS = frozenset(
+    {
+        "ar.wikisource.org",
+        "de.wikisource.org",
+        "en.wikisource.org",
+        "es.wikisource.org",
+        "fr.wikisource.org",
+        "it.wikisource.org",
+        "ja.wikisource.org",
+        "nl.wikisource.org",
+        "pt.wikisource.org",
+        "ru.wikisource.org",
+        "zh.wikisource.org",
+    }
+)
+_HATHITRUST_HOSTS = frozenset({"catalog.hathitrust.org", "hdl.handle.net"})
+_OPENLIBRARY_HOSTS = frozenset({"openlibrary.org", "www.openlibrary.org"})
+_SMITHSONIAN_HOSTS = frozenset({"api.si.edu", "si.edu", "www.si.edu", "3d.si.edu"})
+_CSPAN_HOSTS = frozenset({"c-span.org", "www.c-span.org", "cspan.org", "www.cspan.org"})
 
 _PDF_CONTENT_TYPE = "application/pdf"
 
@@ -575,6 +629,12 @@ async def fetch(
     """
     if not url or not urlparse(url).netloc:
         return None
+    netloc = urlparse(url).netloc.lower().split(":", 1)[0]
+
+    if netloc in _COMMONS_HOSTS:
+        from research_agent.tools import commons
+
+        return await commons.fetch(url)
 
     # Binary URL shortcuts run BEFORE connector dispatch: a `.pdf` on
     # ``sec.gov`` (EDGAR exhibits, 10-K appendices, …) must go through the
@@ -598,7 +658,6 @@ async def fetch(
             _spawn_archive_task(source)
         return source
 
-    netloc = urlparse(url).netloc.lower().split(":", 1)[0]
     if netloc in _REDDIT_HOSTS:
         from research_agent.tools import reddit
 
@@ -693,6 +752,93 @@ async def fetch(
         from research_agent.tools import opencorporates
 
         return await opencorporates.fetch(url)
+
+    if netloc in _LOC_HOSTS:
+        from research_agent.tools import loc
+
+        return await loc.fetch(url)
+
+    if netloc in _NARA_HOSTS:
+        from research_agent.tools import nara
+
+        return await nara.fetch(url)
+
+    if netloc in _GALLICA_HOSTS:
+        from research_agent.tools import gallica
+
+        return await gallica.fetch(url)
+
+    if netloc in _EUROPEANA_HOSTS:
+        from research_agent.tools import europeana
+
+        return await europeana.fetch(url)
+
+    if netloc in _WIKIDATA_HOSTS:
+        from research_agent.tools import wikidata
+
+        return await wikidata.fetch(url)
+
+    if netloc in _OPENALEX_HOSTS or netloc in _OPENALEX_DOI_HOSTS:
+        from research_agent.tools import openalex
+
+        return await openalex.fetch(url)
+
+    if netloc in _PERSEE_HOSTS:
+        from research_agent.tools import persee
+
+        return await persee.fetch(url)
+
+    if netloc in _BNE_HOSTS:
+        from research_agent.tools import bne
+
+        return await bne.fetch(url)
+
+    if netloc in _TROVE_HOSTS:
+        from research_agent.tools import trove
+
+        return await trove.fetch(url)
+
+    if netloc in _UKNA_HOSTS:
+        from research_agent.tools import ukna
+
+        return await ukna.fetch(url)
+
+    if netloc in _IARCHIVE_HOSTS and urlparse(url).path.startswith("/details/"):
+        from research_agent.tools import iarchive
+
+        return await iarchive.fetch(url)
+
+    if netloc in _IWM_HOSTS and urlparse(url).path.startswith(
+        "/collections/item/object/"
+    ):
+        from research_agent.tools import iwm
+
+        return await iwm.fetch(url)
+
+    if netloc in _WIKISOURCE_HOSTS:
+        from research_agent.tools import wikisource
+
+        return await wikisource.fetch(url)
+
+    if netloc in _HATHITRUST_HOSTS:
+        from research_agent.tools import hathitrust
+
+        return await hathitrust.fetch(url)
+
+    if netloc in _OPENLIBRARY_HOSTS:
+        from research_agent.tools import openlibrary
+
+        return await openlibrary.fetch(url)
+
+    if netloc in _SMITHSONIAN_HOSTS:
+        from research_agent.tools import smithsonian
+
+        return await smithsonian.fetch(url)
+
+    if netloc in _CSPAN_HOSTS:
+        from research_agent.tools import cspan
+
+        return await cspan.fetch(url)
 
     user_agent = _resolve_user_agent()
 

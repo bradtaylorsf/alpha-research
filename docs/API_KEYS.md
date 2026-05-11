@@ -32,6 +32,7 @@ use it across multiple connectors.
 |---|---|---|---|---|
 | FEC OpenFEC | #94 | `DATA_GOV_API_KEY` | <https://api.data.gov/signup/> | 1,000 req/hr |
 | Congress.gov | #99 | `DATA_GOV_API_KEY` | (same key as above) | 5,000 req/hr |
+| Smithsonian Open Access | #227 | `DATA_GOV_API_KEY` | (same key as above) | api.data.gov tier; connector gates at 1 RPS |
 | Regulations.gov | (future) | `DATA_GOV_API_KEY` | (same key) | varies |
 
 Connector-specific free keys (separate signups):
@@ -42,6 +43,11 @@ Connector-specific free keys (separate signups):
 | Senate LDA | #103 | `LDA_API_KEY` (optional — anonymous works at lower rate) | <https://lda.senate.gov/api/register/> | Anonymous tier sufficient for most use; key just raises the rate |
 | YouTube Data API v3 (search) | #111 | `YOUTUBE_API_KEY` | <https://console.cloud.google.com/apis/credentials> → enable "YouTube Data API v3" | Free tier: 10,000 quota units/day |
 | OpenCorporates | #92 | `OPENCORPORATES_API_KEY` | <https://opencorporates.com/info/about> (request public-benefit access) | Anonymous v0.4 access is gated (HTTP 401 as of 2026-05); a key is required for any live request. Without one, the connector returns no results and smoke skips cleanly. Commercial pricing £2,250–£12,000/yr |
+| OpenAlex Works | #241 | `OPENALEX_API_KEY` (optional for low-volume smoke/demos) | <https://openalex.org/settings/api> | Free key. OpenAlex's February 2026 policy expects a key for regular API use; the connector sends it as `?api_key=<key>` and still permits unauthenticated low-volume smoke requests |
+| Trove / National Library of Australia | #230 | `TROVE_API_KEY` | <https://trove.nla.gov.au/about/create-something/using-api> (request through Trove account API form) | Free key required. Keys expire after 12 months and require the renewal email loop. Send as `X-API-KEY`, not a URL parameter. Use metadata-only by default; NLA has reportedly cancelled keys without warning for full-text downloading workflows. |
+| National Archives Catalog OPA v2 | #226 | `NARA_API_KEY` | Email `Catalog_API@nara.gov` with your name and email address | Free key required for production use; registration takes about 24h. Send as `x-api-key`. Default limit is 10,000 queries/month per key, so the connector enforces 0.5 RPS and the smoke skips cleanly when unset. |
+| Digital Public Library of America | #228 | `DPLA_API_KEY` | `curl -X POST https://api.dp.la/v2/api_key/<your-email>` | Free key required. Registration is an HTTP POST, not a web form; the 32-character key is delivered by email and rides as `?api_key=<key>` on requests. The connector enforces 1 RPS and the smoke skips cleanly when unset. |
+| Europeana | #229 | `EUROPEANA_API_KEY` | Europeana account → Manage API keys | Free key required. Registration moved into the Europeana account section on 2025-05-28. The connector sends the key as `?wskey=<key>` to `https://api.europeana.eu/api/v2/search.json`, not as `api_key`, and enforces 1 RPS. Smoke skips cleanly when unset. |
 
 ---
 

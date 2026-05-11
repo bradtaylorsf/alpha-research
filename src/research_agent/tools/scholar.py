@@ -35,6 +35,10 @@ import trafilatura
 from research_agent import config
 from research_agent.tools import pdf as pdf_tool
 from research_agent.tools._errors import MissingCredentialError
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -426,4 +430,26 @@ def reset_for_tests() -> None:
     _rate_lock = asyncio.Lock()
 
 
-__all__ = ["fetch", "reset_for_tests", "search"]
+KIND = "scholar_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    kind: str | None = None
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=("scholar.google.com",),
+    skill_name=None,
+    description="Google Scholar via SerpAPI — requires `SERPAPI_KEY`",
+    optional_payload_knobs="`kind: case_law\\|articles`",
+    example_query="Section 230 appellate",
+    module_name="scholar",
+)
+
+
+__all__ = ["KIND", "fetch", "reset_for_tests", "search"]

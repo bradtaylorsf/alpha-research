@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<srw:searchRetrieveResponse
+  xmlns:srw="http://www.loc.gov/zing/srw/"
+  xmlns:oai_dc="http://www.openarchives.org/OAI/2.0/oai_dc/"
+  xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <srw:version>1.2</srw:version>
+  <srw:numberOfRecords>2</srw:numberOfRecords>
+  <srw:records>
+    <srw:record>
+      <srw:recordSchema>info:srw/schema/1/dc-v1.1</srw:recordSchema>
+      <srw:recordPacking>xml</srw:recordPacking>
+      <srw:recordData>
+        <oai_dc:dc>
+          <dc:title>La guerre d'Algerie dans la presse francaise</dc:title>
+          <dc:creator>Bibliotheque nationale de France</dc:creator>
+          <dc:description>Articles et documents contemporains sur la guerre d'Algerie.</dc:description>
+          <dc:identifier>ark:/12148/bpt6k1234567</dc:identifier>
+          <dc:identifier>https://gallica.bnf.fr/ark:/12148/bpt6k1234567</dc:identifier>
+          <dc:type>texte</dc:type>
+          <dc:date>1956</dc:date>
+          <dc:language>fre</dc:language>
+          <dc:source>Bibliotheque nationale de France</dc:source>
+        </oai_dc:dc>
+      </srw:recordData>
+    </srw:record>
+    <srw:record>
+      <srw:recordSchema>info:srw/schema/1/dc-v1.1</srw:recordSchema>
+      <srw:recordPacking>xml</srw:recordPacking>
+      <srw:recordData>
+        <oai_dc:dc>
+          <dc:title>Algerie 1961: chroniques et temoignages</dc:title>
+          <dc:description>Chroniques publiees pendant la guerre d'Algerie.</dc:description>
+          <dc:identifier>https://gallica.bnf.fr/ark:/12148/bpt6k7654321</dc:identifier>
+          <dc:type>fascicule</dc:type>
+          <dc:date>1961-04-23</dc:date>
+          <dc:language>fre</dc:language>
+          <dc:source>Gallica</dc:source>
+        </oai_dc:dc>
+      </srw:recordData>
+    </srw:record>
+  </srw:records>
+</srw:searchRetrieveResponse>

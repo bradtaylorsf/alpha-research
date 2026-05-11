@@ -34,6 +34,10 @@ from urllib.parse import urlparse
 import playwright.async_api
 
 from research_agent.tools import browser
+from research_agent.tools._registry import (
+    BaseSearchPayload as _BaseSearchPayload,
+    register_kind as _register_kind,
+)
 from research_agent.tools.models import SearchResult, Source
 
 logger = logging.getLogger(__name__)
@@ -665,4 +669,34 @@ def reset_for_tests() -> None:
     _register_host_rates()
 
 
-__all__ = ["SearchStatus", "fetch", "reset_for_tests", "search"]
+KIND = "licensing_search"
+
+
+class _PayloadSchema(_BaseSearchPayload):
+    state: str | None = None
+    max_results: int | None = None
+
+
+_register_kind(
+    KIND,
+    payload_schema=_PayloadSchema,
+    search_fn=search,
+    fetch_fn=fetch,
+    host_patterns=(
+        "www.cslb.ca.gov",
+        "www.tdlr.texas.gov",
+        "www.myfloridalicense.com",
+        "www.dos.ny.gov",
+    ),
+    skill_name=None,
+    description=(
+        "State contractor / licensing-board lookups (Playwright; CA wired,"
+        " others stubs)"
+    ),
+    optional_payload_knobs="`state: CA\\|TX\\|FL\\|NY`",
+    example_query="SBI Builders",
+    module_name="licensing",
+)
+
+
+__all__ = ["KIND", "SearchStatus", "fetch", "reset_for_tests", "search"]

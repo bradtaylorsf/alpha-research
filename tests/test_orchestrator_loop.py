@@ -534,10 +534,13 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "edgar",
     "courtlistener",
     "fedregister",
+    "gallica",
     "lda",
     "usaspending",
     "gdelt",
     "littlesis",
+    "loc",
+    "nara",
     "nonprofits",
     "opencorporates",
     "sanctions",
@@ -547,12 +550,43 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "calaccess",
     "scholar",
     "linkedin",
+    "commons",
+    "cspan",
+    "dpla",
+    "europeana",
+    "iarchive",
+    "iwm",
+    "trove",
+    "ukna",
+    "wikidata",
+    "wikisource",
+    "openalex",
+    "openlibrary",
+    "persee",
+    "si",
+    "bne",
 )
 
 # Connector module name → ``source_kind`` Literal value. Most connectors
 # match by name; ``edgar`` is the SEC connector so its source_kind is "sec".
 _CONNECTOR_SOURCE_KIND: dict[str, str] = {p: p for p in CONNECTOR_KIND_PREFIXES}
 _CONNECTOR_SOURCE_KIND["edgar"] = "sec"
+_CONNECTOR_SOURCE_KIND["gallica"] = "gallica_search"
+_CONNECTOR_SOURCE_KIND["nara"] = "nara_search"
+_CONNECTOR_SOURCE_KIND["trove"] = "trove_search"
+_CONNECTOR_SOURCE_KIND["ukna"] = "ukna_search"
+_CONNECTOR_SOURCE_KIND["wikidata"] = "wikidata_search"
+_CONNECTOR_SOURCE_KIND["commons"] = "commons_search"
+_CONNECTOR_SOURCE_KIND["cspan"] = "cspan_search"
+_CONNECTOR_SOURCE_KIND["dpla"] = "dpla_search"
+_CONNECTOR_SOURCE_KIND["europeana"] = "europeana_search"
+_CONNECTOR_SOURCE_KIND["iwm"] = "iwm_search"
+_CONNECTOR_SOURCE_KIND["wikisource"] = "wikisource_search"
+_CONNECTOR_SOURCE_KIND["openalex"] = "openalex_search"
+_CONNECTOR_SOURCE_KIND["openlibrary"] = "openlibrary_search"
+_CONNECTOR_SOURCE_KIND["persee"] = "persee_search"
+_CONNECTOR_SOURCE_KIND["si"] = "si_search"
+_CONNECTOR_SOURCE_KIND["bne"] = "bne_search"
 
 
 def test_default_handlers_covers_every_task_kind() -> None:
@@ -577,6 +611,66 @@ def test_default_handlers_covers_every_task_kind() -> None:
         expected.add(f"{prefix}_search")
         expected.add(f"{prefix}_fetch")
     assert set(handlers.keys()) == expected
+
+
+@pytest.mark.asyncio
+async def test_web_search_handler_passes_lang_payload_to_tool(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_agent.tools import web_search
+
+    captured: dict[str, Any] = {}
+
+    async def fake_search(
+        query: str,
+        max_results: int = 10,
+        engine: str = "auto",
+        *,
+        lang: str | None = None,
+    ) -> list[SearchResult]:
+        captured.update(
+            {
+                "query": query,
+                "max_results": max_results,
+                "engine": engine,
+                "lang": lang,
+            }
+        )
+        return [
+            SearchResult(
+                url="https://example.test/fr",
+                title="French archive hit",
+                snippet="Archive source",
+                source_kind="web",
+            )
+        ]
+
+    monkeypatch.setattr(web_search, "search", fake_search)
+
+    handler = default_handlers(router=None)["web_search"]
+    out = await handler(
+        job,
+        {
+            "kind": "web_search",
+            "payload": {
+                "query": "guerre d'Algerie",
+                "sub_question": "Find French-language archival sources",
+                "max_results": 3,
+                "engine": "auto",
+                "lang": "fr",
+            },
+        },
+    )
+
+    assert captured == {
+        "query": "guerre d'Algerie",
+        "max_results": 3,
+        "engine": "auto",
+        "lang": "fr",
+    }
+    assert len(out["results"]) == 1
+    assert out["follow_up_tasks"][0]["payload"]["url"] == "https://example.test/fr"
 
 
 @pytest.mark.asyncio
@@ -1080,6 +1174,44 @@ async def test_connector_search_handler_drops_kwargs_connector_does_not_accept(
     }
     assert isinstance(out, dict)
     assert out["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_loc_search_handler_passes_collection_and_page_through(
+    job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loc connector's ``collection`` and ``page`` knobs must reach
+    ``loc.search`` from a planner-emitted payload — without them the
+    Chronicling America OCR routing path is dead end-to-end.
+    """
+    from research_agent.tools import loc
+
+    captured: dict[str, Any] = {}
+
+    async def fake_search(query: str, **kwargs: Any) -> list[SearchResult]:
+        captured["query"] = query
+        captured["kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(loc, "search", fake_search)
+
+    handler = default_handlers(router=None)["loc_search"]
+    await handler(
+        job,
+        {
+            "kind": "loc_search",
+            "payload": {
+                "query": "pullman strike",
+                "collection": "chronicling-america",
+                "page": 2,
+                "max_results": 5,
+            },
+        },
+    )
+    assert captured["query"] == "pullman strike"
+    assert captured["kwargs"].get("collection") == "chronicling-america"
+    assert captured["kwargs"].get("page") == 2
+    assert captured["kwargs"].get("max_results") == 5
 
 
 @pytest.mark.asyncio

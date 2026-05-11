@@ -73,6 +73,57 @@ Blue = local LM Studio tiers (free at the wallet). Orange = OpenRouter
 cloud tiers (priced — see [Costs](#costs)). The full tier roster lives in
 [`config/models.yaml`](config/models.yaml).
 
+## Direct connector kinds
+
+The planner can dispatch directly to any of the connectors below instead
+of falling back to `web_search` with a `site:` operator. Each row here
+mirrors what the planner sees in its system prompt — same description,
+same optional payload knobs, same example query. The table is generated
+from `src/research_agent/tools/_registry.py` via
+`scripts/regen_readme_kinds.py`; do not hand-edit between the sentinels.
+
+<!-- BEGIN: direct-connector-kinds (auto-generated) -->
+
+| Kind | What it covers | Optional payload knobs | Example query |
+|---|---|---|---|
+| `bbb_search` | Better Business Bureau profiles + ratings (Playwright, no auth) | — | `SBI Builders` |
+| `bne_search` | BNE Hemeroteca Digital Spanish historical press (Playwright scrape, no auth) | `max_results`, `fechaDesde`, `fechaHasta`, `localizacion` | `guerra civil 1936` |
+| `calaccess_search` | California Cal-Access campaign finance (Playwright) | `kind: contributions\|independent_expenditures` | `Newsom` |
+| `commons_search` | Wikimedia Commons free media files with imageinfo license, author, MIME type, original URL, and thumbnail metadata | `max_results` | `Algerian war photographs` |
+| `congress_search` | Bills, members, committees, hearings, congressional record (Congress.gov v3 API) | `kind: bill\|member\|committee\|hearing\|congressional-record` | `Inflation Reduction Act` |
+| `courtlistener_search` | Federal & state court opinions, dockets (RECAP), oral arguments — requires `COURTLISTENER_API_TOKEN` | `kind: opinions\|dockets\|oral_arguments` | `Schedule F appellate` |
+| `cspan_search` | C-SPAN Video Library US political broadcast video with transcripts (Playwright scrape, no auth) | `max_results`, `type=House\|Senate` | `Project 2025` |
+| `dpla_search` | Digital Public Library of America item metadata across US cultural institutions; requires DPLA_API_KEY | `max_results`, `provider` | `Maya land claims` |
+| `edgar_search` | SEC filings (10-K, 10-Q, 8-K, Form 4) — requires `RESEARCH_USER_AGENT` w/ contact email | `form_type: 10-K\|8-K\|...` | `Cisco cybersecurity` |
+| `europeana_search` | Europeana multilingual European cultural-heritage item metadata across museums, libraries, and archives; requires EUROPEANA_API_KEY | `max_results`, `lang` | `Algerian war 1954` |
+| `fec_search` | Candidates, committees, schedule A/E filings (OpenFEC) | `kind: candidates\|committees\|schedules/schedule_a\|schedules/schedule_e` | `Trump 2024 committee` |
+| `fedregister_search` | Federal Register rules, proposed rules, agency notices since 1994 (no auth) | `since: YYYY-MM-DD`, `agencies: [...]` | `Schedule F` |
+| `gallica_search` | Gallica/BnF SRU XML search for French national-library newspapers, books, manuscripts, maps, and other digitized primary sources | `max_results` (SRU maximumRecords capped at 50) | `guerre d'Algerie` |
+| `gdelt_search` | GDELT — Global news event aggregator, no `site:` operator (no auth) | `since: YYYY-MM-DD`, `language: english` | `Project 2025 mainstream coverage` |
+| `iarchive_search` | Internet Archive texts, audio, movies, and web-archive collection metadata through advancedsearch.php | `mediatype: texts\|audio\|movies\|web`, `page: <int>` | `Pullman Strike` |
+| `lda_search` | Senate Lobbying Disclosure Act filings (registrants, contributions) | `kind: filings\|registrants\|contributions` | `Heritage Foundation` |
+| `licensing_search` | State contractor / licensing-board lookups (Playwright; CA wired, others stubs) | `state: CA\|TX\|FL\|NY` | `SBI Builders` |
+| `linkedin_search` | LinkedIn person/company lookup via Proxycurl or Lix — requires broker key | `kind: person\|company` | `Sundar Pichai` |
+| `littlesis_search` | Power-mapping database — entities, donations, board seats, family ties (lead, not evidence) | `kind: entities\|relationships` | `Peter Thiel` |
+| `loc_search` | Library of Congress digital collections, including Chronicling America through the unified loc.gov API | `collection: chronicling-america\|prints\|manuscripts\|recordings\|maps`, `page: <int>` | `battle of algiers` |
+| `nara_search` | US National Archives Catalog OPA v2 records, declassified federal records, military records, photos; requires NARA_API_KEY | `available_online`, `type_of_materials`, `result_types`, `record_group`, `page` | `Vietnam War declassified` |
+| `nonprofits_search` | ProPublica Nonprofit Explorer (Form 990 filings, no auth) | — | `Heritage Foundation` |
+| `openalex_search` | OpenAlex Works scholarly articles, abstracts, DOIs, citations, authors, venues, and open-access URLs | `max_results`, `filter`, `sort` | `Project 2025 unitary executive theory` |
+| `opencorporates_search` | Global company registry — requires `OPENCORPORATES_API_KEY` | `jurisdiction: us_ca\|gb\|...` | `Acme Holdings` |
+| `openlibrary_search` | Open Library book metadata, ISBN/OCLC/LCCN identifiers, and Internet Archive scan IDs through search.json | `max_results` | `Pullman Strike 1894` |
+| `persee_search` | Persee French academic journals in humanities and social sciences (Playwright scrape, no auth) | `max_results` | `guerre d'Algerie` |
+| `sanctions_search` | OFAC SDN + UK sanctions lists (local index, no auth) | — | `Wagner Group` |
+| `scholar_search` | Google Scholar via SerpAPI — requires `SERPAPI_KEY` | `kind: case_law\|articles` | `Section 230 appellate` |
+| `si_search` | Smithsonian Open Access digitized collection objects, museum artifacts, images, 3D assets, and object metadata via api.data.gov | `max_results` | `Apollo 11` |
+| `sos_search` | State Secretary-of-State business entity filings (Playwright; CA wired, others stubs) | `state: CA\|DE\|NV\|...` | `Acme Corp` |
+| `trove_search` | Trove / National Library of Australia metadata for newspapers, books, photos, magazines, oral histories; metadata-only default | `category`, `zone`, `sortby` | `White Australia Policy 1901` |
+| `ukna_search` | UK National Archives Discovery catalogue metadata for Foreign Office, War Office, Colonial Office, and other UK archival records (no auth) | `max_results`, `page` | `Mau Mau Kenya` |
+| `usaspending_search` | Federal contracts, grants, loans (award-level detail, no auth) | `award_type: contracts\|grants\|loans` | `Heritage Foundation contract` |
+| `wikidata_search` | Wikidata Query Service raw SPARQL for biographical, relational, occupational, place, and entity-ID data | `max_results` (client-side truncation; SPARQL should include `LIMIT`) | `SELECT ?item ?itemLabel WHERE { ?item wdt:P31 wd:Q5; wdt:P19 wd:Q90 . SERVICE wikibase:label { bd:serviceParam wikibase:language "en". } } LIMIT 3` |
+| `wikisource_search` | Wikisource transcribed primary documents across per-language hosts; fetch returns the full source text in cleaned_text | `lang: en|fr|es|de|it|pt|nl|ru|zh|ja|ar`, `max_results` | `Treaty of Versailles` |
+
+<!-- END: direct-connector-kinds -->
+
 ## What does the output actually look like?
 
 Every job ends with a `jobs/<job-id>/report.md` — markdown with inline
@@ -188,9 +239,14 @@ that list, so there is no drift.
 | `RESEARCH_OCR_VLM_ESCALATION` | no | Set to `1` to enable Opus 4.7 vision escalation for image OCR when Tesseract and the local VLM both fail. Off by default — costs real money; emits an `ocr_vlm_escalation` WARN event when fired. |
 | `RESEARCH_DAEMON_PROGRESS` | no | Set to `0` to suppress the foreground Rich progress bar the daemon writes to stdout when run interactively. |
 | `COURTLISTENER_API_TOKEN` | no | CourtListener API token (free w/ signup) — required by `tools/courtlistener.py`. Authenticated tier is 5,000 req/hr; anonymous traffic is throttled to the point of unusability. |
-| `DATA_GOV_API_KEY` | no | api.data.gov key (free w/ signup at <https://api.data.gov/signup/>) — used by `tools/fec.py` (OpenFEC). Authenticated tier is 1,000 req/hr; falls back to `DEMO_KEY` (~40 req/hr per IP) when unset. |
+| `DATA_GOV_API_KEY` | no | api.data.gov key (free w/ signup at <https://api.data.gov/signup/>) — used by `tools/fec.py`, `tools/congress.py`, and `tools/smithsonian.py`. FEC/Congress/Smithsonian fall back to `DEMO_KEY` for low-volume smoke when unset. |
 | `LDA_API_KEY` | no | Senate Lobbying Disclosure Act API key (free, optional, register at <https://lda.senate.gov/api/register/>) — used by `tools/lda.py`. Anonymous works for low-volume; authenticated raises rate limits. Sent via `Authorization: Token <key>`. |
 | `OPENCORPORATES_API_KEY` | no | OpenCorporates API token — used by `tools/opencorporates.py`. **Required for any live request:** anonymous v0.4 access is now gated (returns HTTP 401), so without a key the connector returns no results and smoke skips cleanly. Token rides as `?api_token=<key>`. Public-benefit access by emailing service desk; commercial pricing £2,250–£12,000/yr. |
+| `OPENALEX_API_KEY` | no | Free OpenAlex API key — used by `tools/openalex.py`. Optional for low-volume smoke/demos; recommended for regular use since the February 2026 free-key policy. Sent as `?api_key=<key>`. |
+| `TROVE_API_KEY` | no | Trove/National Library of Australia API key — used by `tools/trove.py`. Keys expire after 12 months and require renewal by email. Sent as `X-API-KEY`, not a URL parameter. Connector defaults to metadata-only; no automatic full-text downloads. |
+| `NARA_API_KEY` | no | National Archives Catalog OPA v2 API key — used by `tools/nara.py`. Request by emailing `Catalog_API@nara.gov`; registration takes about 24h. Sent as `x-api-key`. Default limit is 10,000 queries/month; connector and smoke skip cleanly when unset. |
+| `DPLA_API_KEY` | no | Digital Public Library of America API key — used by `tools/dpla.py`. Request with `curl -X POST https://api.dp.la/v2/api_key/<your-email>`; the emailed 32-character key is sent as `?api_key=<key>`. Connector and smoke skip cleanly when unset. |
+| `EUROPEANA_API_KEY` | no | Europeana API key — used by `tools/europeana.py`. Create a free key in your Europeana account under Manage API keys (migrated there on 2025-05-28). Sent as `?wskey=<key>` to `https://api.europeana.eu/api/v2/search.json`; connector enforces 1 RPS and smoke skips cleanly when unset. |
 | `SERPAPI_KEY` | no | SERPAPI key — required by `tools/scholar.py` (Google Scholar engine, case law + academic). Plans start at $75/mo for 5k searches across all engines; per-query ≈ $0.015. Sign up at <https://serpapi.com/>. |
 | `LINKEDIN_DATA_API_KEY` | no | LinkedIn data-broker key (default broker: Proxycurl) — required by `tools/linkedin.py`. Per-lookup ≈ $0.01–$0.05; gate fetches behind explicit planner tasks. Sign up at <https://nubela.co/proxycurl/>. |
 | `LINKEDIN_BROKER` | no | Broker recipe used by `tools/linkedin.py`. `proxycurl` (default) or `lix`; switching to `lix` consults `LIX_API_KEY` instead of `LINKEDIN_DATA_API_KEY`. |
@@ -371,7 +427,8 @@ Lockfiles (`uv.lock`) are committed.
 
 ```bash
 research start --skip-intake --goal "<goal>" \
-    [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes] [--disk-cap-gb 10]
+    [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes] \
+    [--disk-cap-gb 10] [--translate-non-english]
 
 research list                      # newest first; Rich on a TTY, JSON otherwise
 research list --json
@@ -418,6 +475,14 @@ DB row, and spawns a detached daemon via
 `subprocess.Popen(start_new_session=True)`. The PID is written atomically
 to `jobs/<id>/daemon.pid`; the daemon's stdout/stderr land in
 `jobs/<id>/daemon.{out,err}.log`.
+
+`--translate-non-english` is off by default. When enabled, extracted
+findings whose source metadata is non-English get a
+`findings/NNNNNN.translation.md` English mirror via `frontier_speed`; the
+original finding remains unchanged. Plan YAML can also opt in per task
+with `payload.translate_non_english: true`. See
+[`docs/CONFIG.md`](docs/CONFIG.md) for the per-job knob and budget
+behavior.
 
 `research search` defaults to a hybrid pass: FTS5 on `findings_fts` /
 `sources_fts` plus semantic cosine over `embeddings` blobs, deduped and
@@ -696,6 +761,8 @@ research _smoke-tool web_search "alpha research project"
 research _smoke-tool web_fetch "https://example.com/article"
 research _smoke-tool arxiv "transformer interpretability"
 research _smoke-tool news "federal reserve"
+research _smoke-tool trove_search "White Australia Policy"
+research _smoke-tool commons_search "Algerian war photographs"
 ```
 
 `web_fetch` prints the resolved title, the path that served the fetch
