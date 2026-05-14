@@ -122,7 +122,7 @@ async def test_search_empty_payload_returns_empty(monkeypatch: pytest.MonkeyPatc
 async def test_user_agent_header_includes_configured_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("RESEARCH_USER_AGENT", "alpha-research test ua")
+    monkeypatch.setenv("RESEARCH_USER_AGENT", "muckwire test ua")
 
     def _respond(url, params):
         return _FakeResp(200, _fixture("search_empty.json"))
@@ -131,7 +131,7 @@ async def test_user_agent_header_includes_configured_value(
 
     await openlibrary.search("Pullman Strike", max_results=1)
 
-    assert captured["headers"][0]["User-Agent"] == "alpha-research test ua"
+    assert captured["headers"][0]["User-Agent"] == "muckwire test ua"
 
 
 async def test_rate_limit_gate_sleeps_to_enforce_three_rps(

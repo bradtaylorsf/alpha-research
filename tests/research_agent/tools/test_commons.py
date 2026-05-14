@@ -114,7 +114,7 @@ async def test_search_happy_path_enriches_license_metadata(
     assert headers["Accept"] == "application/json"
     assert headers["User-Agent"] == (
         "research-agent/0.1 "
-        "(+https://github.com/bradtaylorsf/alpha-research; "
+        "(+https://github.com/bradtaylorsf/muckwire; "
         "contact: operator@example.test)"
     )
 

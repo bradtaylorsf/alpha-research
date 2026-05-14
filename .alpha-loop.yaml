@@ -1,5 +1,5 @@
 # Alpha Loop configuration
-repo: bradtaylorsf/alpha-research
+repo: bradtaylorsf/muckwire
 project: 0  # GitHub Project number (find it in your project URL)
 agent: codex  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
 # model:       # AI model (omit to use agent's default, e.g., opus, gpt-5.4)

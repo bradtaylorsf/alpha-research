@@ -108,7 +108,7 @@ async def test_search_happy_path_raw_sparql(monkeypatch: pytest.MonkeyPatch):
     assert headers["Accept"] == "application/sparql-results+json"
     assert headers["User-Agent"] == (
         "research-agent/0.1 "
-        "(+https://github.com/bradtaylorsf/alpha-research; "
+        "(+https://github.com/bradtaylorsf/muckwire; "
         "contact: operator@example.test)"
     )
 

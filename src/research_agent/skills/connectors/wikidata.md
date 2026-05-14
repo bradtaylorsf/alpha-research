@@ -107,6 +107,6 @@ time over a rolling 60-second window as a CPU-time proxy and backs off before it
 submits more SPARQL.
 
 Wikimedia requires a descriptive project-identifying User-Agent. This connector
-sends `research-agent/0.1 (+https://github.com/bradtaylorsf/alpha-research; contact: ...)`
+sends `research-agent/0.1 (+https://github.com/bradtaylorsf/muckwire; contact: ...)`
 and honors HTTP 429 `Retry-After`. Policy reference:
 https://meta.wikimedia.org/wiki/User-Agent_policy

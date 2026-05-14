@@ -24,7 +24,7 @@ def _reset_state(monkeypatch: pytest.MonkeyPatch):
     config.reset_for_tests()
     dpla.reset_for_tests()
     monkeypatch.setenv("DPLA_API_KEY", "1234567890abcdef1234567890abcdef")
-    monkeypatch.setenv("RESEARCH_USER_AGENT", "alpha-research tests")
+    monkeypatch.setenv("RESEARCH_USER_AGENT", "muckwire tests")
     monkeypatch.setattr(dpla.asyncio, "sleep", AsyncMock())
     yield
     dpla.reset_for_tests()
@@ -110,7 +110,7 @@ async def test_search_happy_path_populates_required_metadata(
 
     headers = captured["headers"][0]
     assert headers["Accept"] == "application/json"
-    assert headers["User-Agent"] == "alpha-research tests"
+    assert headers["User-Agent"] == "muckwire tests"
     params = captured["params"][0]
     assert params == {
         "api_key": "1234567890abcdef1234567890abcdef",
