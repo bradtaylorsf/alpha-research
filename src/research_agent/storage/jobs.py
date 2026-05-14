@@ -65,15 +65,10 @@ def _slugify(text: str, max_len: int = 60) -> str:
 
     Lowercases, collapses runs of non-alphanumeric characters into ``-``,
     strips leading/trailing dashes, truncates to ``max_len``. Raises
-    :class:`ValueError` if the input contains a path-traversal sequence
-    or normalizes to an empty string.
+    :class:`ValueError` if the input normalizes to an empty string.
     """
     if not isinstance(text, str):
         raise ValueError(f"slug input must be a string; got {type(text).__name__}")
-
-    for bad in _SLUG_FORBIDDEN:
-        if bad in text:
-            raise ValueError(f"slug input contains forbidden sequence {bad!r}: {text!r}")
 
     lowered = text.strip().lower()
     collapsed = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
@@ -83,6 +78,9 @@ def _slugify(text: str, max_len: int = 60) -> str:
     truncated = collapsed[:max_len].rstrip("-")
     if not truncated:
         raise ValueError(f"slug input collapsed to empty after truncation: {text!r}")
+    for bad in _SLUG_FORBIDDEN:
+        if bad in truncated:
+            raise ValueError(f"slug output contains forbidden sequence {bad!r}: {truncated!r}")
     return truncated
 
 

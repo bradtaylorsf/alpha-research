@@ -86,6 +86,11 @@ def test_slugify_truncation_strips_trailing_dash() -> None:
     assert not out.endswith("-")
 
 
+def test_slugify_normalizes_slashes() -> None:
+    assert _slugify("FEC/OpenFEC records") == "fec-openfec-records"
+    assert _slugify("foo\\bar") == "foo-bar"
+
+
 def test_slugify_rejects_empty() -> None:
     with pytest.raises(ValueError):
         _slugify("")
@@ -95,10 +100,10 @@ def test_slugify_rejects_empty() -> None:
         _slugify("!!!---!!!")
 
 
-@pytest.mark.parametrize("traversal", ["foo/bar", "foo\\bar", "../etc/passwd", ".."])
-def test_slugify_rejects_path_traversal(traversal: str) -> None:
+def test_slugify_normalizes_path_traversal_text() -> None:
+    assert _slugify("../etc/passwd") == "etc-passwd"
     with pytest.raises(ValueError):
-        _slugify(traversal)
+        _slugify("..")
 
 
 # ---------------------------------------------------------------------------
