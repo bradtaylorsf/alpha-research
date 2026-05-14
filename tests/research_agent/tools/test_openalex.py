@@ -194,7 +194,7 @@ async def test_fetch_accepts_api_and_doi_urls(monkeypatch: pytest.MonkeyPatch) -
 async def test_polite_pool_mailto_and_optional_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("RESEARCH_USER_AGENT", "alpha-research (mailto:ops@example.org)")
+    monkeypatch.setenv("RESEARCH_USER_AGENT", "muckwire (mailto:ops@example.org)")
     monkeypatch.setenv("OPENALEX_API_KEY", "oa_test_key")
 
     def _respond(url, params):
@@ -208,14 +208,14 @@ async def test_polite_pool_mailto_and_optional_api_key(
     assert params["mailto"] == "ops@example.org"
     assert params["api_key"] == "oa_test_key"
     assert captured["headers"][0]["User-Agent"] == (
-        "alpha-research (mailto:ops@example.org)"
+        "muckwire (mailto:ops@example.org)"
     )
 
 
 async def test_anonymous_requests_omit_mailto_and_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("RESEARCH_USER_AGENT", "alpha-research no contact")
+    monkeypatch.setenv("RESEARCH_USER_AGENT", "muckwire no contact")
 
     def _respond(url, params):
         return _FakeResp(200, {"results": []})
@@ -258,7 +258,7 @@ async def test_rate_limit_gate_uses_5_rps_when_identified(
 async def test_rate_limit_gate_uses_1_rps_without_identification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("RESEARCH_USER_AGENT", "alpha-research no contact")
+    monkeypatch.setenv("RESEARCH_USER_AGENT", "muckwire no contact")
     clock = [100.0]
     sleep_calls: list[float] = []
 

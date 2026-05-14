@@ -24,7 +24,7 @@ def _reset_state(monkeypatch: pytest.MonkeyPatch):
     config.reset_for_tests()
     europeana.reset_for_tests()
     monkeypatch.setenv("EUROPEANA_API_KEY", "europeana-test-key")
-    monkeypatch.setenv("RESEARCH_USER_AGENT", "alpha-research tests")
+    monkeypatch.setenv("RESEARCH_USER_AGENT", "muckwire tests")
     monkeypatch.setattr(europeana.asyncio, "sleep", AsyncMock())
     yield
     europeana.reset_for_tests()
@@ -114,7 +114,7 @@ async def test_search_happy_path_populates_required_metadata(
 
     headers = captured["headers"][0]
     assert headers["Accept"] == "application/json"
-    assert headers["User-Agent"] == "alpha-research tests"
+    assert headers["User-Agent"] == "muckwire tests"
     params = captured["params"][0]
     assert params == {
         "query": "Algerian war 1954",

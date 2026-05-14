@@ -1,4 +1,4 @@
-# Contributing to alpha-research
+# Contributing to muckwire
 
 Thanks for your interest. This is an actively-developed research agent —
 contributions, bug reports, and connector PRs are all welcome.
@@ -16,8 +16,8 @@ If you're not sure where to start, look for issues labeled
 ## Setting up
 
 ```bash
-git clone https://github.com/bradtaylorsf/alpha-research.git
-cd alpha-research
+git clone https://github.com/bradtaylorsf/muckwire.git
+cd muckwire
 pip install -e ".[dev]"
 playwright install chromium
 cp .env.example .env  # then add your keys

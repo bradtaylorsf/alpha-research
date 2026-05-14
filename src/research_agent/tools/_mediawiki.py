@@ -22,7 +22,7 @@ from research_agent import config
 
 logger = logging.getLogger(__name__)
 
-PROJECT_URL = "https://github.com/bradtaylorsf/alpha-research"
+PROJECT_URL = "https://github.com/bradtaylorsf/muckwire"
 RATE_LIMIT_INTERVAL = 1.0
 
 _TAG_RE = re.compile(r"<[^>]+>")

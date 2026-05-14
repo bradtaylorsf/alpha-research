@@ -6,7 +6,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 skills: code-review, security-analysis, testing-patterns, test-robustness, docs-sync, scope-discipline, smoke-verification, env-var-registration
 ---
 
-# Reviewer Agent (alpha-research / Python)
+# Reviewer Agent (muckwire / Python)
 
 You review code changes for a completed GitHub issue. You have full edit permissions — fix CRITICAL and WARNING issues directly rather than just reporting them.
 

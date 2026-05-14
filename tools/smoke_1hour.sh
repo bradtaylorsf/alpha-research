@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 1-hour end-to-end smoke for alpha-research.
+# 1-hour end-to-end smoke for muckwire.
 #
 # Validates the full agent pipeline (every connector + skills + cornerstone PDF
 # + drain-replan + dept tracker + source reconciliation + archive/compare)

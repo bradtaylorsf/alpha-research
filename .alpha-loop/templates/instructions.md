@@ -1,5 +1,5 @@
 <!-- managed by alpha-loop -->
-# Alpha Research
+# Muckwire
 
 ## Overview
 Repo for an **autonomous overnight investigative research agent** that runs on a Mac workstation, uses LM Studio for local model work and OpenRouter for cloud synthesis, and persists research as markdown + SQLite. The Python package (`research_agent`, CLI `research`) has a functional v1 CLI/daemon baseline: intake, job lifecycle, planner loop, connector dispatch, synthesis/critique, search, export, compare, source dedupe, checkpoint resume, and report history are in-tree. Connector depth, open-archive coverage, cornerstone-document handling, and long-run quality are still expanded issue-by-issue via alpha-loop. The top-level `*.md` playbooks remain strategic source material and project deliverables. Output of this work feeds the broader `Alpha*` agent ecosystem.

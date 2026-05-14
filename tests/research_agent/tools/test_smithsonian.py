@@ -24,7 +24,7 @@ def _reset_state(monkeypatch: pytest.MonkeyPatch):
     config.reset_for_tests()
     smithsonian.reset_for_tests()
     monkeypatch.setenv("DATA_GOV_API_KEY", "si-test-key")
-    monkeypatch.setenv("RESEARCH_USER_AGENT", "alpha-research tests")
+    monkeypatch.setenv("RESEARCH_USER_AGENT", "muckwire tests")
     monkeypatch.setattr(smithsonian.asyncio, "sleep", AsyncMock())
     yield
     smithsonian.reset_for_tests()
@@ -103,7 +103,7 @@ async def test_search_happy_path_populates_required_metadata(
 
     headers = captured["headers"][0]
     assert headers["Accept"] == "application/json"
-    assert headers["User-Agent"] == "alpha-research tests"
+    assert headers["User-Agent"] == "muckwire tests"
     params = captured["params"][0]
     assert params == {"api_key": "si-test-key", "q": "Apollo 11", "rows": 2}
 

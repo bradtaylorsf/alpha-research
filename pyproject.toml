@@ -9,7 +9,7 @@ description = "Autonomous CLI research agent (see research-agent-implementation-
 requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "MIT" }
-authors = [{ name = "Alpha Research" }]
+authors = [{ name = "Muckwire" }]
 dependencies = [
     "pydantic>=2.7",
     "pydantic-ai>=0.0.40",

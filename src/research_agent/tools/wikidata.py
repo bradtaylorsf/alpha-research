@@ -47,7 +47,7 @@ KIND = "wikidata_search"
 
 _SPARQL_ENDPOINT = "https://query.wikidata.org/sparql"
 _ENTITY_DATA_BASE = "https://www.wikidata.org/wiki/Special:EntityData"
-_PROJECT_URL = "https://github.com/bradtaylorsf/alpha-research"
+_PROJECT_URL = "https://github.com/bradtaylorsf/muckwire"
 _HOSTS = {"wikidata.org", "www.wikidata.org"}
 
 _RATE_WINDOW_SECONDS = 60.0

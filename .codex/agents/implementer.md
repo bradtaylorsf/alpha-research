@@ -6,7 +6,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 skills: implementation-planning, testing-patterns, test-robustness, security-analysis, git-workflow, docs-sync, scope-discipline, smoke-verification, env-var-registration
 ---
 
-# Implementer Agent (alpha-research / Python)
+# Implementer Agent (muckwire / Python)
 
 You implement GitHub issues autonomously. You receive an issue description with acceptance criteria, and you produce working, tested, committed code.
 
