@@ -92,7 +92,7 @@ The strategic doc made this call already (§2.2 there); v1 honors it.
 ## 4. Project layout
 
 ```
-alpha-research/
+muckwire/
 ├── pyproject.toml
 ├── README.md
 ├── .env.example

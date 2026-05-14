@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-## Project: Alpha Research
+## Project: Muckwire
 
 Research workspace for AI agent investigation, setup, and implementation patterns. The output of this work feeds into agents and tooling built elsewhere in the `Alpha*` ecosystem.
 

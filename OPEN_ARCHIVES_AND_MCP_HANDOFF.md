@@ -9,7 +9,7 @@
 
 ## What this is
 
-Two related milestones for `alpha-research`, both targeted at making the agent a
+Two related milestones for `muckwire`, both targeted at making the agent a
 better research tool for *anyone* doing primary-source / archival work — not just
 investigative-journalism / due-diligence patterns the existing connector roster
 favors:
@@ -19,7 +19,7 @@ favors:
    records, Wikimedia structured data, multilingual European archives, US
    broadcast video, and academic article corpora. Free or free-with-registration
    sources only; no paid commercial APIs.
-2. **Milestone B — `composable research service`.** Make alpha-research callable
+2. **Milestone B — `composable research service`.** Make muckwire callable
    from external agents via MCP, with a stabilized programmatic Python entry
    point and a documented per-job-folder contract. The MCP server exposes both a
    *high-level lifecycle* surface (start a job, get the report) and a
@@ -27,7 +27,7 @@ favors:
    downstream agents can choose the granularity they need.
 
 Both milestones are independent. Either can ship first. Both share the same
-end-state: alpha-research stays a generic research engine, and other tools
+end-state: muckwire stays a generic research engine, and other tools
 (including a downstream narrative-history podcast pipeline) consume it without
 forking.
 
@@ -226,7 +226,7 @@ These don't deserve their own connector issue, but do deserve issues of their ow
 - **No production-asset connectors.** SFX libraries (BBC Sound Effects,
   Freesound), royalty-free music corpora (Free Music Archive), and stock-image
   APIs are *production* tooling, not research tooling. Out of scope for
-  alpha-research; consumers handle their own asset pipelines.
+  muckwire; consumers handle their own asset pipelines.
 - **No paid data brokers beyond what's already wired.** SerpAPI / Brave /
   Proxycurl / Lix exist in v1; do not add Tavily, NewsCatcher, RapidAPI,
   ScrapingBee, etc.
@@ -237,12 +237,12 @@ These don't deserve their own connector issue, but do deserve issues of their ow
 
 ### Why this exists
 
-alpha-research today is a CLI-shaped tool. To call it from external agents,
+muckwire today is a CLI-shaped tool. To call it from external agents,
 consumers must shell out via subprocess, parse `events.jsonl`, and read
 `jobs/<id>/report.md` after the daemon finishes. That works, but it makes the
 agent feel like a black box.
 
-Three layered changes turn alpha-research into a first-class composable service
+Three layered changes turn muckwire into a first-class composable service
 without changing the daemon's lifecycle or the per-job folder format:
 
 1. **Per-job folder contract** — formalize the existing layout as a documented
@@ -405,7 +405,7 @@ The two milestones do not share a name with any consumer project. Issue
 labels: `area:open-archives` and `area:composability`. Milestones: literally
 `open-archives connector tier` and `composable research service`. Don't
 co-name with downstream projects (e.g., narrative-history podcast pipelines)
-even if a specific consumer is the catalyst — alpha-research is generic
+even if a specific consumer is the catalyst — muckwire is generic
 infrastructure.
 
 ### Testing posture

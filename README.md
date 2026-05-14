@@ -1,9 +1,9 @@
-# research-agent
+# muckwire
 
 ## What is this and why does it exist?
 
 Existing AI research agents are cloud-only, opaque about where their answers
-came from, and lock you into one vendor. **alpha-research** is a different
+came from, and lock you into one vendor. **muckwire** is a different
 shape: a CLI daemon that runs on your laptop, defaults to local models via
 LM Studio (so the wallet cost is `$0`), and treats every claim as something
 that has to land in a footnote with a Wayback archive URL behind it.
@@ -50,6 +50,29 @@ This README is the entry point. It walks an operator from "fresh laptop" to
 - [`CLAUDE.md`](CLAUDE.md) — how the
   [alpha-loop](https://github.com/bradtaylorsf/alpha-loop) issue-driven
   build loop drives planning / build / PR flow here.
+
+## The name
+
+**muckwire** carries the spirit of the **muckrakers** — the Progressive
+Era journalists (roughly 1890–1920) who exposed corruption in government,
+the predations of big business, and the social injustices nobody in power
+wanted documented. Ida Tarbell dismantled Standard Oil claim by claim.
+Lincoln Steffens mapped the machinery of municipal graft. Upton Sinclair
+walked readers onto the meatpacking floor. Ida B. Wells indicted lynching
+in statistics nobody could wave away. Jacob Riis and Lewis Hine
+photographed tenements and child labor until the country had to look.
+Theodore Roosevelt coined the term in 1906 as an insult — borrowed from
+Bunyan's *Pilgrim's Progress*, a man so busy raking muck he never looked
+up — and the journalists wore it as a badge of honor. Their work drove
+the Pure Food and Drug Act, antitrust enforcement, child-labor laws, and
+most of the accountability infrastructure that survives today.
+
+The **"wire"** half points at the plumbing of that same tradition — the
+wire services (AP, Reuters, UPI) that moved an investigation from one
+city to readers in another by morning. This tool is built for the same
+kind of work: patient, sourced, evidence-first investigation. Every
+claim it produces lands in a footnote with a Wayback archive URL behind
+it, because the only thing that survives the pushback is the receipts.
 
 ## Architecture
 
@@ -587,7 +610,7 @@ The questions you're going to ask (and that issue reporters will ask):
 answer is "because they're solving slightly different problems" — laid
 out so you can pick the right tool for what you're doing:
 
-| | alpha-research | LangGraph | Gemini Deep Research | Perplexity Pro |
+| | muckwire | LangGraph | Gemini Deep Research | Perplexity Pro |
 |---|---|---|---|---|
 | Runs locally | ✅ | ⚠️ framework — you provide infra | ❌ | ❌ |
 | $0 default cost | ✅ | depends | ❌ | ❌ subscription |
@@ -694,12 +717,12 @@ most recent running job auto-resume. Drop a launch agent at
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.alpha.research.resume</string>
+  <string>com.muckwire.resume</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
     <string>-lc</string>
-    <string>cd /path/to/alpha-research &amp;&amp; \
+    <string>cd /path/to/muckwire &amp;&amp; \
             JOB=$(./.venv/bin/research list --json --status running 2>/dev/null \
                   | /usr/bin/python3 -c 'import json,sys; jobs=json.load(sys.stdin); print(jobs[0]["id"]) if jobs else None') &amp;&amp; \
             [ -n "$JOB" ] &amp;&amp; ./.venv/bin/research resume "$JOB"</string>
@@ -714,8 +737,8 @@ most recent running job auto-resume. Drop a launch agent at
 </plist>
 ```
 
-Load it once: `launchctl load ~/Library/LaunchAgents/com.alpha.research.resume.plist`.
-Edit `/path/to/alpha-research` to your checkout. Inspect
+Load it once: `launchctl load ~/Library/LaunchAgents/com.muckwire.resume.plist`.
+Edit `/path/to/muckwire` to your checkout. Inspect
 `/tmp/research-resume.{out,err}.log` if a boot doesn't pick up the job
 you expected.
 
@@ -757,7 +780,7 @@ research _smoke-llm vision "Describe this" --image path/to/page.png
 research _smoke-llm embeddings "vector me"
 
 # Tool registry probes (Phase 3 connectors).
-research _smoke-tool web_search "alpha research project"
+research _smoke-tool web_search "muckraker investigative journalism"
 research _smoke-tool web_fetch "https://example.com/article"
 research _smoke-tool arxiv "transformer interpretability"
 research _smoke-tool news "federal reserve"
