@@ -428,6 +428,7 @@ def update_from_task_result(job: Job, task: dict[str, Any], result: dict[str, An
         "task_kind": task.get("kind"),
         "status": "done",
     }
+    payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
     rows = result.get("results") if isinstance(result, dict) else None
     if isinstance(rows, list) and rows:
         for row in rows:
@@ -445,11 +446,23 @@ def update_from_task_result(job: Job, task: dict[str, Any], result: dict[str, An
     if isinstance(rows, list) and not rows:
         dims = dimensions_from_task_and_row(task)
         if dims:
+            empty_status = payload.get("empty_coverage_status")
+            status: CoverageStatus = (
+                empty_status
+                if empty_status in TERMINAL_STATUSES or empty_status == "failed"
+                else "failed"
+            )
+            reason = str(
+                payload.get("empty_coverage_reason")
+                or payload.get("gap_reason")
+                or "0 results"
+            )
             set_matching_units(
                 job,
                 dims,
-                "failed",
-                attempt={**attempt_base, "status": "failed", "reason": "0 results"},
+                status,
+                attempt={**attempt_base, "status": status, "reason": reason},
+                unblocker=payload.get("unblocker") if status == "confirmed_gap" else None,
             )
 
 

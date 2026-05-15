@@ -986,7 +986,7 @@ def _is_goal_complete(job: Job, plan: Plan) -> bool:
         return False
     from research_agent.storage import coverage
 
-    return coverage.is_coverage_complete(job)
+    return coverage.is_coverage_complete(job) and not _coverage_has_confirmed_gaps(job)
 
 
 def _update_coverage_from_result(
@@ -1021,6 +1021,144 @@ def _mark_coverage_task_failed(job: Job, task: dict[str, Any], reason: str) -> N
             "warning",
             {"stage": "coverage_failed_update", "task_id": task.get("id"), "error": str(exc)},
         )
+
+
+def _coverage_has_confirmed_gaps(job: Job) -> bool:
+    from research_agent.storage import coverage
+
+    return bool(coverage.list_units(job, {"confirmed_gap"}))
+
+
+def _is_complete_with_confirmed_gaps(job: Job, plan: Plan) -> bool:
+    if not plan.is_complete():
+        return False
+    from research_agent.storage import coverage
+
+    return coverage.is_coverage_complete(job) and _coverage_has_confirmed_gaps(job)
+
+
+def _candidate_chamber(value: Any) -> str:
+    text = str(value or "").strip()
+    upper = text.upper()
+    if upper in {"H", "HOUSE", "US HOUSE", "U.S. HOUSE"}:
+        return "House"
+    if upper in {"S", "SENATE", "US SENATE", "U.S. SENATE"}:
+        return "Senate"
+    return text
+
+
+def _candidate_artifact_row(item: dict[str, Any]) -> dict[str, Any] | None:
+    extras = item.get("extras") if isinstance(item.get("extras"), dict) else {}
+    source_kind = str(extras.get("source_kind") or item.get("source_kind") or "")
+    source_type = str(extras.get("source_type") or "")
+    if source_kind not in {"fec", "state_election"} and source_type not in {
+        "fec-filed",
+        "state-ballot-qualified",
+    }:
+        return None
+
+    candidate_name = str(
+        extras.get("candidate_name") or extras.get("name") or item.get("title") or ""
+    ).strip()
+    state = str(extras.get("state") or "").strip().upper()
+    chamber = _candidate_chamber(
+        extras.get("chamber") or extras.get("office_full") or extras.get("office")
+    )
+    source_url = str(extras.get("source_url") or item.get("url") or "").strip()
+    if not candidate_name or not state or not chamber or not source_url:
+        return None
+
+    district = str(
+        extras.get("district_or_seat")
+        or extras.get("district")
+        or extras.get("district_number")
+        or ""
+    ).strip()
+    if not district and chamber == "Senate":
+        district = "statewide"
+    status = str(
+        extras.get("candidate_status")
+        or extras.get("status")
+        or ("fec-filed" if source_type == "fec-filed" else "")
+    ).strip()
+    confidence = extras.get("confidence")
+    if confidence in (None, ""):
+        confidence = item.get("score")
+
+    return {
+        "state": state,
+        "chamber": chamber,
+        "district_or_seat": district,
+        "candidate_name": candidate_name,
+        "party": str(extras.get("party") or "").strip(),
+        "candidate_status": status,
+        "confidence": "" if confidence in (None, "") else str(confidence),
+        "official_campaign_website": str(
+            extras.get("official_campaign_website") or extras.get("website") or ""
+        ).strip(),
+        "source_url": source_url,
+        "source_kind": source_kind,
+        "source_retrieved_at": str(
+            extras.get("source_retrieved_at") or extras.get("retrieval_timestamp") or ""
+        ).strip(),
+        "notes": str(extras.get("notes") or "").strip(),
+    }
+
+
+def _candidate_key(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(row.get("state") or "").strip().upper(),
+        str(row.get("chamber") or "").strip().lower(),
+        str(row.get("district_or_seat") or "").strip().lower(),
+        re.sub(r"\s+", " ", str(row.get("candidate_name") or "").strip().lower()),
+        str(row.get("source_url") or "").strip().lower(),
+    )
+
+
+def _update_candidate_artifact_from_result(
+    job: Job,
+    result: dict[str, Any] | None,
+) -> None:
+    if not isinstance(result, dict):
+        return
+    rows = result.get("results")
+    if not isinstance(rows, list):
+        return
+    candidate_rows = [
+        row
+        for item in rows
+        if isinstance(item, dict)
+        for row in [_candidate_artifact_row(item)]
+        if row is not None
+    ]
+    if not candidate_rows:
+        return
+
+    from research_agent.storage import artifacts
+
+    try:
+        _schema, existing_rows = artifacts.read_artifact(job, "candidates")
+    except FileNotFoundError:
+        existing_rows = []
+
+    seen = {_candidate_key(row) for row in existing_rows}
+    merged = list(existing_rows)
+    for row in candidate_rows:
+        key = _candidate_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    if len(merged) == len(existing_rows):
+        return
+
+    artifacts.write_table_artifact(
+        job,
+        "candidates",
+        schema=artifacts.CANDIDATE_ROSTER_SCHEMA,
+        rows=merged,
+        source_coverage=f"{len(merged)} candidate rows from connector results",
+    )
 
 
 def _is_zero_result_search(kind: str, result: dict[str, Any] | None) -> bool | None:
@@ -3212,6 +3350,7 @@ async def run_loop(
     while (
         not _should_stop(job)
         and not _is_goal_complete(job, plan)
+        and not _is_complete_with_confirmed_gaps(job, plan)
         and tasks_done < max_tasks
         and _within_time_cap()
     ):
@@ -3387,6 +3526,20 @@ async def run_loop(
 
         mark_done(task["id"], persistable, db_path=job.db_path)
         _update_coverage_from_result(job, task, persistable)
+        try:
+            _update_candidate_artifact_from_result(job, persistable)
+        except Exception as exc:  # noqa: BLE001 — artifact updates must not break task draining
+            emit(
+                job,
+                "WARN",
+                "loop",
+                "warning",
+                {
+                    "stage": "candidate_artifact_update",
+                    "task_id": task.get("id"),
+                    "error": str(exc),
+                },
+            )
         _track_low_yield_connector(job, task, persistable, zero_result_streaks)
         emit(
             job,
@@ -3463,11 +3616,13 @@ async def run_loop(
         time_cap_hit=time_cap_hit,
         last_drain_productive_task_count=last_drain_productive_task_count,
     )
+    goal_complete = _is_goal_complete(job, plan)
+    complete_with_confirmed_gaps = _is_complete_with_confirmed_gaps(job, plan)
 
     return {
         "tasks_done": tasks_done,
         "stopped": stopped,
-        "completed": _is_goal_complete(job, plan),
+        "completed": goal_complete,
         "cap_hit": cap_hit,
         "time_cap_hit": time_cap_hit,
         "completion_reason": (
@@ -3475,6 +3630,8 @@ async def run_loop(
             if time_cap_hit
             else "task_cap"
             if cap_hit
+            else "confirmed_gap"
+            if complete_with_confirmed_gaps
             else "exhausted"
             if exhausted
             else None

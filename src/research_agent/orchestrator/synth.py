@@ -886,6 +886,12 @@ def _load_artifacts_for_context(job: Job) -> list[dict[str, Any]]:
     return artifacts.list_artifacts(job)
 
 
+def _load_coverage_for_context(job: Job) -> list[dict[str, Any]]:
+    from research_agent.storage import coverage
+
+    return [unit.model_dump(mode="json") for unit in coverage.list_units(job)]
+
+
 def _build_context(
     *,
     goal: str,
@@ -1462,6 +1468,94 @@ def _model_name_for(router: Router, tier: str) -> str:
     return name
 
 
+def _provider_name_for(router: Router, tier: str) -> str:
+    spec = router.tiers.get(tier, {})
+    provider = spec.get("provider")
+    if not isinstance(provider, str) or not provider:
+        return "unknown"
+    return provider
+
+
+_PROVIDER_FORMAT_HINTS = (
+    "http 400",
+    "400 bad request",
+    "bad request",
+    "invalid_request",
+    "invalid request",
+    "reasoning",
+    "channel",
+    "openai-compatible",
+    "provider",
+)
+
+
+def _safe_exception_snippet(exc: BaseException, *, max_chars: int = 500) -> str:
+    text = str(exc).strip() or repr(exc)
+    text = re.sub(r"\s+", " ", text)
+    for marker in (" system_prompt=", " prompt=", " context=", " messages="):
+        idx = text.lower().find(marker.strip().lower())
+        if idx > 0:
+            text = text[:idx].rstrip()
+    if len(text) > max_chars:
+        return text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
+def _is_provider_format_specific(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(hint in text for hint in _PROVIDER_FORMAT_HINTS)
+
+
+def _emit_synthesis_llm_failed(
+    job: Job,
+    router: Router,
+    *,
+    tier: str,
+    exc: BaseException,
+    attempt_count: int,
+    post_cap: bool = False,
+) -> None:
+    emit(
+        job,
+        "WARN",
+        "synth",
+        "synthesis_llm_failed",
+        {
+            "tier": tier,
+            "model": _model_name_for(router, tier),
+            "provider": _provider_name_for(router, tier),
+            "attempt_count": attempt_count,
+            "error_type": type(exc).__name__,
+            "diagnostic_snippet": _safe_exception_snippet(exc),
+            "provider_format_specific": _is_provider_format_specific(exc),
+            "post_cap": post_cap,
+        },
+    )
+
+
+def _emit_fallback_tier_used(
+    job: Job,
+    router: Router,
+    *,
+    primary_tier: str,
+    fallback_tier: str,
+    reason: str,
+) -> None:
+    emit(
+        job,
+        "INFO",
+        "synth",
+        "synthesis_fallback_tier_used",
+        {
+            "primary_tier": primary_tier,
+            "fallback_tier": fallback_tier,
+            "fallback_model": _model_name_for(router, fallback_tier),
+            "fallback_provider": _provider_name_for(router, fallback_tier),
+            "reason": reason,
+        },
+    )
+
+
 async def _do_synthesis(
     job: Job,
     plan: Plan,
@@ -1510,6 +1604,13 @@ async def _do_synthesis(
             "warning",
             {"stage": primary_tier, "error": str(exc)},
         )
+        _emit_fallback_tier_used(
+            job,
+            router,
+            primary_tier=primary_tier,
+            fallback_tier=fallback_tier,
+            reason="budget_exceeded",
+        )
         try:
             content = await _run_synth(job, router, fallback_tier, context)
             used_tier = fallback_tier
@@ -1525,10 +1626,71 @@ async def _do_synthesis(
             return _write_stub_output(job)
         except Exception as exc2:  # noqa: BLE001 — terminal retry exhaustion
             logger.warning("synth: %s tier failed after retries: %s", fallback_tier, exc2)
-            return _write_failed_output(job, tier=fallback_tier, exc=exc2, attempt_count=2)
+            _emit_synthesis_llm_failed(
+                job,
+                router,
+                tier=fallback_tier,
+                exc=exc2,
+                attempt_count=2,
+            )
+            return _write_deterministic_fallback_output(
+                job,
+                plan,
+                primary_tier=primary_tier,
+                fallback_tier=fallback_tier,
+                primary_exc=exc,
+                fallback_exc=exc2,
+                top_n=top_n,
+                final=final,
+            )
     except Exception as exc:  # noqa: BLE001 — terminal retry exhaustion
         logger.warning("synth: %s tier failed after retries: %s", primary_tier, exc)
-        return _write_failed_output(job, tier=primary_tier, exc=exc, attempt_count=1)
+        _emit_synthesis_llm_failed(
+            job,
+            router,
+            tier=primary_tier,
+            exc=exc,
+            attempt_count=1,
+        )
+        _emit_fallback_tier_used(
+            job,
+            router,
+            primary_tier=primary_tier,
+            fallback_tier=fallback_tier,
+            reason="primary_llm_failed",
+        )
+        try:
+            content = await _run_synth(job, router, fallback_tier, context)
+            used_tier = fallback_tier
+        except BudgetExceeded as exc2:
+            logger.warning("synth: budget exceeded on %s tier: %s", fallback_tier, exc2)
+            emit(
+                job,
+                "WARN",
+                "synth",
+                "warning",
+                {"stage": fallback_tier, "error": str(exc2), "budget_capped": True},
+            )
+            return _write_template_stub_output(job)
+        except Exception as exc2:  # noqa: BLE001 — deterministic fallback handles terminal LLM failure
+            logger.warning("synth: %s tier failed after retries: %s", fallback_tier, exc2)
+            _emit_synthesis_llm_failed(
+                job,
+                router,
+                tier=fallback_tier,
+                exc=exc2,
+                attempt_count=2,
+            )
+            return _write_deterministic_fallback_output(
+                job,
+                plan,
+                primary_tier=primary_tier,
+                fallback_tier=fallback_tier,
+                primary_exc=exc,
+                fallback_exc=exc2,
+                top_n=top_n,
+                final=final,
+            )
 
     cost = getattr(router.budget, "last_cost", None)
     cost_val: float | None = float(cost) if isinstance(cost, (int, float)) else None
@@ -1663,6 +1825,11 @@ def _render_template_stub(
     goal: str,
     findings: list[dict[str, Any]],
     sources: dict[int, dict[str, Any]],
+    heading: str = "# Report (budget cap — template stub)",
+    intro_lines: list[str] | None = None,
+    confirmed_gaps: list[dict[str, Any]] | None = None,
+    coverage_units: list[dict[str, Any]] | None = None,
+    artifacts: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a no-LLM markdown report from on-disk findings + sources.
 
@@ -1670,12 +1837,15 @@ def _render_template_stub(
     here comes from the SQLite mirror, so the user always gets a readable
     report.md even with $0 left in the budget.
     """
-    lines: list[str] = [
-        "# Report (budget cap — template stub)",
-        "",
+    intro = intro_lines or [
         "Research budget cap was reached before any synthesis call could run.",
         "This report is a template-rendered summary of the findings already on",
         "disk; no LLM call was made.",
+    ]
+    lines: list[str] = [
+        heading,
+        "",
+        *intro,
         "",
         "## Goal",
         "",
@@ -1720,7 +1890,165 @@ def _render_template_stub(
             lines.append(f"- [{sid}] {title} — {url}")
         lines.append("")
 
+    artifact_rows = artifacts or []
+    if artifact_rows:
+        lines.append("## Artifacts")
+        lines.append("")
+        for artifact in artifact_rows:
+            name = artifact.get("name") or "artifact"
+            row_count = artifact.get("row_count")
+            csv_path = artifact.get("csv_path") or ""
+            coverage = artifact.get("source_coverage") or ""
+            row_label = f"{row_count} rows" if row_count is not None else "rows unavailable"
+            if csv_path:
+                line = f"- {name}: {row_label} — [CSV]({csv_path})"
+            else:
+                line = f"- {name}: {row_label}"
+            if coverage:
+                line += f" — {coverage}"
+            lines.append(line)
+        lines.append("")
+
+    coverage_rows = coverage_units or []
+    if coverage_rows:
+        lines.append("## Coverage Ledger")
+        lines.append("")
+        for unit in coverage_rows:
+            dimensions = unit.get("dimensions") if isinstance(unit.get("dimensions"), dict) else {}
+            dim_label = ", ".join(f"{k}={v}" for k, v in sorted(dimensions.items()))
+            if not dim_label:
+                dim_label = str(unit.get("dim_key") or "coverage unit")
+            status = unit.get("status") or "unknown"
+            line = f"- {dim_label}: {status}"
+            unblocker = unit.get("unblocker")
+            if isinstance(unblocker, str) and unblocker.strip():
+                line += f" — {unblocker.strip()}"
+            lines.append(line)
+        lines.append("")
+
+    gap_rows = confirmed_gaps or []
+    if gap_rows:
+        lines.append("## Confirmed Gaps")
+        lines.append("")
+        for gap in gap_rows:
+            topic = gap.get("topic") or "Unresolved gap"
+            summary = gap.get("failure_summary") or "Could not resolve from available sources."
+            unblocker = gap.get("suggested_unblocker") or "Identify a source owner or custodian."
+            lines.append(f"- **{topic}**: {summary} Unblocker: {unblocker}")
+            attempts = gap.get("attempts")
+            if isinstance(attempts, list):
+                for attempt in attempts[:5]:
+                    if not isinstance(attempt, dict):
+                        continue
+                    kind = attempt.get("task_kind") or "task"
+                    query = attempt.get("query") or topic
+                    reason = attempt.get("failure_reason") or "failed"
+                    count = attempt.get("count") or 1
+                    lines.append(f"  - {kind} `{query}`: {reason} ({count}x)")
+        lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_deterministic_fallback_output(
+    job: Job,
+    plan: Plan,
+    *,
+    primary_tier: str | None,
+    fallback_tier: str,
+    primary_exc: BaseException | None,
+    fallback_exc: BaseException,
+    top_n: int,
+    final: bool,
+    post_cap: bool = False,
+) -> SynthesisOutput:
+    """Write a no-LLM report after terminal non-budget synthesis failures."""
+    traceback_parts: list[str] = []
+    if primary_exc is not None:
+        traceback_parts.append(
+            "## Primary Tier Traceback\n\n```text\n"
+            + "".join(
+                traceback.format_exception(
+                    type(primary_exc),
+                    primary_exc,
+                    primary_exc.__traceback__,
+                )
+            ).strip()
+            + "\n```"
+        )
+    traceback_parts.append(
+        "## Fallback Tier Traceback\n\n```text\n"
+        + "".join(
+            traceback.format_exception(
+                type(fallback_exc),
+                fallback_exc,
+                fallback_exc.__traceback__,
+            )
+        ).strip()
+        + "\n```"
+    )
+    failed_version = write_synthesis_failed(
+        job,
+        "",
+        model="synthesis_llm_failed",
+        traceback_text="\n\n".join(traceback_parts),
+    )
+    failed_path = job.root / f"synthesis/{failed_version:04d}.failed.md"
+
+    findings = _load_top_findings(job, top_n)
+    sources = _load_sources_for(job, findings)
+    confirmed_gaps = _compute_confirmed_gaps(job, plan)
+    artifact_rows = _load_artifacts_for_context(job)
+    coverage_rows = _load_coverage_for_context(job)
+    content = _render_template_stub(
+        goal=job.goal,
+        findings=findings,
+        sources=sources,
+        heading="# Report (deterministic fallback)",
+        intro_lines=[
+            "The configured LLM synthesis tiers failed, so this report was",
+            "rendered deterministically from persisted findings, sources,",
+            "coverage, gaps, and table artifacts. No LLM wrote this report.",
+        ],
+        confirmed_gaps=confirmed_gaps,
+        coverage_units=coverage_rows,
+        artifacts=artifact_rows,
+    )
+
+    version = write_synthesis(
+        job,
+        content,
+        model="deterministic_fallback",
+        cost_usd=None,
+    )
+    report_path = write_report(job, content)
+    emit(
+        job,
+        "INFO",
+        "synth",
+        "synthesis_deterministic_fallback_written",
+        {
+            "version": version,
+            "report_path": str(report_path),
+            "failed_path": str(failed_path),
+            "primary_tier": primary_tier,
+            "fallback_tier": fallback_tier,
+            "findings_count": len(findings),
+            "confirmed_gaps_count": len(confirmed_gaps),
+            "has_artifacts": bool(artifact_rows),
+            "has_coverage_ledger": bool(coverage_rows),
+            "final": final,
+            "post_cap": post_cap,
+        },
+    )
+    return SynthesisOutput(
+        version=version,
+        content=content,
+        model="deterministic_fallback",
+        cost_usd=None,
+        report_path=str(report_path),
+        truncated=True,
+    )
 
 
 def _write_template_stub_output(job: Job) -> SynthesisOutput:
@@ -1862,7 +2190,25 @@ async def final_synthesis_after_cap(
         return _write_template_stub_output(job)
     except Exception as exc:  # noqa: BLE001 — terminal retry exhaustion
         logger.warning("synth: %s tier failed after retries (post-cap): %s", fallback_tier, exc)
-        return _write_failed_output(job, tier=fallback_tier, exc=exc, attempt_count=1)
+        _emit_synthesis_llm_failed(
+            job,
+            router,
+            tier=fallback_tier,
+            exc=exc,
+            attempt_count=1,
+            post_cap=True,
+        )
+        return _write_deterministic_fallback_output(
+            job,
+            plan,
+            primary_tier=None,
+            fallback_tier=fallback_tier,
+            primary_exc=None,
+            fallback_exc=exc,
+            top_n=FINAL_TOP_N,
+            final=True,
+            post_cap=True,
+        )
 
     cost = getattr(router.budget, "last_cost", None)
     cost_val: float | None = float(cost) if isinstance(cost, (int, float)) else None
