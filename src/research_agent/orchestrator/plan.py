@@ -97,6 +97,8 @@ TaskKind = Literal[
     "licensing_fetch",
     "sos_search",
     "sos_fetch",
+    "state_election_search",
+    "state_election_fetch",
     "calaccess_search",
     "calaccess_fetch",
     "scholar_search",
@@ -793,6 +795,9 @@ async def initial_plan(job: Job, *, router: Router) -> Plan:
     )
     raw_path = _persist_raw_plan_yaml(job, version=1, raw=raw)
     plan = _parse_plan_yaml(raw, version=1, raw_path=raw_path)
+    from research_agent.storage import coverage
+
+    coverage.declare_from_intake(job)
     write_plan(job, plan.model_dump())
     _enqueue_plan_tasks(job, plan)
     _emit_plan_created(job, plan, tier="frontier", kind="initial")
@@ -841,6 +846,11 @@ async def tactical_replan(
     from research_agent.storage import hypotheses
 
     payload["hypotheses"] = hypotheses.list_hypotheses(job)
+    from research_agent.storage import coverage
+
+    coverage_state = coverage.replan_context(job)
+    if coverage_state is not None:
+        payload["coverage_state"] = coverage_state
 
     # issue #179: include a bounded view of the running ``findings`` so the
     # planner can drill into named claims (Schedule F, WOTUS, mifepristone)

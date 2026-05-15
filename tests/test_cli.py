@@ -277,6 +277,60 @@ def test_start_inbox_flag_is_persisted(isolated_jobs_repo: Path, monkeypatch) ->
     assert (job_root / "inbox" / "processed").is_dir()
 
 
+def test_start_input_csv_imports_artifact_and_enrichment_intake(
+    isolated_jobs_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 12345)
+    csv_path = isolated_jobs_repo / "input.csv"
+    csv_path.write_text(
+        "candidate_id,candidate_name,website,status\n"
+        "H1,Jane Example,,Filed\n"
+        "H2,Robert Example,https://existing.example,Pending\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        [
+            "start",
+            "--skip-intake",
+            "--goal",
+            "Enrich candidate roster",
+            "--input-csv",
+            str(csv_path),
+            "--artifact",
+            "candidates",
+            "--key",
+            "candidate_id",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    job_root = isolated_jobs_repo / "jobs" / f"{today}-enrich-candidate-roster"
+    artifact_dir = job_root / "artifacts"
+    for suffix in (
+        ".csv",
+        ".jsonl",
+        ".schema.json",
+        ".meta.json",
+        ".provenance.jsonl",
+    ):
+        assert (artifact_dir / f"candidates{suffix}").exists()
+    intake_data = json.loads((job_root / "intake.json").read_text(encoding="utf-8"))
+    assert intake_data["input_csv_artifact"] == "candidates"
+    assert intake_data["enrichment"] == {
+        "artifact": "candidates",
+        "input_csv": str(csv_path),
+        "key_columns": ["candidate_id"],
+        "overwrite_non_empty": False,
+    }
+    rows = list(csv.DictReader((artifact_dir / "candidates.csv").open()))
+    assert [row["candidate_id"] for row in rows] == ["H1", "H2"]
+
+
 def test_start_runs_intake_when_not_skipped(isolated_jobs_repo: Path, monkeypatch):
     canned = {
         "goal": "Investigate widgets",

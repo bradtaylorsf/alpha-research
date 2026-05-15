@@ -38,6 +38,7 @@ EXPECTED_SOURCE_KINDS = (
     "opencorporates",
     "sanctions",
     "sos",
+    "state_election",
     "licensing",
     "bbb",
     "calaccess",

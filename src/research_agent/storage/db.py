@@ -147,6 +147,30 @@ CREATE TABLE IF NOT EXISTS hypotheses (
 );
 CREATE INDEX IF NOT EXISTS idx_hypotheses_job_status ON hypotheses(job_id, status);
 
+-- Per-job coverage ledger for complete-list / enumeration work.
+CREATE TABLE IF NOT EXISTS coverage_units (
+    job_id TEXT NOT NULL REFERENCES jobs(id),
+    dim_key TEXT NOT NULL,
+    dims_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'pending',
+            'in_progress',
+            'complete',
+            'not_yet_public',
+            'confirmed_gap',
+            'failed'
+        )
+    ),
+    recent_attempts_json TEXT NOT NULL DEFAULT '[]',
+    last_attempt_json TEXT,
+    unblocker TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (job_id, dim_key)
+);
+CREATE INDEX IF NOT EXISTS idx_coverage_units_job_status
+    ON coverage_units(job_id, status);
+
 -- Checkpoints (one per state transition)
 CREATE TABLE IF NOT EXISTS checkpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -337,6 +361,36 @@ def _migrate_hypotheses_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_coverage_units_table(conn: sqlite3.Connection) -> None:
+    """Create the enumeration coverage ledger for DBs that predate issue #305."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS coverage_units (
+            job_id TEXT NOT NULL REFERENCES jobs(id),
+            dim_key TEXT NOT NULL,
+            dims_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'pending',
+                    'in_progress',
+                    'complete',
+                    'not_yet_public',
+                    'confirmed_gap',
+                    'failed'
+                )
+            ),
+            recent_attempts_json TEXT NOT NULL DEFAULT '[]',
+            last_attempt_json TEXT,
+            unblocker TEXT,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (job_id, dim_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_coverage_units_job_status
+            ON coverage_units(job_id, status);
+        """
+    )
+
+
 def migrate(
     conn: sqlite3.Connection | None = None,
     *,
@@ -355,4 +409,5 @@ def migrate(
         _migrate_sources_parent_source_id(conn)
         _migrate_jobs_completion_reason(conn)
         _migrate_hypotheses_table(conn)
+        _migrate_coverage_units_table(conn)
     return conn

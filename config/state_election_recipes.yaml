@@ -1,0 +1,112 @@
+CA:
+  source_url: "https://elections.cdn.sos.ca.gov/statewide-elections/2026-primary/cert-list-candidates.pdf"
+  source_type: "pdf"
+  office_coverage: ["federal", "statewide", "legislative"]
+  cycle_coverage: [2026]
+  retrieval_method: "static_fetch"
+  known_limitations: "Certified PDF; parser support is registry-only until PDF table extraction is added."
+  known_unblocker: "Use the certified candidate-list PDF or wait for a machine-readable California SOS export."
+TX:
+  source_url: "https://www.sos.texas.gov/elections/laws/current-elections-information.shtml"
+  source_type: "html"
+  office_coverage: ["federal", "statewide", "district"]
+  cycle_coverage: [2026]
+  retrieval_method: "search_portal"
+  known_limitations: "Candidate listing is linked from current election pages and may vary by party/primary."
+  known_unblocker: "Use the Texas SOS candidate listing link for the target election."
+FL:
+  source_url: "https://www.elections.myflorida.com/candidates/"
+  source_type: "search_portal"
+  office_coverage: ["federal", "statewide", "multicounty"]
+  cycle_coverage: [2026]
+  retrieval_method: "search_portal"
+  known_limitations: "Florida labels the candidate tracking system as unofficial for federal candidates before qualification."
+  known_unblocker: "Use Florida Division of Elections candidate tracking after qualifying status is posted."
+NY:
+  source_url: "https://elections.ny.gov/"
+  source_type: "html"
+  office_coverage: ["federal", "statewide", "legislative"]
+  cycle_coverage: [2026]
+  retrieval_method: "static_fetch"
+  known_limitations: "Candidate lists are published as election-specific links from the BOE home and election pages."
+  known_unblocker: "Open the NYSBOE election-specific candidate-list or ballot-access file."
+PA:
+  source_url: "https://www.pa.gov/en/agencies/dos/programs/Voting-and-Elections/campaign-finance.html"
+  source_type: "search_portal"
+  office_coverage: ["statewide", "legislative", "judicial"]
+  cycle_coverage: [2026]
+  retrieval_method: "search_portal"
+  known_limitations: "Candidate database is portal-driven and may be campaign-finance oriented rather than ballot-qualified."
+  known_unblocker: "Use the Pennsylvania DOS candidate database or election-specific candidate filing pages."
+GA:
+  source_url: "https://sos.ga.gov/federal-and-state-qualifying-locations-2026"
+  source_type: "html"
+  office_coverage: ["federal", "statewide", "legislative"]
+  cycle_coverage: [2026]
+  retrieval_method: "static_fetch"
+  known_limitations: "Qualifying information pages may link to final lists rather than embed candidate rows."
+  known_unblocker: "Use the Georgia SOS qualified-candidate export after qualifying closes."
+SC:
+  source_url: "https://vrems.scvotes.sc.gov/Candidate/SelectElection"
+  source_type: "search_portal"
+  office_coverage: ["federal", "statewide", "legislative", "county"]
+  cycle_coverage: [2026]
+  retrieval_method: "playwright_form"
+  known_limitations: "Candidate Tracking requires selecting an election before searching."
+  known_unblocker: "Use SC Votes Candidate Tracking for the target election and click Search with broad filters."
+  selectors:
+    query_input: "input[name='CandidateName']"
+    submit_button: "button[type='submit'], input[type='submit']"
+    row_selector: "table tbody tr"
+    name_selector: "td:nth-child(1)"
+    party_selector: "td:nth-child(2)"
+    office_selector: "td:nth-child(3)"
+    status_selector: "td:nth-child(4)"
+IL:
+  source_url: "https://www.elections.il.gov/ElectionOperations/CandidateList.aspx"
+  source_type: "search_portal"
+  office_coverage: ["federal", "statewide", "legislative"]
+  cycle_coverage: [2026]
+  retrieval_method: "search_portal"
+  known_limitations: "Illinois candidate-list page is form-driven by election."
+  known_unblocker: "Select the 2026 election on the Illinois SBE candidate-list page."
+AZ:
+  source_url: "https://azsos.gov/media/666"
+  source_type: "pdf"
+  office_coverage: ["statewide", "legislative"]
+  cycle_coverage: [2026]
+  retrieval_method: "static_fetch"
+  known_limitations: "PDF nominations/petitions filed list; court challenges can alter ballot status."
+  known_unblocker: "Use Arizona SOS candidate nominations and petitions filed PDF after challenge deadlines."
+NC:
+  source_url: "https://www.ncsbe.gov/results-data/candidate-lists"
+  source_type: "csv"
+  office_coverage: ["federal", "statewide", "legislative", "county"]
+  cycle_coverage: [2026]
+  retrieval_method: "static_fetch"
+  known_limitations: "Landing page links CSV/PDF files; recipe parser expects the resolved CSV export URL in tests/live overrides."
+  known_unblocker: "Use the NCSBE 2026 candidate list spreadsheet CSV."
+CO:
+  source_url: "https://tracer.sos.colorado.gov/PublicSite/SearchPages/CandidateSearch.aspx"
+  source_type: "csv"
+  office_coverage: ["statewide", "legislative"]
+  cycle_coverage: [2026]
+  retrieval_method: "static_fetch"
+  known_limitations: "TRACER is campaign-finance oriented; ballot qualification may require election division candidate pages."
+  known_unblocker: "Use the Colorado SOS election candidate list or TRACER export for the target race."
+OK:
+  source_url: "https://oklahoma.gov/elections/candidates/2026-candidate-filing-information.html"
+  source_type: "html"
+  office_coverage: ["federal", "statewide", "legislative", "judicial", "county"]
+  cycle_coverage: [2026]
+  retrieval_method: "static_fetch"
+  known_limitations: "HTML page links PDF/list-book artifacts; static parser only reads embedded tables."
+  known_unblocker: "Use the Oklahoma 2026 Candidate List Book after filing closes."
+MD:
+  source_url: "https://elections.maryland.gov/elections/2026/Primary_candidates/index.html"
+  source_type: "html"
+  office_coverage: ["federal", "statewide", "legislative", "county"]
+  cycle_coverage: [2026]
+  retrieval_method: "static_fetch"
+  known_limitations: "Candidate list pages update twice daily and are election-specific."
+  known_unblocker: "Use Maryland SBE 2026 election candidate-list pages after filing updates."
