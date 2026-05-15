@@ -11,6 +11,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import typer
@@ -22,6 +23,7 @@ from research_agent.storage import db
 from research_agent.storage.jobs import (
     _JOB_ID_RE,
     DEFAULT_JOBS_ROOT,
+    RESUME_REPLAN_FILE,
     Job,
     _atomic_write_json,
     list_jobs,
@@ -291,6 +293,7 @@ def status_command(
             started_at=data["started_at"],
             eta_seconds=data["eta_seconds"],
             current_task=data["current_task"],
+            completion_reason=data["completion_reason"],
         )
 
     if not watch:
@@ -362,6 +365,8 @@ def view_command(
             typer.echo(f"report.md not present for job {job_id}", err=True)
             raise typer.Exit(code=1)
         body = path.read_text(encoding="utf-8")
+        if job.completion_reason:
+            body = f"<!-- completion_reason: {job.completion_reason} -->\n\n{body}"
 
     editor = os.environ.get("EDITOR")
     if path is not None and editor and sys.stdout.isatty():
@@ -613,6 +618,16 @@ def resume_command(
         "--force",
         help="Resume even if the job is in a terminal state (completed/failed).",
     ),
+    replan: bool = typer.Option(
+        False,
+        "--replan",
+        help="Run tactical_replan before resuming the existing queue.",
+    ),
+    note: str | None = typer.Option(
+        None,
+        "--note",
+        help="Operator hint to include in the resume replan context.",
+    ),
 ) -> None:
     """Restart a stranded job's daemon — checkpoint-restore happens at startup."""
     job = _load_job_or_exit(job_id)
@@ -641,6 +656,16 @@ def resume_command(
         stop_flag.unlink()
     except FileNotFoundError:
         pass
+
+    if note and not replan:
+        typer.echo("--note requires --replan", err=True)
+        raise typer.Exit(code=2)
+
+    if replan:
+        payload: dict[str, Any] = {}
+        if note:
+            payload["note"] = note
+        _atomic_write_json(job.root / RESUME_REPLAN_FILE, payload)
 
     pid = daemon.spawn_daemon(job.id)
     typer.echo(f"Resumed job {job.id} (daemon pid {pid}).")

@@ -369,6 +369,56 @@ so you can convert high-confidence claims into per-proposal follow-ups.
    query must be justified by a finding the prior plan didn't already
    cover.
 
+### Inconclusive subgoals require new angles or documented gaps
+
+The tactical-replan user payload may include:
+
+```yaml
+user_note: "operator supplied hint, if present"
+inconclusive_subgoals:
+  - id: 2
+    description: "..."
+    prior_task_kinds: [web_search, news_search]
+    prior_query_stems: ["Project 2025 EPA", "Project 2025 EPA Trump"]
+    prior_failure_reasons:
+      - "0 results from web_search x 3"
+      - "extract_findings returned empty findings x 2"
+```
+
+When `user_note` is present, treat it as authoritative high-priority
+operator guidance. Weight it ahead of inferred drill-downs and use it to
+choose the first new source surface when it names a document, portal,
+person, date, or entity.
+
+For each entry in `inconclusive_subgoals`, you MUST either:
+
+1. Emit at least one task using a **NEW** task kind not listed in
+   `prior_task_kinds`, with a query/sub_question that does not repeat a
+   stem from `prior_query_stems`; or
+2. Explicitly mark the subgoal as a documented gap by emitting it under
+   `subgoals:` with `gap_reason: "no public source available"` (or another
+   one-line unblocker such as `FOIA required`, `paywalled`, or `local clerk
+   portal required`).
+
+Never re-emit a `(kind, query stem)` pair represented by
+`prior_task_kinds` and `prior_query_stems`. Repeating failed connector
+families without a new source surface is not a replan.
+
+Example documented gap:
+
+```yaml
+subgoals:
+  - id: 2
+    description: "Identify city-level Form 460 filings for the council member."
+    done: false
+    gap_reason: "no public API; city clerk portal or records request required"
+task_template:
+  - kind: web_search
+    payload:
+      query: "site:alamedaca.gov Form 460 City Clerk council campaign finance"
+      sub_question: "Find the City Clerk portal that would unblock Form 460 records."
+```
+
 #### Worked side-by-side: v1 plan vs v2 tactical_replan
 
 A v1 plan for *"Project 2025 implementation tracker"* runs department-level

@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 
 from research_agent import __version__, cli, config
 from research_agent.storage import db
-from research_agent.storage.jobs import Job
+from research_agent.storage.jobs import RESUME_REPLAN_FILE, Job
 from research_agent.ui import render
 
 
@@ -504,6 +504,18 @@ def test_status_idle_when_no_running_task(isolated_jobs_repo: Path):
     assert "(idle)" in result.stdout
 
 
+def test_status_surfaces_completion_reason(isolated_jobs_repo: Path):
+    """Terminal reasons such as ``exhausted`` are visible in detailed status."""
+    job = _make_synthetic_job(isolated_jobs_repo, goal="exhausted target")
+    job.set_status("completed", completion_reason="exhausted")
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["status", job.id])
+    assert result.exit_code == 0, result.stdout
+    assert "Completion reason" in result.stdout
+    assert "exhausted" in result.stdout
+
+
 def test_status_color_theme_matches_list(isolated_jobs_repo: Path):
     """The status badge uses the same _STATUS_STYLE markup as `research list`."""
     import io
@@ -785,6 +797,59 @@ def test_resume_pending_job_spawns_daemon(isolated_jobs_repo: Path, monkeypatch)
     assert result.exit_code == 0, result.stdout
     assert captured["job_id"] == job.id
     assert "7777" in result.stdout
+
+
+def test_resume_replan_writes_sidecar_with_note(isolated_jobs_repo: Path, monkeypatch):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    monkeypatch.setattr(cli.daemon, "is_daemon_alive", lambda _job_id: False)
+    captured: dict[str, object] = {}
+
+    def _fake_spawn(job_id: str) -> int:
+        captured["job_id"] = job_id
+        sidecar = job.root / RESUME_REPLAN_FILE
+        captured["sidecar_exists_at_spawn"] = sidecar.exists()
+        captured["sidecar_payload"] = json.loads(sidecar.read_text(encoding="utf-8"))
+        return 8888
+
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", _fake_spawn)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        [
+            "resume",
+            job.id,
+            "--replan",
+            "--note",
+            "user added FOIA response from City Clerk dated 2026-04-15",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert captured["job_id"] == job.id
+    assert captured["sidecar_exists_at_spawn"] is True
+    assert captured["sidecar_payload"] == {
+        "note": "user added FOIA response from City Clerk dated 2026-04-15"
+    }
+
+
+def test_resume_note_requires_replan(isolated_jobs_repo: Path, monkeypatch):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    monkeypatch.setattr(cli.daemon, "is_daemon_alive", lambda _job_id: False)
+    spawn_called = {"n": 0}
+    monkeypatch.setattr(
+        cli.daemon,
+        "spawn_daemon",
+        lambda _job_id: spawn_called.__setitem__("n", spawn_called["n"] + 1) or 1,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["resume", job.id, "--note", "hint only"])
+
+    assert result.exit_code == 2
+    assert "--note requires --replan" in (result.stdout + (result.stderr or ""))
+    assert spawn_called["n"] == 0
+    assert not (job.root / RESUME_REPLAN_FILE).exists()
 
 
 def test_resume_clears_stale_stop_flag_before_spawn(isolated_jobs_repo: Path, monkeypatch):

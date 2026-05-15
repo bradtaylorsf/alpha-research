@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import json
 import logging
 import os
 import signal
@@ -48,7 +49,7 @@ import httpx
 from research_agent.config import get as cfg_get
 from research_agent.observability.events import emit
 from research_agent.storage import db
-from research_agent.storage.jobs import DEFAULT_JOBS_ROOT, Job
+from research_agent.storage.jobs import DEFAULT_JOBS_ROOT, RESUME_REPLAN_FILE, Job
 
 logger = logging.getLogger(__name__)
 
@@ -464,6 +465,64 @@ def _load_time_cap_hours(job: Job, intake: dict[str, Any]) -> float | None:
     return _coerce_positive_hours(row["time_cap_hours"] if row is not None else None)
 
 
+def _consume_resume_replan_request(job: Job) -> dict[str, Any] | None:
+    """Read and delete the one-shot resume replan sidecar, if present."""
+    path = job.root / RESUME_REPLAN_FILE
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _pre_loop_resume_replan(job: Job, router: Any, request: dict[str, Any]) -> None:
+    """Run tactical_replan once before ``run_loop`` pulls the next queued task."""
+    from research_agent.orchestrator import loop as _loop
+    from research_agent.orchestrator import plan as _plan
+
+    plan = _loop._load_latest_plan(job)
+    if plan is None:
+        return
+    recent_results = _loop._load_recent_task_results(job)
+    prior_attempts = _plan._compute_prior_attempts_for_subgoal(
+        plan,
+        _loop._load_all_task_attempts(job),
+    )
+    inconclusive_context = [
+        item for item in prior_attempts.values() if item.get("prior_task_kinds")
+    ]
+    kwargs: dict[str, Any] = {}
+    if inconclusive_context:
+        kwargs["inconclusive_subgoals"] = inconclusive_context
+    note = request.get("note")
+    if isinstance(note, str) and note.strip():
+        kwargs["user_note"] = note.strip()
+
+    emit(
+        job,
+        "INFO",
+        "daemon",
+        "replan_triggered",
+        {"stage": "resume", "has_note": "user_note" in kwargs},
+    )
+    await _plan.tactical_replan(
+        job,
+        plan,
+        recent_results,
+        router=router,
+        findings=_loop._load_all_findings(job),
+        synthesis_md=_loop._load_latest_synthesis_md(job),
+        follow_up_questions=_loop._load_pending_follow_up_questions(recent_results),
+        **kwargs,
+    )
+
+
 def _install_stop_signal_handlers(
     aloop: asyncio.AbstractEventLoop,
     job: Job,
@@ -814,6 +873,23 @@ async def run_daemon(
                 pass
             return 1
 
+    resume_replan_request = _consume_resume_replan_request(job)
+    if resume_replan_request is not None:
+        try:
+            await _pre_loop_resume_replan(job, router, resume_replan_request)
+        except Exception as exc:  # noqa: BLE001 — preserve normal resume on replan failure
+            logger.warning("daemon: resume replan failed for job %s: %s", job.id, exc)
+            try:
+                emit(
+                    job,
+                    "WARN",
+                    "daemon",
+                    "warning",
+                    {"stage": "resume_replan", "error": str(exc)},
+                )
+            except Exception:
+                pass
+
     should_stop = asyncio.Event()
     aloop = asyncio.get_running_loop()
     signals_installed = False
@@ -950,6 +1026,9 @@ async def run_daemon(
             elif loop_time_capped:
                 final_status = "completed"
                 completion_reason = "time_cap"
+            elif loop_result is not None and loop_result.get("completion_reason") == "exhausted":
+                final_status = "completed"
+                completion_reason = "exhausted"
             elif loop_result is not None and loop_result.get("cap_hit"):
                 final_status = "completed"
                 completion_reason = "task_cap"
