@@ -17,6 +17,9 @@ Two public entry points:
 
 Both functions persist via :func:`write_synthesis` and rotate ``report.md``
 into ``report.history/`` via :func:`write_report` (atomic per §16).
+The loop may also write ``synthesis/low_yield.json`` as a list of
+``{kind, query_stem, count, suggested_unblocker}`` records for later
+Confirmed Gaps rendering.
 
 Budget handling implements the §16 anti-pattern guard: if a frontier call
 hits :class:`BudgetExceeded`, we log WARN, emit a ``warning`` event, and
@@ -357,6 +360,538 @@ def _compute_department_coverage(findings: list[dict[str, Any]]) -> list[dict[st
     )
 
 
+def _load_jsonl_events(job: Job) -> list[dict[str, Any]]:
+    path = job.root / "events.jsonl"
+    if not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            events.append(item)
+    return events
+
+
+def _latest_inconclusive_subgoal_ids(job: Job) -> set[int]:
+    inconclusive: set[int] = set()
+    for event in _load_jsonl_events(job):
+        if event.get("kind") != "plan_subgoals_updated":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        raw_ids = payload.get("inconclusive")
+        if not isinstance(raw_ids, list):
+            continue
+        next_ids: set[int] = set()
+        for raw_id in raw_ids:
+            if isinstance(raw_id, bool):
+                continue
+            if isinstance(raw_id, int):
+                next_ids.add(raw_id)
+            elif isinstance(raw_id, str) and raw_id.strip().isdigit():
+                next_ids.add(int(raw_id.strip()))
+        inconclusive = next_ids
+    return inconclusive
+
+
+def _load_low_yield_records(job: Job) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int]] = set()
+
+    def _add(item: dict[str, Any]) -> None:
+        kind = item.get("kind")
+        stem = item.get("query_stem")
+        count = item.get("count")
+        if not isinstance(kind, str) or not isinstance(stem, str):
+            return
+        try:
+            count_i = int(count)
+        except (TypeError, ValueError):
+            count_i = 0
+        if count_i < 3:
+            return
+        key = (kind, stem, count_i)
+        if key in seen:
+            return
+        seen.add(key)
+        records.append(dict(item, count=count_i))
+
+    for event in _load_jsonl_events(job):
+        if event.get("kind") != "low_yield_connector":
+            continue
+        payload = event.get("payload")
+        if isinstance(payload, dict):
+            _add(payload)
+
+    path = job.root / "synthesis" / "low_yield.json"
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = []
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict):
+                    _add(item)
+    return records
+
+
+def _load_failed_task_rows(job: Job) -> list[dict[str, Any]]:
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, kind, payload_json, status, result_json, error
+            FROM tasks
+            WHERE job_id = ? AND status = 'failed'
+            ORDER BY id ASC
+            """,
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
+
+def _json_dict(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _raw_query_from_payload(payload: dict[str, Any]) -> str:
+    for key in ("query", "q", "sub_question", "url", "source_id", "arxiv_id"):
+        value = payload.get(key)
+        if value not in (None, "", []):
+            return str(value)
+    return ""
+
+
+def _query_stem_for_payload(payload: dict[str, Any]) -> str:
+    from research_agent.orchestrator.plan import _attempt_query_stem
+
+    return _attempt_query_stem(payload)
+
+
+def _source_label_from_query(query: str) -> str | None:
+    city_match = re.search(r"\bcity\s+of\s+([a-z][a-z\s.'-]{2,60})", query, re.IGNORECASE)
+    if city_match:
+        name = " ".join(city_match.group(1).split())
+        return f"City of {name.title()}"
+    site_match = re.search(r"\bsite:([a-z0-9.-]+)", query, re.IGNORECASE)
+    host = site_match.group(1).lower() if site_match else ""
+    if host == "alamedaca.gov":
+        return "City of Alameda"
+    if host.endswith(".gov"):
+        label = host.split(".")[0]
+        label = re.sub(r"(ca|ny|tx|fl|wa|or|il|ma|pa|oh|mi|ga|nc|nj|va)$", "", label)
+        label = label.replace("-", " ").strip()
+        if label:
+            return label.title()
+    return None
+
+
+def _fallback_unblocker(kind: str, query: str, failure_reason: str | None) -> str:
+    lower = f"{kind} {query} {failure_reason or ''}".lower()
+    source_label = _source_label_from_query(query)
+    if source_label:
+        return f"FOIA the {source_label} Clerk or records custodian for records matching '{query}'"
+    if "courtlistener" in lower or "403" in lower:
+        return (
+            "Use a CourtListener API token from https://www.courtlistener.com/api/ "
+            f"or PACER/RECAP for '{query or kind}'"
+        )
+    if "calaccess" in lower or "form 460" in lower:
+        return (
+            "Request Form 460 records from the named city clerk or county elections "
+            f"office for '{query}'"
+        )
+    if "fec" in lower:
+        return f"Check FEC.gov candidate and committee filings directly for '{query}'"
+    if "edgar" in lower:
+        return f"Check SEC EDGAR directly or state SoS records for '{query}'"
+    if "licensing" in lower:
+        return f"Search the state licensing-board portal for '{query}'"
+    if "sos" in lower or "opencorporates" in lower:
+        return f"Search the state Secretary of State business registry for '{query}'"
+    if query:
+        return f"Ask the named records custodian or source owner for records matching '{query}'"
+    return f"Use the source owner or records custodian for {kind}"
+
+
+def _specific_unblocker(
+    *,
+    kind: str,
+    query: str,
+    failure_reason: str | None = None,
+    suggested: str | None = None,
+    gap_reason: str | None = None,
+) -> str:
+    for candidate in (suggested, gap_reason):
+        if isinstance(candidate, str) and candidate.strip():
+            text = candidate.strip().rstrip(".")
+            source_label = _source_label_from_query(query)
+            lower = text.lower()
+            if source_label and ("city clerk" in lower or "records request" in lower):
+                return f"FOIA the {source_label} Clerk for records matching '{query}'"
+            if query and query.lower() not in lower and len(text) < 180:
+                return f"{text} for '{query}'"
+            return text
+    return _fallback_unblocker(kind, query, failure_reason)
+
+
+def _topic_for_stem(stem: str, query: str) -> str:
+    text = query or stem
+    text = re.sub(r"\bsite:[^\s]+", "", text, flags=re.IGNORECASE).strip()
+    return text or "unresolved source gap"
+
+
+def _compute_confirmed_gaps(job: Job, plan: Plan) -> list[dict[str, Any]]:
+    """Aggregate failed/low-yield work into report-ready confirmed gaps."""
+    from research_agent.orchestrator.plan import _failure_reason_for_attempt, _task_matches_subgoal
+
+    subgoals_by_id = {sg.id: sg for sg in plan.subgoals}
+    inconclusive_ids = _latest_inconclusive_subgoal_ids(job)
+    low_yield_records = _load_low_yield_records(job)
+    low_yield_by_key: dict[tuple[str, str], dict[str, Any]] = {
+        (str(r.get("kind") or ""), str(r.get("query_stem") or "")): r
+        for r in low_yield_records
+    }
+    failed_rows = _load_failed_task_rows(job)
+
+    gaps: dict[str, dict[str, Any]] = {}
+    attempt_seen: set[tuple[str, str, str, str]] = set()
+    consumed_low_yield_keys: set[tuple[str, str]] = set()
+
+    def _ensure_gap(
+        topic: str,
+        *,
+        gap_reason: str | None = None,
+        suggested_unblocker: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_topic = " ".join(topic.split()).strip() or "unresolved source gap"
+        gap = gaps.get(normalized_topic)
+        if gap is None:
+            gap = {
+                "topic": normalized_topic,
+                "attempts": [],
+                "failure_summary": "",
+                "suggested_unblocker": suggested_unblocker or "",
+                "_gap_reason": gap_reason,
+                "_reasons": {},
+            }
+            gaps[normalized_topic] = gap
+        else:
+            if gap_reason and not gap.get("_gap_reason"):
+                gap["_gap_reason"] = gap_reason
+            if suggested_unblocker and not gap.get("suggested_unblocker"):
+                gap["suggested_unblocker"] = suggested_unblocker
+        return gap
+
+    def _add_attempt(
+        gap: dict[str, Any],
+        *,
+        kind: str,
+        query: str,
+        failure_reason: str,
+        count: int,
+        suggested_unblocker: str | None = None,
+    ) -> None:
+        key = (str(gap["topic"]), kind, query, failure_reason)
+        if key in attempt_seen:
+            for attempt in gap["attempts"]:
+                if (
+                    attempt["task_kind"] == kind
+                    and attempt["query"] == query
+                    and attempt["failure_reason"] == failure_reason
+                ):
+                    current = int(attempt["count"])
+                    incoming = int(count)
+                    updated = max(current, incoming) if incoming > 1 else current + 1
+                    attempt["count"] = updated
+                    reasons = gap["_reasons"]
+                    reasons[failure_reason] = max(
+                        int(reasons.get(failure_reason, 0)),
+                        updated,
+                    )
+                    break
+            return
+        attempt_seen.add(key)
+        gap["attempts"].append(
+            {
+                "task_kind": kind,
+                "query": query,
+                "failure_reason": failure_reason,
+                "count": int(count),
+            }
+        )
+        reasons = gap["_reasons"]
+        reasons[failure_reason] = int(reasons.get(failure_reason, 0)) + int(count)
+        if suggested_unblocker:
+            gap["suggested_unblocker"] = suggested_unblocker
+
+    from research_agent.storage import coverage
+
+    for unit in coverage.list_units(job, {"confirmed_gap"}):
+        topic = unit.dim_key
+        unblocker = (
+            unit.unblocker
+            or "Use a non-public records request or wait for the source owner "
+            "to publish this coverage unit"
+        )
+        gap = _ensure_gap(
+            topic,
+            gap_reason="coverage unit confirmed gap",
+            suggested_unblocker=unblocker,
+        )
+        attempts = unit.recent_attempts or []
+        if not attempts:
+            _add_attempt(
+                gap,
+                kind="coverage_ledger",
+                query=topic,
+                failure_reason="coverage unit marked confirmed_gap",
+                count=1,
+                suggested_unblocker=unblocker,
+            )
+        for attempt in attempts:
+            _add_attempt(
+                gap,
+                kind=attempt.task_kind or "coverage_ledger",
+                query=topic,
+                failure_reason=attempt.reason or "coverage attempt did not complete unit",
+                count=1,
+                suggested_unblocker=unblocker,
+            )
+
+    subgoal_payload_attempts: dict[int, list[tuple[dict[str, Any], dict[str, Any], str]]] = {
+        sid: [] for sid in subgoals_by_id
+    }
+    unmatched_failed: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+    for row in failed_rows:
+        payload = _json_dict(row.get("payload_json"))
+        result = _json_dict(row.get("result_json"))
+        reason = _failure_reason_for_attempt(row, result) or str(row.get("error") or "failed")
+        matched_any = False
+        for sid, sg in subgoals_by_id.items():
+            if _task_matches_subgoal(sg, payload):
+                subgoal_payload_attempts.setdefault(sid, []).append((row, payload, reason))
+                matched_any = True
+        if not matched_any:
+            unmatched_failed.append((row, payload, reason))
+
+    for sid, sg in subgoals_by_id.items():
+        gap_reason = sg.gap_reason if isinstance(sg.gap_reason, str) else None
+        if sid not in inconclusive_ids and not gap_reason:
+            continue
+        representative_query = ""
+        attempts = subgoal_payload_attempts.get(sid) or []
+        if attempts:
+            representative_query = _raw_query_from_payload(attempts[0][1])
+        unblocker = _specific_unblocker(
+            kind="subgoal",
+            query=representative_query or sg.description,
+            gap_reason=gap_reason,
+        )
+        gap = _ensure_gap(
+            sg.description,
+            gap_reason=gap_reason,
+            suggested_unblocker=unblocker,
+        )
+        for row, payload, reason in attempts:
+            kind = str(row.get("kind") or "task")
+            query = _raw_query_from_payload(payload) or _query_stem_for_payload(payload)
+            stem = _query_stem_for_payload(payload)
+            low_yield_key = (kind, stem)
+            suggested = low_yield_by_key.get(low_yield_key, {}).get("suggested_unblocker")
+            attempt_unblocker = (
+                _specific_unblocker(
+                    kind=kind,
+                    query=query,
+                    failure_reason=reason,
+                    suggested=suggested,
+                )
+                if isinstance(suggested, str) and suggested.strip()
+                else None
+            )
+            _add_attempt(
+                gap,
+                kind=kind,
+                query=query,
+                failure_reason=reason,
+                count=1,
+                suggested_unblocker=attempt_unblocker,
+            )
+            if low_yield_key in low_yield_by_key:
+                consumed_low_yield_keys.add(low_yield_key)
+
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row, payload, reason in unmatched_failed:
+        kind = str(row.get("kind") or "task")
+        stem = _query_stem_for_payload(payload)
+        query = _raw_query_from_payload(payload) or stem
+        key = (kind, stem, reason)
+        group = grouped.setdefault(
+            key,
+            {
+                "kind": kind,
+                "stem": stem,
+                "query": query,
+                "reason": reason,
+                "count": 0,
+            },
+        )
+        group["count"] = int(group["count"]) + 1
+
+    for group in grouped.values():
+        kind = str(group["kind"])
+        stem = str(group["stem"])
+        query = str(group["query"])
+        reason = str(group["reason"])
+        low_yield = low_yield_by_key.get((kind, stem), {})
+        suggested = low_yield.get("suggested_unblocker")
+        unblocker = _specific_unblocker(
+            kind=kind,
+            query=query,
+            failure_reason=reason,
+            suggested=suggested if isinstance(suggested, str) else None,
+        )
+        gap = _ensure_gap(_topic_for_stem(stem, query), suggested_unblocker=unblocker)
+        _add_attempt(
+            gap,
+            kind=kind,
+            query=query,
+            failure_reason=reason,
+            count=int(group["count"]),
+            suggested_unblocker=unblocker,
+        )
+        if (kind, stem) in low_yield_by_key:
+            consumed_low_yield_keys.add((kind, stem))
+
+    for record in low_yield_records:
+        kind = str(record.get("kind") or "search")
+        stem = str(record.get("query_stem") or "")
+        if (kind, stem) in consumed_low_yield_keys:
+            continue
+        query = stem
+        reason = f"0 results from {kind}"
+        suggested = record.get("suggested_unblocker")
+        unblocker = _specific_unblocker(
+            kind=kind,
+            query=query,
+            failure_reason=reason,
+            suggested=suggested if isinstance(suggested, str) else None,
+        )
+        gap = _ensure_gap(_topic_for_stem(stem, query), suggested_unblocker=unblocker)
+        _add_attempt(
+            gap,
+            kind=kind,
+            query=query,
+            failure_reason=reason,
+            count=int(record.get("count") or 3),
+            suggested_unblocker=unblocker,
+        )
+
+    out: list[dict[str, Any]] = []
+    for gap in gaps.values():
+        attempts = list(gap["attempts"])
+        if not attempts and not gap.get("_gap_reason"):
+            continue
+        reasons = gap.get("_reasons") if isinstance(gap.get("_reasons"), dict) else {}
+        if gap.get("_gap_reason"):
+            summary = f"Could not resolve {gap['topic']}: {gap['_gap_reason']}."
+        elif reasons:
+            first_reason = max(reasons.items(), key=lambda item: int(item[1]))[0]
+            kinds = sorted({a["task_kind"] for a in attempts})
+            summary = (
+                f"Tried {', '.join(kinds)} for {gap['topic']}; "
+                f"the strongest failure signal was {first_reason}."
+            )
+        else:
+            summary = f"Could not resolve {gap['topic']} from available public sources."
+        unblocker = str(gap.get("suggested_unblocker") or "").strip()
+        if not unblocker:
+            first = attempts[0] if attempts else {}
+            unblocker = _fallback_unblocker(
+                str(first.get("task_kind") or "source"),
+                str(first.get("query") or gap["topic"]),
+                str(first.get("failure_reason") or ""),
+            )
+        out.append(
+            {
+                "topic": gap["topic"],
+                "attempts": attempts,
+                "failure_summary": summary,
+                "suggested_unblocker": unblocker,
+            }
+        )
+    return sorted(out, key=lambda item: str(item["topic"]).lower())
+
+
+def _load_current_hypotheses(job: Job, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from research_agent.storage import hypotheses
+
+    rows = hypotheses.list_hypotheses(job)
+    if not rows:
+        return []
+    findings_by_id = {
+        int(f["id"]): f
+        for f in findings
+        if isinstance(f.get("id"), int)
+    }
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = {
+            "id": row["id"],
+            "statement": row["statement"],
+            "confidence": row["confidence"],
+            "supports": row["supports"],
+            "refutes": row["refutes"],
+            "status": row["status"],
+            "plan_version": row["plan_version"],
+            "supporting_findings": [
+                findings_by_id[fid]
+                for fid in row["supports"]
+                if isinstance(fid, int) and fid in findings_by_id
+            ],
+            "refuting_findings": [
+                findings_by_id[fid]
+                for fid in row["refutes"]
+                if isinstance(fid, int) and fid in findings_by_id
+            ],
+        }
+        out.append(item)
+    return out
+
+
+def _load_artifacts_for_context(job: Job) -> list[dict[str, Any]]:
+    from research_agent.storage import artifacts
+
+    return artifacts.list_artifacts(job)
+
+
+def _load_coverage_for_context(job: Job) -> list[dict[str, Any]]:
+    from research_agent.storage import coverage
+
+    return [unit.model_dump(mode="json") for unit in coverage.list_units(job)]
+
+
 def _build_context(
     *,
     goal: str,
@@ -367,13 +902,23 @@ def _build_context(
     critique: str | None,
     followup_recipes: str,
     paid_unblock_recipes: str,
+    confirmed_gaps: list[dict[str, Any]] | None = None,
+    current_hypotheses: list[dict[str, Any]] | None = None,
+    artifacts: list[dict[str, Any]] | None = None,
     final: bool = False,
 ) -> str:
     payload: dict[str, Any] = {
         "goal": goal,
         "scope_class": str(plan.scope_class) if plan.scope_class else None,
         "subgoals": [
-            {"id": sg.id, "description": sg.description, "done": sg.done} for sg in plan.subgoals
+            {
+                "id": sg.id,
+                "description": sg.description,
+                "done": sg.done,
+                "gap_reason": sg.gap_reason,
+                "gap_status": sg.gap_status,
+            }
+            for sg in plan.subgoals
         ],
         "findings": findings,
         "sources": {str(k): v for k, v in sources.items()},
@@ -382,6 +927,9 @@ def _build_context(
         "followup_recipes": followup_recipes,
         "paid_unblock_recipes": paid_unblock_recipes,
         "department_coverage": _compute_department_coverage(findings),
+        "confirmed_gaps": confirmed_gaps or [],
+        "current_hypotheses": current_hypotheses or [],
+        "artifacts": artifacts or [],
     }
     if final:
         payload["final"] = True
@@ -395,6 +943,7 @@ _TRAILING_STATUS_KEY_RE = re.compile(
     r'"(?:subgoal_status|closed|reopened|inconclusive)"',
     re.IGNORECASE,
 )
+_HYPOTHESIS_UPDATES_KEY_RE = re.compile(r'"hypothesis_updates"', re.IGNORECASE)
 _PROSE_SUBGOAL_STATUS_RE = re.compile(
     r"(?im)^\s*(?:#{1,6}\s*)?(?:[-*]\s*)?(?:\*\*)?"
     r"(?:(?:H)|(?:Subgoal))\s*#?(?P<id>\d+)(?:\*\*)?\s*[:\-]\s*"
@@ -648,6 +1197,142 @@ def _extract_subgoal_status(
     return stripped_md, None
 
 
+def _strip_range(raw: str, start: int, end: int) -> str:
+    prefix = raw[:start].rstrip()
+    suffix = raw[end:].lstrip()
+    if prefix and suffix:
+        return prefix + "\n\n" + suffix
+    if prefix:
+        return prefix + "\n"
+    return suffix
+
+
+def _coerce_finding_id_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    out: list[int] = []
+    for item in value:
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int):
+            out.append(item)
+        elif isinstance(item, str) and item.strip().isdigit():
+            out.append(int(item.strip()))
+    return out
+
+
+def _normalize_hypothesis_updates_payload(data: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(data, dict):
+        return None
+    raw_updates = data.get("hypothesis_updates")
+    if not isinstance(raw_updates, list):
+        return None
+    updates: list[dict[str, Any]] = []
+    for raw in raw_updates:
+        if not isinstance(raw, dict):
+            continue
+        statement = raw.get("statement")
+        status = raw.get("status")
+        confidence_raw = raw.get("confidence")
+        if not isinstance(statement, str) or not statement.strip():
+            continue
+        if status not in {"open", "confirmed", "refuted", "inconclusive"}:
+            continue
+        if not isinstance(confidence_raw, (int, float)) or isinstance(confidence_raw, bool):
+            continue
+        confidence = max(0.0, min(1.0, float(confidence_raw)))
+        item: dict[str, Any] = {
+            "statement": statement.strip(),
+            "confidence": confidence,
+            "supports": _coerce_finding_id_list(raw.get("supports")),
+            "refutes": _coerce_finding_id_list(raw.get("refutes")),
+            "status": status,
+        }
+        raw_id = raw.get("id")
+        if isinstance(raw_id, int) and not isinstance(raw_id, bool):
+            item["id"] = raw_id
+        elif isinstance(raw_id, str) and raw_id.strip().isdigit():
+            item["id"] = int(raw_id.strip())
+        updates.append(item)
+    return updates
+
+
+def _extract_hypothesis_updates(
+    job: Job,
+    raw: str,
+) -> tuple[str, list[dict[str, Any]] | None]:
+    """Split a ``hypothesis_updates`` JSON fence from the markdown report."""
+    for match in reversed(list(_ANY_JSON_FENCE_RE.finditer(raw))):
+        body = match.group(1).strip()
+        if not _HYPOTHESIS_UPDATES_KEY_RE.search(body):
+            continue
+        stripped_md = _strip_range(raw, match.start(), match.end())
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            emit(
+                job,
+                "WARN",
+                "synth",
+                "warning",
+                {
+                    "stage": "hypothesis_updates",
+                    "error": f"json parse failed: {exc}",
+                },
+            )
+            return stripped_md, None
+        updates = _normalize_hypothesis_updates_payload(data)
+        if updates is None:
+            emit(
+                job,
+                "WARN",
+                "synth",
+                "warning",
+                {
+                    "stage": "hypothesis_updates",
+                    "error": "missing recognized hypothesis_updates payload",
+                },
+            )
+            return stripped_md, None
+        return stripped_md, updates
+    return raw, None
+
+
+def _apply_hypothesis_updates(
+    job: Job,
+    plan: Plan,
+    updates: list[dict[str, Any]],
+) -> list[int]:
+    from research_agent.storage import hypotheses
+
+    updated_ids: list[int] = []
+    for update in updates:
+        hid = hypotheses.upsert_hypothesis(
+            job,
+            id=update.get("id"),
+            plan_version=plan.version,
+            statement=update["statement"],
+            confidence=float(update["confidence"]),
+            supports=update.get("supports") or [],
+            refutes=update.get("refutes") or [],
+            status=update["status"],
+        )
+        updated_ids.append(hid)
+        emit(
+            job,
+            "INFO",
+            "synth",
+            "hypothesis_updated",
+            {
+                "id": hid,
+                "plan_version": plan.version,
+                "status": update["status"],
+                "confidence": float(update["confidence"]),
+            },
+        )
+    return updated_ids
+
+
 def _apply_subgoal_status(
     job: Job,
     plan: Plan,  # noqa: ARG001 — kept for clarity at call sites; helper reloads from DB
@@ -783,6 +1468,94 @@ def _model_name_for(router: Router, tier: str) -> str:
     return name
 
 
+def _provider_name_for(router: Router, tier: str) -> str:
+    spec = router.tiers.get(tier, {})
+    provider = spec.get("provider")
+    if not isinstance(provider, str) or not provider:
+        return "unknown"
+    return provider
+
+
+_PROVIDER_FORMAT_HINTS = (
+    "http 400",
+    "400 bad request",
+    "bad request",
+    "invalid_request",
+    "invalid request",
+    "reasoning",
+    "channel",
+    "openai-compatible",
+    "provider",
+)
+
+
+def _safe_exception_snippet(exc: BaseException, *, max_chars: int = 500) -> str:
+    text = str(exc).strip() or repr(exc)
+    text = re.sub(r"\s+", " ", text)
+    for marker in (" system_prompt=", " prompt=", " context=", " messages="):
+        idx = text.lower().find(marker.strip().lower())
+        if idx > 0:
+            text = text[:idx].rstrip()
+    if len(text) > max_chars:
+        return text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
+def _is_provider_format_specific(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(hint in text for hint in _PROVIDER_FORMAT_HINTS)
+
+
+def _emit_synthesis_llm_failed(
+    job: Job,
+    router: Router,
+    *,
+    tier: str,
+    exc: BaseException,
+    attempt_count: int,
+    post_cap: bool = False,
+) -> None:
+    emit(
+        job,
+        "WARN",
+        "synth",
+        "synthesis_llm_failed",
+        {
+            "tier": tier,
+            "model": _model_name_for(router, tier),
+            "provider": _provider_name_for(router, tier),
+            "attempt_count": attempt_count,
+            "error_type": type(exc).__name__,
+            "diagnostic_snippet": _safe_exception_snippet(exc),
+            "provider_format_specific": _is_provider_format_specific(exc),
+            "post_cap": post_cap,
+        },
+    )
+
+
+def _emit_fallback_tier_used(
+    job: Job,
+    router: Router,
+    *,
+    primary_tier: str,
+    fallback_tier: str,
+    reason: str,
+) -> None:
+    emit(
+        job,
+        "INFO",
+        "synth",
+        "synthesis_fallback_tier_used",
+        {
+            "primary_tier": primary_tier,
+            "fallback_tier": fallback_tier,
+            "fallback_model": _model_name_for(router, fallback_tier),
+            "fallback_provider": _provider_name_for(router, fallback_tier),
+            "reason": reason,
+        },
+    )
+
+
 async def _do_synthesis(
     job: Job,
     plan: Plan,
@@ -797,6 +1570,9 @@ async def _do_synthesis(
     critique = _load_latest_critique(job)
     followup_recipes = _load_followup_recipes()
     paid_unblock_recipes = _load_paid_unblock_recipes()
+    confirmed_gaps = _compute_confirmed_gaps(job, plan)
+    current_hypotheses = _load_current_hypotheses(job, findings)
+    artifact_rows = _load_artifacts_for_context(job)
 
     context = _build_context(
         goal=job.goal,
@@ -807,6 +1583,9 @@ async def _do_synthesis(
         critique=critique,
         followup_recipes=followup_recipes,
         paid_unblock_recipes=paid_unblock_recipes,
+        confirmed_gaps=confirmed_gaps,
+        current_hypotheses=current_hypotheses,
+        artifacts=artifact_rows,
         final=final,
     )
 
@@ -825,6 +1604,13 @@ async def _do_synthesis(
             "warning",
             {"stage": primary_tier, "error": str(exc)},
         )
+        _emit_fallback_tier_used(
+            job,
+            router,
+            primary_tier=primary_tier,
+            fallback_tier=fallback_tier,
+            reason="budget_exceeded",
+        )
         try:
             content = await _run_synth(job, router, fallback_tier, context)
             used_tier = fallback_tier
@@ -840,18 +1626,80 @@ async def _do_synthesis(
             return _write_stub_output(job)
         except Exception as exc2:  # noqa: BLE001 — terminal retry exhaustion
             logger.warning("synth: %s tier failed after retries: %s", fallback_tier, exc2)
-            return _write_failed_output(job, tier=fallback_tier, exc=exc2, attempt_count=2)
+            _emit_synthesis_llm_failed(
+                job,
+                router,
+                tier=fallback_tier,
+                exc=exc2,
+                attempt_count=2,
+            )
+            return _write_deterministic_fallback_output(
+                job,
+                plan,
+                primary_tier=primary_tier,
+                fallback_tier=fallback_tier,
+                primary_exc=exc,
+                fallback_exc=exc2,
+                top_n=top_n,
+                final=final,
+            )
     except Exception as exc:  # noqa: BLE001 — terminal retry exhaustion
         logger.warning("synth: %s tier failed after retries: %s", primary_tier, exc)
-        return _write_failed_output(job, tier=primary_tier, exc=exc, attempt_count=1)
+        _emit_synthesis_llm_failed(
+            job,
+            router,
+            tier=primary_tier,
+            exc=exc,
+            attempt_count=1,
+        )
+        _emit_fallback_tier_used(
+            job,
+            router,
+            primary_tier=primary_tier,
+            fallback_tier=fallback_tier,
+            reason="primary_llm_failed",
+        )
+        try:
+            content = await _run_synth(job, router, fallback_tier, context)
+            used_tier = fallback_tier
+        except BudgetExceeded as exc2:
+            logger.warning("synth: budget exceeded on %s tier: %s", fallback_tier, exc2)
+            emit(
+                job,
+                "WARN",
+                "synth",
+                "warning",
+                {"stage": fallback_tier, "error": str(exc2), "budget_capped": True},
+            )
+            return _write_template_stub_output(job)
+        except Exception as exc2:  # noqa: BLE001 — deterministic fallback handles terminal LLM failure
+            logger.warning("synth: %s tier failed after retries: %s", fallback_tier, exc2)
+            _emit_synthesis_llm_failed(
+                job,
+                router,
+                tier=fallback_tier,
+                exc=exc2,
+                attempt_count=2,
+            )
+            return _write_deterministic_fallback_output(
+                job,
+                plan,
+                primary_tier=primary_tier,
+                fallback_tier=fallback_tier,
+                primary_exc=exc,
+                fallback_exc=exc2,
+                top_n=top_n,
+                final=final,
+            )
 
     cost = getattr(router.budget, "last_cost", None)
     cost_val: float | None = float(cost) if isinstance(cost, (int, float)) else None
     model_name = _model_name_for(router, used_tier)
 
+    content_without_hypotheses, hypothesis_updates = _extract_hypothesis_updates(job, content)
     stripped_md, status_map = _extract_subgoal_status(
         job,
-        content,
+        content_without_hypotheses,
         subgoal_ids=[sg.id for sg in plan.subgoals],
     )
     stripped_md = _reconcile_sources(job, stripped_md, sources)
@@ -862,6 +1710,8 @@ async def _do_synthesis(
 
     if status_map:
         _apply_subgoal_status(job, plan, status_map)
+    if hypothesis_updates:
+        _apply_hypothesis_updates(job, plan, hypothesis_updates)
 
     emit(
         job,
@@ -975,6 +1825,11 @@ def _render_template_stub(
     goal: str,
     findings: list[dict[str, Any]],
     sources: dict[int, dict[str, Any]],
+    heading: str = "# Report (budget cap — template stub)",
+    intro_lines: list[str] | None = None,
+    confirmed_gaps: list[dict[str, Any]] | None = None,
+    coverage_units: list[dict[str, Any]] | None = None,
+    artifacts: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a no-LLM markdown report from on-disk findings + sources.
 
@@ -982,12 +1837,15 @@ def _render_template_stub(
     here comes from the SQLite mirror, so the user always gets a readable
     report.md even with $0 left in the budget.
     """
-    lines: list[str] = [
-        "# Report (budget cap — template stub)",
-        "",
+    intro = intro_lines or [
         "Research budget cap was reached before any synthesis call could run.",
         "This report is a template-rendered summary of the findings already on",
         "disk; no LLM call was made.",
+    ]
+    lines: list[str] = [
+        heading,
+        "",
+        *intro,
         "",
         "## Goal",
         "",
@@ -1032,7 +1890,166 @@ def _render_template_stub(
             lines.append(f"- [{sid}] {title} — {url}")
         lines.append("")
 
+    artifact_rows = artifacts or []
+    if artifact_rows:
+        lines.append("## Artifacts")
+        lines.append("")
+        for artifact in artifact_rows:
+            name = artifact.get("name") or "artifact"
+            row_count = artifact.get("row_count")
+            csv_path = artifact.get("csv_path") or ""
+            coverage = artifact.get("source_coverage") or ""
+            row_label = f"{row_count} rows" if row_count is not None else "rows unavailable"
+            if csv_path:
+                line = f"- {name}: {row_label} — [CSV]({csv_path})"
+            else:
+                line = f"- {name}: {row_label}"
+            if coverage:
+                line += f" — {coverage}"
+            lines.append(line)
+        lines.append("")
+
+    coverage_rows = coverage_units or []
+    if coverage_rows:
+        lines.append("## Coverage Ledger")
+        lines.append("")
+        for unit in coverage_rows:
+            dimensions = unit.get("dimensions") if isinstance(unit.get("dimensions"), dict) else {}
+            dim_label = ", ".join(f"{k}={v}" for k, v in sorted(dimensions.items()))
+            if not dim_label:
+                dim_label = str(unit.get("dim_key") or "coverage unit")
+            status = unit.get("status") or "unknown"
+            line = f"- {dim_label}: {status}"
+            unblocker = unit.get("unblocker")
+            if isinstance(unblocker, str) and unblocker.strip():
+                line += f" — {unblocker.strip()}"
+            lines.append(line)
+        lines.append("")
+
+    gap_rows = confirmed_gaps or []
+    if gap_rows:
+        lines.append("## Confirmed Gaps")
+        lines.append("")
+        for gap in gap_rows:
+            topic = gap.get("topic") or "Unresolved gap"
+            summary = gap.get("failure_summary") or "Could not resolve from available sources."
+            unblocker = gap.get("suggested_unblocker") or "Identify a source owner or custodian."
+            lines.append(f"- **{topic}**: {summary} Unblocker: {unblocker}")
+            attempts = gap.get("attempts")
+            if isinstance(attempts, list):
+                for attempt in attempts[:5]:
+                    if not isinstance(attempt, dict):
+                        continue
+                    kind = attempt.get("task_kind") or "task"
+                    query = attempt.get("query") or topic
+                    reason = attempt.get("failure_reason") or "failed"
+                    count = attempt.get("count") or 1
+                    lines.append(f"  - {kind} `{query}`: {reason} ({count}x)")
+        lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_deterministic_fallback_output(
+    job: Job,
+    plan: Plan,
+    *,
+    primary_tier: str | None,
+    fallback_tier: str,
+    primary_exc: BaseException | None,
+    fallback_exc: BaseException,
+    top_n: int,
+    final: bool,
+    post_cap: bool = False,
+) -> SynthesisOutput:
+    """Write a no-LLM report after terminal non-budget synthesis failures."""
+    # The traceback section in _render_failed_synthesis_md already wraps the
+    # body in a ```text fence, so emit plain section markers here and let the
+    # outer fence apply — nested fences would break markdown rendering.
+    traceback_parts: list[str] = []
+    if primary_exc is not None:
+        traceback_parts.append(
+            "--- Primary Tier Traceback ---\n"
+            + "".join(
+                traceback.format_exception(
+                    type(primary_exc),
+                    primary_exc,
+                    primary_exc.__traceback__,
+                )
+            ).strip()
+        )
+    traceback_parts.append(
+        "--- Fallback Tier Traceback ---\n"
+        + "".join(
+            traceback.format_exception(
+                type(fallback_exc),
+                fallback_exc,
+                fallback_exc.__traceback__,
+            )
+        ).strip()
+    )
+    failed_version = write_synthesis_failed(
+        job,
+        "",
+        model="synthesis_llm_failed",
+        traceback_text="\n\n".join(traceback_parts),
+    )
+    failed_path = job.root / f"synthesis/{failed_version:04d}.failed.md"
+
+    findings = _load_top_findings(job, top_n)
+    sources = _load_sources_for(job, findings)
+    confirmed_gaps = _compute_confirmed_gaps(job, plan)
+    artifact_rows = _load_artifacts_for_context(job)
+    coverage_rows = _load_coverage_for_context(job)
+    content = _render_template_stub(
+        goal=job.goal,
+        findings=findings,
+        sources=sources,
+        heading="# Report (deterministic fallback)",
+        intro_lines=[
+            "The configured LLM synthesis tiers failed, so this report was",
+            "rendered deterministically from persisted findings, sources,",
+            "coverage, gaps, and table artifacts. No LLM wrote this report.",
+        ],
+        confirmed_gaps=confirmed_gaps,
+        coverage_units=coverage_rows,
+        artifacts=artifact_rows,
+    )
+
+    version = write_synthesis(
+        job,
+        content,
+        model="deterministic_fallback",
+        cost_usd=None,
+    )
+    report_path = write_report(job, content)
+    emit(
+        job,
+        "INFO",
+        "synth",
+        "synthesis_deterministic_fallback_written",
+        {
+            "version": version,
+            "report_path": str(report_path),
+            "failed_path": str(failed_path),
+            "primary_tier": primary_tier,
+            "fallback_tier": fallback_tier,
+            "findings_count": len(findings),
+            "confirmed_gaps_count": len(confirmed_gaps),
+            "has_artifacts": bool(artifact_rows),
+            "has_coverage_ledger": bool(coverage_rows),
+            "final": final,
+            "post_cap": post_cap,
+        },
+    )
+    return SynthesisOutput(
+        version=version,
+        content=content,
+        model="deterministic_fallback",
+        cost_usd=None,
+        report_path=str(report_path),
+        truncated=True,
+    )
 
 
 def _write_template_stub_output(job: Job) -> SynthesisOutput:
@@ -1140,6 +2157,9 @@ async def final_synthesis_after_cap(
     critique = _load_latest_critique(job)
     followup_recipes = _load_followup_recipes()
     paid_unblock_recipes = _load_paid_unblock_recipes()
+    confirmed_gaps = _compute_confirmed_gaps(job, plan)
+    current_hypotheses = _load_current_hypotheses(job, findings)
+    artifact_rows = _load_artifacts_for_context(job)
 
     context = _build_context(
         goal=job.goal,
@@ -1150,6 +2170,9 @@ async def final_synthesis_after_cap(
         critique=critique,
         followup_recipes=followup_recipes,
         paid_unblock_recipes=paid_unblock_recipes,
+        confirmed_gaps=confirmed_gaps,
+        current_hypotheses=current_hypotheses,
+        artifacts=artifact_rows,
         final=True,
     )
 
@@ -1168,15 +2191,34 @@ async def final_synthesis_after_cap(
         return _write_template_stub_output(job)
     except Exception as exc:  # noqa: BLE001 — terminal retry exhaustion
         logger.warning("synth: %s tier failed after retries (post-cap): %s", fallback_tier, exc)
-        return _write_failed_output(job, tier=fallback_tier, exc=exc, attempt_count=1)
+        _emit_synthesis_llm_failed(
+            job,
+            router,
+            tier=fallback_tier,
+            exc=exc,
+            attempt_count=1,
+            post_cap=True,
+        )
+        return _write_deterministic_fallback_output(
+            job,
+            plan,
+            primary_tier=None,
+            fallback_tier=fallback_tier,
+            primary_exc=None,
+            fallback_exc=exc,
+            top_n=FINAL_TOP_N,
+            final=True,
+            post_cap=True,
+        )
 
     cost = getattr(router.budget, "last_cost", None)
     cost_val: float | None = float(cost) if isinstance(cost, (int, float)) else None
     model_name = _model_name_for(router, fallback_tier)
 
+    content_without_hypotheses, hypothesis_updates = _extract_hypothesis_updates(job, content)
     stripped_md, status_map = _extract_subgoal_status(
         job,
-        content,
+        content_without_hypotheses,
         subgoal_ids=[sg.id for sg in plan.subgoals],
     )
     stripped_md = _reconcile_sources(job, stripped_md, sources)
@@ -1187,6 +2229,8 @@ async def final_synthesis_after_cap(
 
     if status_map:
         _apply_subgoal_status(job, plan, status_map)
+    if hypothesis_updates:
+        _apply_hypothesis_updates(job, plan, hypothesis_updates)
 
     emit(
         job,

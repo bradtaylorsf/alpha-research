@@ -33,8 +33,11 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import hashlib
+import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -48,9 +51,16 @@ import httpx
 from research_agent.config import get as cfg_get
 from research_agent.observability.events import emit
 from research_agent.storage import db
-from research_agent.storage.jobs import DEFAULT_JOBS_ROOT, Job
+from research_agent.storage.jobs import (
+    DEFAULT_JOBS_ROOT,
+    INBOX_REPLAN_FILE,
+    RESUME_REPLAN_FILE,
+    Job,
+)
 
 logger = logging.getLogger(__name__)
+
+INBOX_POLL_INTERVAL_S = 30.0
 
 
 def _atomic_write_text(path: Path, data: str) -> None:
@@ -464,6 +474,64 @@ def _load_time_cap_hours(job: Job, intake: dict[str, Any]) -> float | None:
     return _coerce_positive_hours(row["time_cap_hours"] if row is not None else None)
 
 
+def _consume_resume_replan_request(job: Job) -> dict[str, Any] | None:
+    """Read and delete the one-shot resume replan sidecar, if present."""
+    path = job.root / RESUME_REPLAN_FILE
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _pre_loop_resume_replan(job: Job, router: Any, request: dict[str, Any]) -> None:
+    """Run tactical_replan once before ``run_loop`` pulls the next queued task."""
+    from research_agent.orchestrator import loop as _loop
+    from research_agent.orchestrator import plan as _plan
+
+    plan = _loop._load_latest_plan(job)
+    if plan is None:
+        return
+    recent_results = _loop._load_recent_task_results(job)
+    prior_attempts = _plan._compute_prior_attempts_for_subgoal(
+        plan,
+        _loop._load_all_task_attempts(job),
+    )
+    inconclusive_context = [
+        item for item in prior_attempts.values() if item.get("prior_task_kinds")
+    ]
+    kwargs: dict[str, Any] = {}
+    if inconclusive_context:
+        kwargs["inconclusive_subgoals"] = inconclusive_context
+    note = request.get("note")
+    if isinstance(note, str) and note.strip():
+        kwargs["user_note"] = note.strip()
+
+    emit(
+        job,
+        "INFO",
+        "daemon",
+        "replan_triggered",
+        {"stage": "resume", "has_note": "user_note" in kwargs},
+    )
+    await _plan.tactical_replan(
+        job,
+        plan,
+        recent_results,
+        router=router,
+        findings=_loop._load_all_findings(job),
+        synthesis_md=_loop._load_latest_synthesis_md(job),
+        follow_up_questions=_loop._load_pending_follow_up_questions(recent_results),
+        **kwargs,
+    )
+
+
 def _install_stop_signal_handlers(
     aloop: asyncio.AbstractEventLoop,
     job: Job,
@@ -527,6 +595,130 @@ async def _disk_cap_watcher(
                     )
                 except Exception:
                     pass
+            try:
+                await asyncio.wait_for(should_stop.wait(), timeout=poll_s)
+            except TimeoutError:
+                continue
+    except asyncio.CancelledError:
+        return
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _inbox_topic_guess(path: Path) -> str:
+    stem = re.sub(r"[_-]+", " ", path.stem).strip()
+    return stem[:120] if stem else path.name[:120]
+
+
+def _inbox_summary(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".md", ".txt", ".html", ".htm"}:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        text = " ".join(text.split())
+        if text:
+            return text[:240]
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    return f"{path.suffix.lower().lstrip('.') or 'file'}; {size} bytes"
+
+
+def _processed_inbox_path(inbox_dir: Path, sha: str, filename: str) -> Path:
+    processed_dir = inbox_dir / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-") or "document"
+    return processed_dir / f"{sha}-{safe_name}"
+
+
+async def _inbox_watcher(
+    job: Job,
+    should_stop: asyncio.Event,
+    *,
+    interval_s: float | None = None,
+) -> None:
+    """Poll ``jobs/<id>/inbox`` for human-supplied documents."""
+    from research_agent.tools import local_corpus
+
+    poll_s = interval_s if interval_s is not None else INBOX_POLL_INTERVAL_S
+    inbox_dir = job.root / "inbox"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    (inbox_dir / "processed").mkdir(parents=True, exist_ok=True)
+
+    try:
+        while not should_stop.is_set():
+            for file_path in sorted(inbox_dir.iterdir()):
+                if should_stop.is_set():
+                    break
+                if not file_path.is_file():
+                    continue
+                if file_path.name.endswith(".tmp"):
+                    continue
+                try:
+                    sha = _file_sha256(file_path)
+                    summary = _inbox_summary(file_path)
+                    topic_guess = _inbox_topic_guess(file_path)
+                    indexed = local_corpus.index(file_path, job)
+                    processed_path = _processed_inbox_path(inbox_dir, sha, file_path.name)
+                    os.replace(file_path, processed_path)
+                    note = (
+                        f"user added {file_path.name} ({summary}); "
+                        "identify NEW angles enabled by this evidence"
+                    )
+                    _atomic_write_text(
+                        job.root / INBOX_REPLAN_FILE,
+                        json.dumps(
+                            {
+                                "trigger": "inbox",
+                                "filename": file_path.name,
+                                "sha": sha,
+                                "summary": summary,
+                                "note": note,
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n",
+                    )
+                    emit(
+                        job,
+                        "INFO",
+                        "daemon",
+                        "corpus_doc_added",
+                        {
+                            "sha": sha,
+                            "filename": file_path.name,
+                            "processed_path": str(processed_path.relative_to(job.root)),
+                            "topic_guess": topic_guess,
+                            "summary_chars": len(summary),
+                            **indexed,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001 — keep watcher alive
+                    logger.exception("inbox watcher failed for %s", file_path)
+                    try:
+                        emit(
+                            job,
+                            "WARN",
+                            "daemon",
+                            "warning",
+                            {
+                                "stage": "inbox_watcher",
+                                "path": str(file_path),
+                                "error": str(exc),
+                            },
+                        )
+                    except Exception:
+                        pass
             try:
                 await asyncio.wait_for(should_stop.wait(), timeout=poll_s)
             except TimeoutError:
@@ -814,6 +1006,23 @@ async def run_daemon(
                 pass
             return 1
 
+    resume_replan_request = _consume_resume_replan_request(job)
+    if resume_replan_request is not None:
+        try:
+            await _pre_loop_resume_replan(job, router, resume_replan_request)
+        except Exception as exc:  # noqa: BLE001 — preserve normal resume on replan failure
+            logger.warning("daemon: resume replan failed for job %s: %s", job.id, exc)
+            try:
+                emit(
+                    job,
+                    "WARN",
+                    "daemon",
+                    "warning",
+                    {"stage": "resume_replan", "error": str(exc)},
+                )
+            except Exception:
+                pass
+
     should_stop = asyncio.Event()
     aloop = asyncio.get_running_loop()
     signals_installed = False
@@ -836,6 +1045,9 @@ async def run_daemon(
         disk_cap_gb = DEFAULT_DISK_CAP_GB
     cap_bytes = max(1, int(disk_cap_gb * 1024 * 1024 * 1024))
     disk_cap_task = aloop.create_task(_disk_cap_watcher(job, cap_bytes, should_stop))
+    inbox_task: asyncio.Task | None = None
+    if intake.get("inbox") is True:
+        inbox_task = aloop.create_task(_inbox_watcher(job, should_stop))
     progress_task = aloop.create_task(_foreground_progress_task(job, should_stop))
 
     from research_agent.llm.budgets import BudgetExceeded
@@ -950,12 +1162,24 @@ async def run_daemon(
             elif loop_time_capped:
                 final_status = "completed"
                 completion_reason = "time_cap"
+            elif (
+                loop_result is not None
+                and loop_result.get("completion_reason") == "confirmed_gap"
+            ):
+                final_status = "completed"
+                completion_reason = "confirmed_gap"
+            elif loop_result is not None and loop_result.get("completion_reason") == "exhausted":
+                final_status = "completed"
+                completion_reason = "exhausted"
             elif loop_result is not None and loop_result.get("cap_hit"):
                 final_status = "completed"
                 completion_reason = "task_cap"
-            elif plan is not None and plan.is_complete():
+            elif plan is not None and _loop._is_goal_complete(job, plan):
                 final_status = "completed"
                 completion_reason = "goal_complete"
+            elif plan is not None and plan.is_complete():
+                final_status = "completed"
+                completion_reason = "exhausted"
             else:
                 final_status = "stopped"
                 completion_reason = "user_stopped"
@@ -973,6 +1197,8 @@ async def run_daemon(
         # synth, then sat idle for 48 min in this finally block.
         await _cancel_with_timeout(watcher_task, "stop_flag_watcher", timeout=5.0)
         await _cancel_with_timeout(disk_cap_task, "disk_cap_watcher", timeout=5.0)
+        if inbox_task is not None:
+            await _cancel_with_timeout(inbox_task, "inbox_watcher", timeout=5.0)
         await _cancel_with_timeout(progress_task, "foreground_progress_task", timeout=5.0)
         if signals_installed:
             for sig in (signal.SIGTERM, signal.SIGINT):

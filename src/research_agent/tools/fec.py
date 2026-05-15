@@ -40,6 +40,8 @@ import httpx
 from research_agent import config
 from research_agent.tools._registry import (
     BaseSearchPayload as _BaseSearchPayload,
+)
+from research_agent.tools._registry import (
     register_kind as _register_kind,
 )
 from research_agent.tools.models import SearchResult, Source
@@ -58,6 +60,7 @@ _CACHE_TTL = 3600.0
 
 _VALID_KINDS = {
     "candidates",
+    "candidates_enumerate",
     "committees",
     "schedules/schedule_a",
     "schedules/schedule_e",
@@ -204,6 +207,89 @@ def _build_candidate_result(hit: dict[str, Any]) -> SearchResult | None:
     }
     return SearchResult(
         url=_candidate_url(cand_id),
+        title=name,
+        snippet=snippet,
+        published_at=None,
+        source_kind="fec",
+        extras=extras,
+    )
+
+
+def _principal_committee(hit: dict[str, Any]) -> tuple[str | None, str | None]:
+    raw = hit.get("principal_committees")
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            committee_id = item.get("committee_id")
+            name = item.get("name") or item.get("committee_name")
+            if committee_id or name:
+                return (
+                    str(committee_id).strip() if committee_id else None,
+                    str(name).strip() if name else None,
+                )
+    committee_id = hit.get("principal_committee_id")
+    name = hit.get("principal_committee_name")
+    return (
+        str(committee_id).strip() if committee_id else None,
+        str(name).strip() if name else None,
+    )
+
+
+def _build_candidate_enumeration_result(
+    hit: dict[str, Any],
+    *,
+    cycle: int,
+) -> SearchResult | None:
+    cand_id = str(hit.get("candidate_id") or "").strip()
+    name = str(hit.get("name") or "").strip()
+    if not cand_id or not name:
+        return None
+
+    party = str(hit.get("party") or hit.get("party_full") or "").strip()
+    office = str(hit.get("office") or "").strip()
+    office_full = str(hit.get("office_full") or "").strip()
+    state = str(hit.get("state") or "").strip()
+    district = hit.get("district") or hit.get("district_number")
+    district_text = "" if district in (None, "") else str(district).strip()
+    incumbent = str(hit.get("incumbent_challenge_full") or "").strip()
+    election_years = hit.get("election_years") or hit.get("cycles") or []
+    if not isinstance(election_years, list):
+        election_years = []
+    principal_committee_id, principal_committee_name = _principal_committee(hit)
+    source_url = _candidate_url(cand_id)
+    retrieved_at = datetime.now(UTC).isoformat()
+
+    bits = [name, party, office_full or office, state]
+    if district_text:
+        bits.append(f"district {district_text}")
+    if incumbent:
+        bits.append(incumbent)
+    snippet = " — ".join(bit for bit in bits if bit)
+
+    extras: dict[str, Any] = {
+        "candidate_id": cand_id,
+        "candidate_name": name,
+        "name": name,
+        "party": party,
+        "office": office,
+        "office_full": office_full,
+        "state": state,
+        "district": district_text,
+        "district_or_seat": district_text,
+        "election_year": cycle,
+        "election_years": election_years,
+        "cycles": election_years,
+        "incumbent_challenge_full": incumbent,
+        "principal_committee_id": principal_committee_id,
+        "principal_committee_name": principal_committee_name,
+        "source_url": source_url,
+        "source_kind": "fec",
+        "source_type": "fec-filed",
+        "retrieval_timestamp": retrieved_at,
+    }
+    return SearchResult(
+        url=source_url,
         title=name,
         snippet=snippet,
         published_at=None,
@@ -375,11 +461,137 @@ _KIND_TO_BUILDER = {
 # ---------------------------------------------------------------------------
 
 
+async def _enumerate_candidates(
+    *,
+    cycle: int,
+    office: str,
+    state: str | None = None,
+    district: str | int | None = None,
+    party: str | None = None,
+    candidate_status: str | None = None,
+    max_rows: int = 1000,
+    per_page: int = 100,
+    page: int = 1,
+    timeout: float = 15.0,
+) -> list[SearchResult]:
+    office_norm = office.strip().upper()
+    if office_norm not in {"H", "S", "P"}:
+        logger.warning(
+            "fec enumerate candidates: office must be H, S, or P (got %r)",
+            office,
+        )
+        return []
+    try:
+        cycle_int = int(cycle)
+    except (TypeError, ValueError):
+        logger.warning("fec enumerate candidates: cycle must be an int (got %r)", cycle)
+        return []
+
+    max_rows = max(1, min(int(max_rows or 1000), 5000))
+    per_page = max(1, min(int(per_page or 100), 100))
+    current_page = max(1, int(page or 1))
+    params: dict[str, Any] = {
+        "api_key": _resolve_api_key(),
+        "election_year": cycle_int,
+        "office": office_norm,
+        "per_page": per_page,
+        "page": current_page,
+        "sort": "name",
+    }
+    if state:
+        params["state"] = str(state).strip().upper()
+    if district not in (None, ""):
+        params["district"] = str(district).strip()
+    if party:
+        params["party"] = str(party).strip().upper()
+    if candidate_status:
+        params["candidate_status"] = str(candidate_status).strip()
+
+    url = urljoin(_BASE_URL, "candidates/")
+    out: list[SearchResult] = []
+    while len(out) < max_rows:
+        params["page"] = current_page
+        await _rate_limit_gate()
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=timeout,
+                headers=_headers(),
+            ) as client:
+                response = await client.get(url, params=params)
+        except (httpx.HTTPError, OSError) as exc:
+            logger.warning(
+                "fec enumerate candidates transport failed cycle=%s office=%s state=%s: %s",
+                cycle_int,
+                office_norm,
+                state,
+                exc,
+            )
+            break
+
+        if response.status_code != 200:
+            logger.warning(
+                "fec enumerate candidates returned HTTP %s cycle=%s office=%s state=%s",
+                response.status_code,
+                cycle_int,
+                office_norm,
+                state,
+            )
+            break
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            logger.warning("fec enumerate candidates returned non-JSON: %s", exc)
+            break
+
+        raw_hits = payload.get("results") or []
+        if not isinstance(raw_hits, list) or not raw_hits:
+            if not out:
+                logger.warning(
+                    "fec enumerate candidates returned 0 rows cycle=%s office=%s state=%s",
+                    cycle_int,
+                    office_norm,
+                    state,
+                )
+            break
+        for hit in raw_hits:
+            if len(out) >= max_rows:
+                break
+            if not isinstance(hit, dict):
+                continue
+            result = _build_candidate_enumeration_result(hit, cycle=cycle_int)
+            if result is not None:
+                out.append(result)
+
+        pagination = payload.get("pagination") if isinstance(payload, dict) else None
+        total_pages = None
+        if isinstance(pagination, dict):
+            try:
+                total_pages = int(pagination.get("pages") or 0)
+            except (TypeError, ValueError):
+                total_pages = None
+        if total_pages is not None and current_page >= total_pages:
+            break
+        if len(raw_hits) < per_page and total_pages is None:
+            break
+        current_page += 1
+    return out
+
+
 async def search(
     query: str,
     *,
     kind: str = "candidates",
     max_results: int = 20,
+    cycle: int | None = None,
+    office: str | None = None,
+    state: str | None = None,
+    district: str | int | None = None,
+    party: str | None = None,
+    candidate_status: str | None = None,
+    max_rows: int | None = None,
+    per_page: int = 100,
+    page: int = 1,
     timeout: float = 15.0,
 ) -> list[SearchResult]:
     """Run an OpenFEC search and return up to ``max_results`` hits.
@@ -388,6 +600,10 @@ async def search(
     ``schedules/schedule_a`` (individual contributions, query goes to
     ``contributor_name``) or ``schedules/schedule_e`` (independent
     expenditures, query goes to ``payee_name``).
+
+    ``kind="candidates_enumerate"`` uses structured filters against the
+    OpenFEC candidates endpoint and paginates by cycle/office/state/district
+    instead of broad text search.
 
     Returns ``[]`` on transport / HTTP error / non-JSON body or unknown
     ``kind`` — connector failures must never crash the planner.
@@ -399,6 +615,25 @@ async def search(
             sorted(_VALID_KINDS),
         )
         return []
+
+    if kind == "candidates_enumerate":
+        if cycle is None or office is None:
+            logger.warning(
+                "fec.search candidates_enumerate requires cycle and office"
+            )
+            return []
+        return await _enumerate_candidates(
+            cycle=cycle,
+            office=office,
+            state=state,
+            district=district,
+            party=party,
+            candidate_status=candidate_status,
+            max_rows=max_rows if max_rows is not None else max_results,
+            per_page=per_page,
+            page=page,
+            timeout=timeout,
+        )
 
     endpoint, qparam = _KIND_TO_ENDPOINT_AND_QPARAM[kind]
     builder = _KIND_TO_BUILDER[kind]
@@ -905,6 +1140,15 @@ KIND = "fec_search"
 class _PayloadSchema(_BaseSearchPayload):
     kind: str | None = None
     max_results: int | None = None
+    cycle: int | None = None
+    office: str | None = None
+    state: str | None = None
+    district: str | None = None
+    party: str | None = None
+    candidate_status: str | None = None
+    max_rows: int | None = None
+    per_page: int | None = None
+    page: int | None = None
 
 
 _register_kind(
@@ -915,7 +1159,9 @@ _register_kind(
     host_patterns=("fec.gov", "www.fec.gov", "api.open.fec.gov"),
     description="Candidates, committees, schedule A/E filings (OpenFEC)",
     optional_payload_knobs=(
-        "`kind: candidates\\|committees\\|schedules/schedule_a\\|schedules/schedule_e`"
+        "`kind: candidates\\|candidates_enumerate\\|committees\\|schedules/schedule_a"
+        "\\|schedules/schedule_e`, `cycle`, `office`, `state`, `district`, `party`,"
+        " `candidate_status`, `max_rows`"
     ),
     example_query="Trump 2024 committee",
     module_name="fec",

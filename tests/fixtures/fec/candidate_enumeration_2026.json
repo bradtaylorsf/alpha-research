@@ -1,0 +1,41 @@
+{
+  "CA-H-01": {
+    "pagination": {"page": 1, "pages": 1, "count": 1},
+    "results": [
+      {
+        "candidate_id": "H6CA01001",
+        "name": "DOE, JANE",
+        "party": "DEM",
+        "state": "CA",
+        "office": "H",
+        "office_full": "House",
+        "district": "01",
+        "incumbent_challenge_full": "Challenger",
+        "election_years": [2026],
+        "principal_committees": [
+          {
+            "committee_id": "C01000001",
+            "name": "JANE DOE FOR CONGRESS"
+          }
+        ]
+      }
+    ]
+  },
+  "FL-S": {
+    "pagination": {"page": 1, "pages": 1, "count": 1},
+    "results": [
+      {
+        "candidate_id": "S6FL00001",
+        "name": "SMITH, ROBERT",
+        "party": "REP",
+        "state": "FL",
+        "office": "S",
+        "office_full": "Senate",
+        "incumbent_challenge_full": "Open seat",
+        "cycles": [2026],
+        "principal_committee_id": "C01000002",
+        "principal_committee_name": "ROBERT SMITH FOR SENATE"
+      }
+    ]
+  }
+}

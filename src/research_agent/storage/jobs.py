@@ -4,9 +4,12 @@ Implements the load-bearing convention from §4 of the implementation guide:
 every job is a self-contained folder under ``jobs/<job-id>/`` with a fixed
 sidecar layout (``job.json``, ``intake.json``, ``goal.md``, the ``plan/``,
 ``findings/``, ``sources/``, ``synthesis/``, ``critique/``, ``report.history/``
-subfolders, and an append-only ``events.jsonl``). The cross-job ``jobs`` table
-in :mod:`research_agent.storage.db` mirrors the canonical metadata so the
-future UI and the ``research list`` CLI can query without scanning disk.
+subfolders, and an append-only ``events.jsonl``). Transient control files
+live next to those sidecars: ``STOP`` requests graceful shutdown and
+``RESUME_REPLAN.json`` asks the daemon to run one tactical replan before
+resuming the queue. The cross-job ``jobs`` table in
+:mod:`research_agent.storage.db` mirrors the canonical metadata so the future
+UI and the ``research list`` CLI can query without scanning disk.
 
 Job IDs are deterministic ``YYYY-MM-DD-<slug>`` strings derived from the
 intake goal. The slug is normalized aggressively (lowercased, non-alphanum
@@ -33,6 +36,8 @@ from typing import Any
 from research_agent.storage import db
 
 DEFAULT_JOBS_ROOT = Path("jobs")
+RESUME_REPLAN_FILE = "RESUME_REPLAN.json"
+INBOX_REPLAN_FILE = "INBOX_REPLAN.json"
 
 # Daemon kill escalation window. Module-level so tests can monkeypatch it
 # down from 10s to keep the suite fast.
@@ -47,6 +52,9 @@ _SUBDIRS = (
     "critique",
     "report.history",
     "archive",
+    "inbox",
+    "inbox/processed",
+    "artifacts",
 )
 # Subdirs that get wiped on a soft reset; ``archive`` is preserved on purpose
 # so prior reports stay around for ``research compare``.
@@ -56,8 +64,31 @@ _SLUG_FORBIDDEN = ("/", "\\", "..")
 
 # Allowed values for ``completion_reason`` per issue #39 §9.
 ALLOWED_COMPLETION_REASONS = frozenset(
-    {"goal_complete", "time_cap", "budget_cap", "task_cap", "user_stopped"}
+    {
+        "goal_complete",
+        "time_cap",
+        "budget_cap",
+        "task_cap",
+        "user_stopped",
+        "exhausted",
+        "confirmed_gap",
+    }
 )
+
+
+def is_enumeration_intake(intake: dict[str, Any] | None) -> bool:
+    """Return True when intake explicitly asks for complete-list coverage."""
+    if not isinstance(intake, dict):
+        return False
+    enum = intake.get("enumeration")
+    if isinstance(enum, dict) and (
+        enum.get("required") is True
+        or isinstance(enum.get("units"), (list, dict))
+        or isinstance(enum.get("coverage_units"), list)
+    ):
+        return True
+    orientation = str(intake.get("output_orientation") or "").strip().lower()
+    return orientation in {"roster", "complete list", "enumeration"}
 
 
 def _slugify(text: str, max_len: int = 60) -> str:
@@ -380,10 +411,12 @@ class Job:
                     "critiques",
                     "findings",
                     "events",
+                    "hypotheses",
                     "checkpoints",
                     "syntheses",
                     "llm_calls",
                     "plans",
+                    "coverage_units",
                 ):
                     conn.execute(f"DELETE FROM {tbl} WHERE job_id = ?", (self.id,))
                 conn.execute(
@@ -403,8 +436,9 @@ class Job:
                 shutil.rmtree(sub_path)
             sub_path.mkdir()
 
-        # Wipe transient sidecars: events.jsonl, STOP flag, daemon.pid.
-        for sidecar in ("events.jsonl", "STOP", "daemon.pid"):
+        # Wipe transient sidecars: events.jsonl, STOP flag, daemon.pid,
+        # and generated coverage ledger.
+        for sidecar in ("events.jsonl", "STOP", "daemon.pid", "coverage.json"):
             try:
                 (self.root / sidecar).unlink()
             except FileNotFoundError:
@@ -549,8 +583,10 @@ def list_jobs(
 
 __all__ = [
     "DEFAULT_JOBS_ROOT",
+    "INBOX_REPLAN_FILE",
     "KILL_ESCALATION_SECONDS",
     "KILL_POLL_INTERVAL_SECONDS",
     "Job",
+    "is_enumeration_intake",
     "list_jobs",
 ]

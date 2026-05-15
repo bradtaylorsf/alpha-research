@@ -97,6 +97,8 @@ TaskKind = Literal[
     "licensing_fetch",
     "sos_search",
     "sos_fetch",
+    "state_election_search",
+    "state_election_fetch",
     "calaccess_search",
     "calaccess_fetch",
     "scholar_search",
@@ -150,6 +152,8 @@ class Subgoal(BaseModel):
     id: int
     description: str = Field(min_length=1)
     done: bool = False
+    gap_reason: str | None = None
+    gap_status: str | None = None
 
 
 class TaskSpec(BaseModel):
@@ -329,6 +333,177 @@ def _summarize_finding(f: dict[str, Any]) -> dict[str, Any]:
     return summarized
 
 
+_ATTEMPT_STEM_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "for",
+    "from",
+    "how",
+    "in",
+    "is",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "what",
+    "when",
+    "where",
+    "who",
+    "why",
+    "with",
+}
+
+
+def _attempt_query_stem(payload: dict[str, Any] | None, *, max_words: int = 6) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    raw: Any = None
+    for key in ("query", "q", "sub_question", "url", "source_id"):
+        value = payload.get(key)
+        if value not in (None, "", []):
+            raw = value
+            break
+    if raw is None:
+        return ""
+    text = str(raw).lower()
+    words = [
+        w
+        for w in re.findall(r"[a-z0-9]+", text)
+        if w and w not in _ATTEMPT_STEM_STOPWORDS
+    ]
+    if not words:
+        words = re.findall(r"[a-z0-9]+", text)
+    return " ".join(words[:max_words])
+
+
+def _task_matches_subgoal(subgoal: Subgoal, payload: dict[str, Any]) -> bool:
+    """Best-effort subgoal attribution via explicit id, substring, then token overlap."""
+    raw_id = payload.get("subgoal_id") or payload.get("subgoal")
+    if raw_id == subgoal.id or raw_id == str(subgoal.id):
+        return True
+    text_parts = [
+        str(payload.get(k) or "")
+        for k in ("sub_question", "query", "q")
+        if payload.get(k)
+    ]
+    if not text_parts:
+        return False
+    task_text = " ".join(text_parts).lower()
+    desc = subgoal.description.lower()
+    if desc in task_text or task_text in desc:
+        return True
+    desc_tokens = {
+        t
+        for t in re.findall(r"[a-z0-9]+", desc)
+        if t and t not in _ATTEMPT_STEM_STOPWORDS
+    }
+    task_tokens = {
+        t
+        for t in re.findall(r"[a-z0-9]+", task_text)
+        if t and t not in _ATTEMPT_STEM_STOPWORDS
+    }
+    if not desc_tokens or not task_tokens:
+        return False
+    return len(desc_tokens & task_tokens) >= max(1, min(3, len(desc_tokens) // 3))
+
+
+def _failure_reason_for_attempt(row: dict[str, Any], result: dict[str, Any] | None) -> str | None:
+    kind = str(row.get("kind") or "task")
+    status = row.get("status")
+    error = row.get("error")
+    if status == "failed":
+        err = str(error or "failed").strip()
+        match = re.search(r"\b([45]\d\d)\b", err)
+        if match:
+            return f"HTTP {match.group(1)} from {kind}"
+        return f"{err[:80]} from {kind}"
+    if not isinstance(result, dict):
+        return None
+    results = result.get("results")
+    if isinstance(results, list) and not results:
+        return f"0 results from {kind}"
+    if kind == "extract_findings":
+        written = result.get("findings_written")
+        ids = result.get("finding_ids")
+        if written == 0 or (isinstance(ids, list) and not ids):
+            return "extract_findings returned empty findings"
+    return None
+
+
+def _compute_prior_attempts_for_subgoal(
+    plan: Plan,
+    tasks_table: list[dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    """Aggregate prior task kinds, stems, and failures for open subgoals."""
+    import json as _json
+
+    open_subgoals = [sg for sg in plan.subgoals if not sg.done]
+    attempts: dict[int, dict[str, Any]] = {
+        sg.id: {
+            "id": sg.id,
+            "description": sg.description,
+            "prior_task_kinds": [],
+            "prior_query_stems": [],
+            "prior_failure_reasons": [],
+        }
+        for sg in open_subgoals
+    }
+    reason_counts: dict[int, dict[str, int]] = {sg.id: {} for sg in open_subgoals}
+    kind_seen: dict[int, set[str]] = {sg.id: set() for sg in open_subgoals}
+    stem_seen: dict[int, set[str]] = {sg.id: set() for sg in open_subgoals}
+
+    for row in tasks_table:
+        status = row.get("status")
+        if status not in {"done", "failed"}:
+            continue
+        try:
+            payload = (
+                _json.loads(row.get("payload_json") or "{}")
+                if isinstance(row.get("payload_json"), str)
+                else row.get("payload") or {}
+            )
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        try:
+            result = (
+                _json.loads(row.get("result_json") or "{}")
+                if isinstance(row.get("result_json"), str) and row.get("result_json")
+                else row.get("result")
+            )
+        except (TypeError, ValueError):
+            result = None
+        if not isinstance(result, dict):
+            result = None
+
+        for sg in open_subgoals:
+            if not _task_matches_subgoal(sg, payload):
+                continue
+            kind = str(row.get("kind") or "")
+            if kind and kind not in kind_seen[sg.id]:
+                kind_seen[sg.id].add(kind)
+                attempts[sg.id]["prior_task_kinds"].append(kind)
+            stem = _attempt_query_stem(payload)
+            if stem and stem not in stem_seen[sg.id]:
+                stem_seen[sg.id].add(stem)
+                attempts[sg.id]["prior_query_stems"].append(stem)
+            reason = _failure_reason_for_attempt(row, result)
+            if reason:
+                reason_counts[sg.id][reason] = reason_counts[sg.id].get(reason, 0) + 1
+
+    for sid, counts in reason_counts.items():
+        attempts[sid]["prior_failure_reasons"] = [
+            f"{reason} x {count}" for reason, count in sorted(counts.items())
+        ]
+    return attempts
+
+
 class PlanVersionCapExceeded(RuntimeError):
     """Raised when a job has hit the §6.3 hard cap of plan versions.
 
@@ -408,6 +583,39 @@ def _enqueue_plan_tasks(job: Job, plan: Plan) -> list[int]:
     else:
         specs = list(plan.task_template)
     return enqueue(job, specs, plan.version)
+
+
+def _apply_planner_gap_reasons(job: Job, plan: Plan) -> Plan:
+    """Close planner-documented gaps in the returned plan before persistence."""
+    gapped = [
+        {"id": sg.id, "gap_reason": sg.gap_reason}
+        for sg in plan.subgoals
+        if isinstance(sg.gap_reason, str) and sg.gap_reason.strip()
+    ]
+    if not gapped:
+        return plan
+
+    new_subgoals = [
+        sg.model_copy(
+            update={
+                "done": True,
+                "gap_reason": sg.gap_reason.strip() if sg.gap_reason else None,
+                "gap_status": sg.gap_status or "documented_gap",
+            }
+        )
+        if isinstance(sg.gap_reason, str) and sg.gap_reason.strip()
+        else sg
+        for sg in plan.subgoals
+    ]
+    updated = plan.model_copy(update={"subgoals": new_subgoals})
+    emit(
+        job,
+        "INFO",
+        "planner",
+        "plan_subgoals_gapped",
+        {"version": updated.version, "gapped": gapped},
+    )
+    return updated
 
 
 _YAML_FENCE_RE = re.compile(r"```(?:yaml|yml)?\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
@@ -587,6 +795,9 @@ async def initial_plan(job: Job, *, router: Router) -> Plan:
     )
     raw_path = _persist_raw_plan_yaml(job, version=1, raw=raw)
     plan = _parse_plan_yaml(raw, version=1, raw_path=raw_path)
+    from research_agent.storage import coverage
+
+    coverage.declare_from_intake(job)
     write_plan(job, plan.model_dump())
     _enqueue_plan_tasks(job, plan)
     _emit_plan_created(job, plan, tier="frontier", kind="initial")
@@ -602,6 +813,8 @@ async def tactical_replan(
     findings: list[dict[str, Any]] | None = None,
     synthesis_md: str | None = None,
     follow_up_questions: list[str] | None = None,
+    inconclusive_subgoals: list[dict[str, Any]] | None = None,
+    user_note: str | None = None,
 ) -> Plan:
     """Run a small in-loop replan on the local ``general`` tier.
 
@@ -630,6 +843,14 @@ async def tactical_replan(
         "prior_plan": plan.model_dump(),
         "recent_results": summarized,
     }
+    from research_agent.storage import hypotheses
+
+    payload["hypotheses"] = hypotheses.list_hypotheses(job)
+    from research_agent.storage import coverage
+
+    coverage_state = coverage.replan_context(job)
+    if coverage_state is not None:
+        payload["coverage_state"] = coverage_state
 
     # issue #179: include a bounded view of the running ``findings`` so the
     # planner can drill into named claims (Schedule F, WOTUS, mifepristone)
@@ -663,6 +884,10 @@ async def tactical_replan(
         # iteration instead of waiting for them to be re-derived from
         # findings tags.
         payload["follow_up_questions"] = list(follow_up_questions)
+    if inconclusive_subgoals:
+        payload["inconclusive_subgoals"] = list(inconclusive_subgoals)
+    if user_note:
+        payload["user_note"] = user_note
     context = json.dumps(payload, sort_keys=True, default=str)
 
     if original_len > 0:
@@ -696,6 +921,7 @@ async def tactical_replan(
     )
     raw_path = _persist_raw_plan_yaml(job, version=next_version, raw=raw)
     new_plan = _parse_plan_yaml(raw, version=next_version, raw_path=raw_path)
+    new_plan = _apply_planner_gap_reasons(job, new_plan)
     write_plan(job, new_plan.model_dump())
     _enqueue_plan_tasks(job, new_plan)
     _emit_plan_created(job, new_plan, tier="general", kind="tactical_replan")
@@ -833,10 +1059,13 @@ async def cloud_replan(
     """
     _assert_under_cap(job)
     next_version = plan.version + 1
+    from research_agent.storage import hypotheses
+
     context = json.dumps(
         {
             "prior_plan": plan.model_dump(),
             "critique": critique,
+            "hypotheses": hypotheses.list_hypotheses(job),
         },
         sort_keys=True,
         default=str,

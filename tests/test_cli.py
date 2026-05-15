@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import time
 from datetime import UTC, date, datetime
@@ -11,8 +12,8 @@ import pytest
 from typer.testing import CliRunner
 
 from research_agent import __version__, cli, config
-from research_agent.storage import db
-from research_agent.storage.jobs import Job
+from research_agent.storage import artifacts, db, hypotheses
+from research_agent.storage.jobs import RESUME_REPLAN_FILE, Job
 from research_agent.ui import render
 
 
@@ -257,6 +258,80 @@ def test_start_translate_non_english_flag_is_persisted(
     job_root = isolated_jobs_repo / "jobs" / f"{today}-translate-archival-findings"
     intake_data = json.loads((job_root / "intake.json").read_text(encoding="utf-8"))
     assert intake_data["translate_non_english"] is True
+
+
+def test_start_inbox_flag_is_persisted(isolated_jobs_repo: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 12345)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        ["start", "--skip-intake", "--goal", "Inbox enabled target", "--inbox"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    job_root = isolated_jobs_repo / "jobs" / f"{today}-inbox-enabled-target"
+    intake_data = json.loads((job_root / "intake.json").read_text(encoding="utf-8"))
+    assert intake_data["inbox"] is True
+    assert (job_root / "inbox" / "processed").is_dir()
+
+
+def test_start_input_csv_imports_artifact_and_enrichment_intake(
+    isolated_jobs_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 12345)
+    csv_path = isolated_jobs_repo / "input.csv"
+    csv_path.write_text(
+        "candidate_id,candidate_name,website,status\n"
+        "H1,Jane Example,,Filed\n"
+        "H2,Robert Example,https://existing.example,Pending\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        [
+            "start",
+            "--skip-intake",
+            "--goal",
+            "Enrich candidate roster",
+            "--input-csv",
+            str(csv_path),
+            "--artifact",
+            "candidates",
+            "--key",
+            "candidate_id",
+            "--target-column",
+            "website,status",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    job_root = isolated_jobs_repo / "jobs" / f"{today}-enrich-candidate-roster"
+    artifact_dir = job_root / "artifacts"
+    for suffix in (
+        ".csv",
+        ".jsonl",
+        ".schema.json",
+        ".meta.json",
+        ".provenance.jsonl",
+    ):
+        assert (artifact_dir / f"candidates{suffix}").exists()
+    intake_data = json.loads((job_root / "intake.json").read_text(encoding="utf-8"))
+    assert intake_data["input_csv_artifact"] == "candidates"
+    assert intake_data["enrichment"] == {
+        "artifact": "candidates",
+        "input_csv": str(csv_path),
+        "key_columns": ["candidate_id"],
+        "target_columns": ["website", "status"],
+        "overwrite_non_empty": False,
+    }
+    rows = list(csv.DictReader((artifact_dir / "candidates.csv").open()))
+    assert [row["candidate_id"] for row in rows] == ["H1", "H2"]
 
 
 def test_start_runs_intake_when_not_skipped(isolated_jobs_repo: Path, monkeypatch):
@@ -504,6 +579,18 @@ def test_status_idle_when_no_running_task(isolated_jobs_repo: Path):
     assert "(idle)" in result.stdout
 
 
+def test_status_surfaces_completion_reason(isolated_jobs_repo: Path):
+    """Terminal reasons such as ``exhausted`` are visible in detailed status."""
+    job = _make_synthetic_job(isolated_jobs_repo, goal="exhausted target")
+    job.set_status("completed", completion_reason="exhausted")
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["status", job.id])
+    assert result.exit_code == 0, result.stdout
+    assert "Completion reason" in result.stdout
+    assert "exhausted" in result.stdout
+
+
 def test_status_color_theme_matches_list(isolated_jobs_repo: Path):
     """The status badge uses the same _STATUS_STYLE markup as `research list`."""
     import io
@@ -594,6 +681,74 @@ def test_view_findings_when_none_fails(isolated_jobs_repo: Path):
     runner = CliRunner()
     result = runner.invoke(cli.app, ["view", job.id, "--findings"], env={"EDITOR": ""})
     assert result.exit_code != 0
+
+
+def test_view_hypotheses_prints_ledger(isolated_jobs_repo: Path):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    hypotheses.upsert_hypothesis(
+        job,
+        plan_version=1,
+        statement="Permitting friction is the primary delay driver.",
+        confidence=0.62,
+        supports=[10],
+        refutes=[11],
+        status="open",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["view", job.id, "--hypotheses"], env={"EDITOR": ""})
+
+    assert result.exit_code == 0, result.stdout
+    assert "Hypotheses for" in result.stdout
+    assert "Permitting friction is the primary delay driver." in result.stdout
+    assert "0.62" in result.stdout
+    assert "open" in result.stdout
+
+
+def test_view_rejects_multiple_modes(isolated_jobs_repo: Path):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        ["view", job.id, "--report", "--hypotheses"],
+        env={"EDITOR": ""},
+    )
+    assert result.exit_code == 2
+    assert "choose only one" in (result.stdout + (result.stderr or ""))
+
+
+def test_inbox_add_copies_file_and_list_shows_pending(isolated_jobs_repo: Path, tmp_path: Path):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    source = tmp_path / "foia-response.md"
+    source.write_text("# FOIA response\n\nContract file attached.\n", encoding="utf-8")
+
+    runner = CliRunner()
+    added = runner.invoke(cli.app, ["inbox", job.id, "add", str(source)])
+
+    assert added.exit_code == 0, added.stdout
+    dest = job.root / "inbox" / source.name
+    assert dest.exists()
+    assert dest.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert not list((job.root / "inbox").glob("*.tmp"))
+
+    listed = runner.invoke(cli.app, ["inbox", job.id, "list"])
+    assert listed.exit_code == 0, listed.stdout
+    assert "pending" in listed.stdout
+    assert "foia-response.md" in listed.stdout
+
+
+def test_inbox_list_shows_processed_files(isolated_jobs_repo: Path):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    processed = job.root / "inbox" / "processed" / "abc123-doc.md"
+    processed.parent.mkdir(parents=True, exist_ok=True)
+    processed.write_text("processed", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["inbox", job.id, "list"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "processed" in result.stdout
+    assert processed.name in result.stdout
 
 
 def test_logs_prints_existing_events(isolated_jobs_repo: Path):
@@ -785,6 +940,59 @@ def test_resume_pending_job_spawns_daemon(isolated_jobs_repo: Path, monkeypatch)
     assert result.exit_code == 0, result.stdout
     assert captured["job_id"] == job.id
     assert "7777" in result.stdout
+
+
+def test_resume_replan_writes_sidecar_with_note(isolated_jobs_repo: Path, monkeypatch):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    monkeypatch.setattr(cli.daemon, "is_daemon_alive", lambda _job_id: False)
+    captured: dict[str, object] = {}
+
+    def _fake_spawn(job_id: str) -> int:
+        captured["job_id"] = job_id
+        sidecar = job.root / RESUME_REPLAN_FILE
+        captured["sidecar_exists_at_spawn"] = sidecar.exists()
+        captured["sidecar_payload"] = json.loads(sidecar.read_text(encoding="utf-8"))
+        return 8888
+
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", _fake_spawn)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        [
+            "resume",
+            job.id,
+            "--replan",
+            "--note",
+            "user added FOIA response from City Clerk dated 2026-04-15",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert captured["job_id"] == job.id
+    assert captured["sidecar_exists_at_spawn"] is True
+    assert captured["sidecar_payload"] == {
+        "note": "user added FOIA response from City Clerk dated 2026-04-15"
+    }
+
+
+def test_resume_note_requires_replan(isolated_jobs_repo: Path, monkeypatch):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    monkeypatch.setattr(cli.daemon, "is_daemon_alive", lambda _job_id: False)
+    spawn_called = {"n": 0}
+    monkeypatch.setattr(
+        cli.daemon,
+        "spawn_daemon",
+        lambda _job_id: spawn_called.__setitem__("n", spawn_called["n"] + 1) or 1,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["resume", job.id, "--note", "hint only"])
+
+    assert result.exit_code == 2
+    assert "--note requires --replan" in (result.stdout + (result.stderr or ""))
+    assert spawn_called["n"] == 0
+    assert not (job.root / RESUME_REPLAN_FILE).exists()
 
 
 def test_resume_clears_stale_stop_flag_before_spawn(isolated_jobs_repo: Path, monkeypatch):
@@ -1379,6 +1587,63 @@ def test_export_md_bundle_writes_markdown(isolated_jobs_repo: Path):
     assert "### Finding 000001" in body
     assert "## Sources" in body
     assert "https://web.archive.org/web/2026/x" in body
+
+
+def test_export_csv_writes_named_table_artifact(isolated_jobs_repo: Path):
+    job = _seed_export_job(isolated_jobs_repo)
+    rows = [
+        {
+            "state": "CA",
+            "chamber": "House",
+            "district_or_seat": "12",
+            "candidate_name": "Jane Doe",
+            "source_url": "https://example.com/jane",
+        },
+        {
+            "state": "NV",
+            "chamber": "Senate",
+            "candidate_name": "John Smith",
+            "party": "Independent",
+            "source_url": "https://example.com/john",
+        },
+    ]
+    artifacts.write_table_artifact(
+        job,
+        "candidates",
+        schema=artifacts.CANDIDATE_ROSTER_SCHEMA,
+        rows=rows,
+    )
+    out_path = isolated_jobs_repo / "candidates-export.csv"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        ["export", job.id, "--csv", "candidates", "--out", str(out_path)],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    exported = list(csv.DictReader(out_path.open()))
+    assert exported[0]["candidate_name"] == "Jane Doe"
+    assert exported[1]["party"] == "Independent"
+    assert exported[0]["official_campaign_website"] == ""
+
+
+def test_export_csv_missing_artifact_errors_with_available_names(isolated_jobs_repo: Path):
+    job = _seed_export_job(isolated_jobs_repo)
+    artifacts.write_table_artifact(
+        job,
+        "candidates",
+        schema=artifacts.CANDIDATE_ROSTER_SCHEMA,
+        rows=[],
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["export", job.id, "--csv", "missing"])
+
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "artifact 'missing' not found" in combined
+    assert "candidates" in combined
 
 
 def test_export_requires_a_mode(isolated_jobs_repo: Path):

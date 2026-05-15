@@ -67,6 +67,7 @@ SourceKind = Literal[
     "si_search",
     "bne_search",
     "hathitrust",
+    "state_election",
 ]
 
 

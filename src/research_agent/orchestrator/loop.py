@@ -32,11 +32,13 @@ implementations) and an optional explicit ``plan`` (otherwise the latest
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
 import traceback
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from tenacity import (
@@ -51,7 +53,7 @@ from research_agent.orchestrator.errors import FatalError, RetriableError
 from research_agent.orchestrator.plan import Plan, TaskKind, TaskSpec
 from research_agent.skills import load_skill, load_strategies
 from research_agent.storage import db
-from research_agent.storage.jobs import Job
+from research_agent.storage.jobs import INBOX_REPLAN_FILE, Job, _atomic_write_text
 from research_agent.storage.tasks import (
     enqueue,
     mark_done,
@@ -155,8 +157,39 @@ _URL_REGEX = re.compile(r"https?://[^\s)\]\}<>\"']+")
 # how many second-order tasks have already been emitted for the job (and
 # enforce the per-job cap).
 _SECOND_ORDER_PARENT_FINDING_ID_KEY = "second_order_parent_finding_id"
+_QUERY_STEM_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "for",
+    "from",
+    "how",
+    "in",
+    "is",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "what",
+    "when",
+    "where",
+    "who",
+    "why",
+    "with",
+}
 
 Handler = Callable[[Job, dict[str, Any]], Awaitable[dict[str, Any] | None]]
+
+
+@dataclass(frozen=True)
+class _DrainReplanOutcome:
+    plan: Plan | None
+    productive_task_count: int | None
+    should_continue: bool
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +220,14 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
     {
         "kind",
         "max_results",
+        "cycle",
+        "office",
         "state",
+        "district",
+        "party",
+        "candidate_status",
+        "max_rows",
+        "per_page",
         "form_type",
         "since",
         "agencies",
@@ -800,6 +840,528 @@ def _load_recent_task_results(job: Job, limit: int = 20) -> list[dict[str, Any]]
     return out
 
 
+def _load_failed_task_signatures(job: Job) -> set[tuple[str, str]]:
+    """Return signatures for failed tasks so replans can be scored for novelty."""
+    import json as _json
+
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT kind, payload_json FROM tasks"
+            " WHERE job_id = ? AND status = 'failed'",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    signatures: set[tuple[str, str]] = set()
+    for row in rows:
+        try:
+            payload = _json.loads(row["payload_json"]) if row["payload_json"] else {}
+        except (TypeError, ValueError):
+            payload = {}
+        signatures.add(_task_signature(str(row["kind"]), payload))
+    return signatures
+
+
+def _load_all_task_attempts(job: Job) -> list[dict[str, Any]]:
+    """Return all task rows needed for replan prior-attempt context."""
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, kind, payload_json, status, result_json, error"
+            " FROM tasks WHERE job_id = ?"
+            " ORDER BY id ASC",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
+
+def _query_stem(payload: dict[str, Any] | None, *, max_words: int = 6) -> str:
+    """Normalize a task payload's query-ish field into a stable comparison stem."""
+    if not isinstance(payload, dict):
+        return ""
+    raw: Any = None
+    for key in ("query", "q", "sub_question", "url", "arxiv_id", "source_id"):
+        value = payload.get(key)
+        if value not in (None, "", []):
+            raw = value
+            break
+    if raw is None:
+        return ""
+    text = str(raw).lower()
+    words = [
+        w
+        for w in re.findall(r"[a-z0-9]+", text)
+        if w and w not in _QUERY_STEM_STOPWORDS
+    ]
+    if not words:
+        words = re.findall(r"[a-z0-9]+", text)
+    return " ".join(words[:max_words])
+
+
+def _task_signature(kind: str, payload: dict[str, Any] | None) -> tuple[str, str]:
+    return (kind, _query_stem(payload))
+
+
+def _productive_task_count(
+    plan: Plan,
+    *,
+    failed_signatures: set[tuple[str, str]],
+) -> int:
+    """Count replan tasks that are not repeats of already-failed signatures."""
+    count = 0
+    for spec in plan.task_template:
+        if _task_signature(spec.kind, spec.payload) in failed_signatures:
+            continue
+        count += 1
+    return count
+
+
+def _latest_inconclusive_subgoal_ids(job: Job, plan: Plan) -> set[int]:
+    """Return currently open ids from the latest subgoal-status event's inconclusive set."""
+    import json as _json
+
+    open_ids = {sg.id for sg in plan.subgoals if not sg.done}
+    if not open_ids:
+        return set()
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'plan_subgoals_updated'"
+            " ORDER BY id DESC LIMIT 1",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return set()
+    try:
+        payload = _json.loads(row["payload_json"])
+    except (TypeError, ValueError):
+        return set()
+    raw_ids = payload.get("inconclusive")
+    if not isinstance(raw_ids, list):
+        return set()
+    out: set[int] = set()
+    for raw in raw_ids:
+        if isinstance(raw, int) and raw in open_ids:
+            out.add(raw)
+    return out
+
+
+def _is_exhausted_termination(
+    job: Job,
+    plan: Plan,
+    *,
+    tasks_done: int,
+    max_tasks: int,
+    stopped: bool,
+    cap_hit: bool,
+    time_cap_hit: bool,
+    last_drain_productive_task_count: int | None,
+) -> bool:
+    """True when the loop ran out of useful work before any resource cap fired."""
+    if stopped or cap_hit or time_cap_hit:
+        return False
+    if tasks_done >= max_tasks:
+        return False
+    if last_drain_productive_task_count is None or last_drain_productive_task_count > 2:
+        return False
+    if _latest_inconclusive_subgoal_ids(job, plan):
+        return False
+    from research_agent.storage import coverage
+
+    if coverage.has_coverage(job) and not coverage.is_coverage_complete(job):
+        return False
+    return plan.is_complete()
+
+
+def _is_goal_complete(job: Job, plan: Plan) -> bool:
+    """True only when narrative subgoals and required coverage units are closed."""
+    if not plan.is_complete():
+        return False
+    from research_agent.storage import coverage
+
+    return coverage.is_coverage_complete(job) and not _coverage_has_confirmed_gaps(job)
+
+
+def _update_coverage_from_result(
+    job: Job,
+    task: dict[str, Any],
+    result: dict[str, Any] | None,
+) -> None:
+    from research_agent.storage import coverage
+
+    try:
+        coverage.update_from_task_result(job, task, result)
+    except Exception as exc:  # noqa: BLE001 — coverage must not break task persistence
+        emit(
+            job,
+            "WARN",
+            "loop",
+            "warning",
+            {"stage": "coverage_update", "task_id": task.get("id"), "error": str(exc)},
+        )
+
+
+def _mark_coverage_task_failed(job: Job, task: dict[str, Any], reason: str) -> None:
+    from research_agent.storage import coverage
+
+    try:
+        coverage.mark_task_failed(job, task, reason)
+    except Exception as exc:  # noqa: BLE001 — coverage must not mask task failure
+        emit(
+            job,
+            "WARN",
+            "loop",
+            "warning",
+            {"stage": "coverage_failed_update", "task_id": task.get("id"), "error": str(exc)},
+        )
+
+
+def _coverage_has_confirmed_gaps(job: Job) -> bool:
+    from research_agent.storage import coverage
+
+    return bool(coverage.list_units(job, {"confirmed_gap"}))
+
+
+def _is_complete_with_confirmed_gaps(job: Job, plan: Plan) -> bool:
+    if not plan.is_complete():
+        return False
+    from research_agent.storage import coverage
+
+    return coverage.is_coverage_complete(job) and _coverage_has_confirmed_gaps(job)
+
+
+def _candidate_chamber(value: Any) -> str:
+    text = str(value or "").strip()
+    upper = text.upper()
+    if upper in {"H", "HOUSE", "US HOUSE", "U.S. HOUSE"}:
+        return "House"
+    if upper in {"S", "SENATE", "US SENATE", "U.S. SENATE"}:
+        return "Senate"
+    return text
+
+
+def _candidate_artifact_row(item: dict[str, Any]) -> dict[str, Any] | None:
+    extras = item.get("extras") if isinstance(item.get("extras"), dict) else {}
+    source_kind = str(extras.get("source_kind") or item.get("source_kind") or "")
+    source_type = str(extras.get("source_type") or "")
+    if source_kind not in {"fec", "state_election"} and source_type not in {
+        "fec-filed",
+        "state-ballot-qualified",
+    }:
+        return None
+
+    candidate_name = str(
+        extras.get("candidate_name") or extras.get("name") or item.get("title") or ""
+    ).strip()
+    state = str(extras.get("state") or "").strip().upper()
+    chamber = _candidate_chamber(
+        extras.get("chamber") or extras.get("office_full") or extras.get("office")
+    )
+    source_url = str(extras.get("source_url") or item.get("url") or "").strip()
+    if not candidate_name or not state or not chamber or not source_url:
+        return None
+
+    district = str(
+        extras.get("district_or_seat")
+        or extras.get("district")
+        or extras.get("district_number")
+        or ""
+    ).strip()
+    if not district and chamber == "Senate":
+        district = "statewide"
+    status = str(
+        extras.get("candidate_status")
+        or extras.get("status")
+        or ("fec-filed" if source_type == "fec-filed" else "")
+    ).strip()
+    confidence = extras.get("confidence")
+    if confidence in (None, ""):
+        confidence = item.get("score")
+
+    return {
+        "state": state,
+        "chamber": chamber,
+        "district_or_seat": district,
+        "candidate_name": candidate_name,
+        "party": str(extras.get("party") or "").strip(),
+        "candidate_status": status,
+        "confidence": "" if confidence in (None, "") else str(confidence),
+        "official_campaign_website": str(
+            extras.get("official_campaign_website") or extras.get("website") or ""
+        ).strip(),
+        "source_url": source_url,
+        "source_kind": source_kind,
+        "source_retrieved_at": str(
+            extras.get("source_retrieved_at") or extras.get("retrieval_timestamp") or ""
+        ).strip(),
+        "notes": str(extras.get("notes") or "").strip(),
+    }
+
+
+def _candidate_key(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(row.get("state") or "").strip().upper(),
+        str(row.get("chamber") or "").strip().lower(),
+        str(row.get("district_or_seat") or "").strip().lower(),
+        re.sub(r"\s+", " ", str(row.get("candidate_name") or "").strip().lower()),
+        str(row.get("source_url") or "").strip().lower(),
+    )
+
+
+def _candidate_config_columns(value: Any) -> list[str]:
+    columns: list[str] = []
+    if isinstance(value, str):
+        raw_items: list[Any] = value.split(",")
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = []
+    for item in raw_items:
+        column = str(item).strip()
+        if column and column not in columns:
+            columns.append(column)
+    return columns
+
+
+def _candidate_artifact_config(job: Job) -> dict[str, Any]:
+    intake = job.intake if isinstance(job.intake, dict) else {}
+    raw_enrichment = intake.get("enrichment")
+    enrichment = raw_enrichment if isinstance(raw_enrichment, dict) else {}
+    artifact_name = str(
+        enrichment.get("artifact") or intake.get("input_csv_artifact") or "candidates"
+    ).strip()
+    return {
+        "artifact": artifact_name or "candidates",
+        "key_columns": _candidate_config_columns(enrichment.get("key_columns")),
+        "target_columns": _candidate_config_columns(enrichment.get("target_columns")),
+        "overwrite_non_empty": bool(enrichment.get("overwrite_non_empty")),
+    }
+
+
+def _key_tuple_for_columns(
+    row: dict[str, Any],
+    key_columns: list[str],
+) -> tuple[str, ...] | None:
+    values = [str(row.get(column) or "").strip().lower() for column in key_columns]
+    if not values or any(value == "" for value in values):
+        return None
+    return tuple(values)
+
+
+def _schema_with_row_columns(
+    schema: Any,
+    rows: list[dict[str, Any]],
+) -> Any:
+    from research_agent.storage.artifacts import ArtifactColumn
+
+    existing = [column.name for column in schema.columns]
+    discovered: list[str] = []
+    for row in rows:
+        for column in row:
+            if column not in existing and column not in discovered:
+                discovered.append(column)
+    if not discovered:
+        return schema
+    return schema.model_copy(
+        update={
+            "schema_version": schema.schema_version + 1,
+            "columns": [
+                *schema.columns,
+                *[ArtifactColumn(name=column, required=False) for column in discovered],
+            ],
+        }
+    )
+
+
+def _enrichment_only_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    artifact_owned_keys = {
+        "artifact_name",
+        "schema_version",
+        "row_count",
+        "generated_at_epoch",
+        "source_job_id",
+        "source_coverage",
+    }
+    return {key: value for key, value in meta.items() if key not in artifact_owned_keys}
+
+
+def _candidate_rows_to_append(
+    existing_rows: list[dict[str, Any]],
+    candidate_rows: list[dict[str, Any]],
+    key_columns: list[str],
+) -> list[dict[str, Any]]:
+    matched_keys = {
+        key
+        for row in existing_rows
+        for key in [_key_tuple_for_columns(row, key_columns)]
+        if key is not None
+    }
+    seen_candidate_keys = {_candidate_key(row) for row in existing_rows}
+    new_rows: list[dict[str, Any]] = []
+    for row in candidate_rows:
+        configured_key = _key_tuple_for_columns(row, key_columns)
+        if configured_key is not None and configured_key in matched_keys:
+            continue
+        candidate_key = _candidate_key(row)
+        if candidate_key in seen_candidate_keys:
+            continue
+        seen_candidate_keys.add(candidate_key)
+        if configured_key is not None:
+            matched_keys.add(configured_key)
+        new_rows.append(row)
+    return new_rows
+
+
+def _update_candidate_artifact_from_result(
+    job: Job,
+    result: dict[str, Any] | None,
+) -> None:
+    if not isinstance(result, dict):
+        return
+    rows = result.get("results")
+    if not isinstance(rows, list):
+        return
+    candidate_rows = [
+        row
+        for item in rows
+        if isinstance(item, dict)
+        for row in [_candidate_artifact_row(item)]
+        if row is not None
+    ]
+    if not candidate_rows:
+        return
+
+    from research_agent.storage import artifacts, enrichment
+
+    config = _candidate_artifact_config(job)
+    artifact_name = str(config["artifact"])
+    key_columns = list(config["key_columns"])
+    target_columns = list(config["target_columns"])
+    try:
+        schema, existing_rows = artifacts.read_artifact(job, artifact_name)
+    except FileNotFoundError:
+        schema = artifacts.CANDIDATE_ROSTER_SCHEMA.model_copy(
+            update={"name": artifact_name}
+        )
+        existing_rows = []
+        enrichment_meta: dict[str, Any] = {}
+    else:
+        enrichment_meta = enrichment._read_meta(job, artifact_name)
+
+    if key_columns and existing_rows:
+        enrichment.enrich_artifact(
+            job,
+            artifact_name,
+            updates=candidate_rows,
+            key_columns=key_columns,
+            target_columns=target_columns or None,
+            overwrite_non_empty=bool(config["overwrite_non_empty"]),
+        )
+        schema, existing_rows = artifacts.read_artifact(job, artifact_name)
+        enrichment_meta = enrichment._read_meta(job, artifact_name)
+
+    new_rows = _candidate_rows_to_append(existing_rows, candidate_rows, key_columns)
+    if not new_rows:
+        return
+
+    merged = [*existing_rows, *new_rows]
+    artifacts.write_table_artifact(
+        job,
+        artifact_name,
+        schema=_schema_with_row_columns(schema, merged),
+        rows=merged,
+        source_coverage=f"{len(merged)} candidate rows from connector results",
+    )
+    preserved_meta = _enrichment_only_meta(enrichment_meta)
+    if preserved_meta:
+        enrichment._write_meta(job, artifact_name, preserved_meta)
+
+
+def _is_zero_result_search(kind: str, result: dict[str, Any] | None) -> bool | None:
+    if not kind.endswith("_search") or not isinstance(result, dict):
+        return None
+    results = result.get("results")
+    if not isinstance(results, list):
+        return None
+    return len(results) == 0
+
+
+def _suggested_unblocker_for(kind: str, query_stem: str) -> str | None:
+    from research_agent.prompts.loader import load_data_source_followups
+
+    recipes = load_data_source_followups().get(kind) or []
+    if not recipes:
+        return None
+    query_words = set(query_stem.split())
+    best: dict[str, Any] | None = None
+    best_score = -1
+    for recipe in recipes:
+        family = recipe.get("if_zero_for_query_family")
+        family_words = set(re.findall(r"[a-z0-9]+", str(family or "").lower()))
+        score = len(query_words & family_words)
+        if score > best_score:
+            best = recipe
+            best_score = score
+    suggestion = best.get("suggest") if best is not None else recipes[0].get("suggest")
+    return suggestion if isinstance(suggestion, str) and suggestion.strip() else None
+
+
+def _append_low_yield_unblocker(job: Job, payload: dict[str, Any]) -> None:
+    """Persist low-yield hints for the later Confirmed Gaps synthesis pass."""
+    path = job.root / "synthesis" / "low_yield.json"
+    items: list[dict[str, Any]] = []
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(existing, list):
+                items = [item for item in existing if isinstance(item, dict)]
+        except (OSError, json.JSONDecodeError):
+            items = []
+    items.append(dict(payload))
+    _atomic_write_text(path, json.dumps(items, indent=2, sort_keys=True) + "\n")
+
+
+def _track_low_yield_connector(
+    job: Job,
+    task: dict[str, Any],
+    result: dict[str, Any] | None,
+    zero_result_streaks: dict[tuple[str, str], int],
+) -> None:
+    """Emit a low-yield event after three 0-result searches for a query family."""
+    kind = str(task.get("kind") or "")
+    zero = _is_zero_result_search(kind, result)
+    if zero is None:
+        return
+    payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
+    query_stem = _query_stem(payload, max_words=3)
+    key = (kind, query_stem)
+    if not zero:
+        zero_result_streaks.pop(key, None)
+        return
+    count = zero_result_streaks.get(key, 0) + 1
+    zero_result_streaks[key] = count
+    if count < 3:
+        return
+
+    suggested = _suggested_unblocker_for(kind, query_stem)
+    event_payload = {
+        "kind": kind,
+        "query_stem": query_stem,
+        "count": count,
+        "suggested_unblocker": suggested,
+    }
+    emit(job, "WARN", "loop", "low_yield_connector", event_payload)
+    _append_low_yield_unblocker(job, event_payload)
+    zero_result_streaks.pop(key, None)
+
+
 def _load_pending_follow_up_questions(
     recent_results: list[dict[str, Any]],
 ) -> list[str]:
@@ -957,16 +1519,20 @@ async def _drain_replan(
     *,
     router: Any,
     drain_count: int,
-) -> Plan | None:
+) -> _DrainReplanOutcome:
     """Fire a tactical replan when the queue drains mid-run.
 
     Emits ``loop/drain_replan`` before calling the planner so operators can
     see when this fires. Loads all findings + the latest synthesis as
     context so the local-tier planner can pivot intelligently. Returns the
-    new plan, or ``None`` if the planner emitted no fresh tasks (treat as
-    "goal exhausted") or raised — the caller breaks the loop in either case.
+    outcome. Planner failures return no productive count; empty task templates
+    return ``productive_task_count=0`` so the caller can distinguish clean
+    exhaustion from a transient planner error.
     """
-    from research_agent.orchestrator.plan import tactical_replan
+    from research_agent.orchestrator.plan import (
+        _compute_prior_attempts_for_subgoal,
+        tactical_replan,
+    )
 
     emit(
         job,
@@ -980,6 +1546,17 @@ async def _drain_replan(
         findings = _load_all_findings(job)
         synth_md = _load_latest_synthesis_md(job)
         followups = _load_pending_follow_up_questions(recent_results)
+        failed_signatures = _load_failed_task_signatures(job)
+        prior_attempts = _compute_prior_attempts_for_subgoal(plan, _load_all_task_attempts(job))
+        inconclusive_ids = _latest_inconclusive_subgoal_ids(job, plan)
+        inconclusive_context = [
+            item
+            for sid, item in prior_attempts.items()
+            if sid in inconclusive_ids or item.get("prior_task_kinds")
+        ]
+        replan_kwargs: dict[str, Any] = {}
+        if inconclusive_context:
+            replan_kwargs["inconclusive_subgoals"] = inconclusive_context
         new_plan = await tactical_replan(
             job,
             plan,
@@ -988,6 +1565,7 @@ async def _drain_replan(
             findings=findings,
             synthesis_md=synth_md,
             follow_up_questions=followups,
+            **replan_kwargs,
         )
     except Exception as exc:  # noqa: BLE001 — drain replan failure must not kill the loop
         emit(
@@ -997,11 +1575,92 @@ async def _drain_replan(
             "warning",
             {"drain_replan_failed": True, "error": str(exc)},
         )
-        return None
+        return _DrainReplanOutcome(plan=None, productive_task_count=None, should_continue=False)
 
+    productive_count = _productive_task_count(new_plan, failed_signatures=failed_signatures)
     if not new_plan.task_template:
+        return _DrainReplanOutcome(
+            plan=new_plan,
+            productive_task_count=productive_count,
+            should_continue=False,
+        )
+    return _DrainReplanOutcome(
+        plan=new_plan,
+        productive_task_count=productive_count,
+        should_continue=True,
+    )
+
+
+def _consume_inbox_replan_request(job: Job) -> dict[str, Any] | None:
+    path = job.root / INBOX_REPLAN_FILE
+    if not path.exists():
         return None
-    return new_plan
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _inbox_replan(
+    job: Job,
+    plan: Plan,
+    *,
+    router: Any,
+    request: dict[str, Any],
+) -> Plan | None:
+    from research_agent.orchestrator.plan import (
+        _compute_prior_attempts_for_subgoal,
+        tactical_replan,
+    )
+
+    recent_results = _load_recent_task_results(job)
+    prior_attempts = _compute_prior_attempts_for_subgoal(plan, _load_all_task_attempts(job))
+    inconclusive_context = [
+        item for item in prior_attempts.values() if item.get("prior_task_kinds")
+    ]
+    kwargs: dict[str, Any] = {}
+    if inconclusive_context:
+        kwargs["inconclusive_subgoals"] = inconclusive_context
+    note = request.get("note")
+    if isinstance(note, str) and note.strip():
+        kwargs["user_note"] = note.strip()
+    emit(
+        job,
+        "INFO",
+        "loop",
+        "replan_triggered",
+        {
+            "stage": "inbox",
+            "filename": request.get("filename"),
+            "sha": request.get("sha"),
+            "has_note": "user_note" in kwargs,
+        },
+    )
+    try:
+        return await tactical_replan(
+            job,
+            plan,
+            recent_results,
+            router=router,
+            findings=_load_all_findings(job),
+            synthesis_md=_load_latest_synthesis_md(job),
+            follow_up_questions=_load_pending_follow_up_questions(recent_results),
+            **kwargs,
+        )
+    except Exception as exc:  # noqa: BLE001 — inbox replan failure must not kill loop
+        emit(
+            job,
+            "WARN",
+            "loop",
+            "warning",
+            {"inbox_replan_failed": True, "error": str(exc)},
+        )
+        return None
 
 
 def _make_wait_fn(wait_seq: tuple[int, ...]) -> Callable[[Any], int]:
@@ -2802,6 +3461,8 @@ async def run_loop(
     cap_hit = False
     time_cap_hit = False
     drain_replans = 0
+    last_drain_productive_task_count: int | None = None
+    zero_result_streaks: dict[tuple[str, str], int] = {}
 
     checkpoint(
         job,
@@ -2811,10 +3472,18 @@ async def run_loop(
 
     while (
         not _should_stop(job)
-        and not plan.is_complete()
+        and not _is_goal_complete(job, plan)
+        and not _is_complete_with_confirmed_gaps(job, plan)
         and tasks_done < max_tasks
         and _within_time_cap()
     ):
+        inbox_request = _consume_inbox_replan_request(job)
+        if inbox_request is not None:
+            inbox_plan = await _inbox_replan(job, plan, router=router, request=inbox_request)
+            if inbox_plan is not None:
+                plan = inbox_plan
+            continue
+
         task = next_pending(job)
         if task is None:
             cap = _resolve_drain_cap(plan)
@@ -2859,13 +3528,16 @@ async def run_loop(
                     )
                     _emit_cap_diagnostic(job, plan, findings, floor, cap=cap)
                     break
-            new_plan = await _drain_replan(
+            replan_outcome = await _drain_replan(
                 job, plan, router=router, drain_count=drain_replans + 1
             )
             drain_replans += 1
-            if new_plan is None:
+            if replan_outcome.productive_task_count is not None:
+                last_drain_productive_task_count = replan_outcome.productive_task_count
+            if replan_outcome.plan is not None:
+                plan = replan_outcome.plan
+            if not replan_outcome.should_continue:
                 break
-            plan = new_plan
             continue
 
         mark_running(task["id"], db_path=job.db_path)
@@ -2890,6 +3562,7 @@ async def run_loop(
         if handler is None:
             err = f"no handler registered for kind={task['kind']!r}"
             mark_failed(task["id"], err, db_path=job.db_path)
+            _mark_coverage_task_failed(job, task, err)
             emit(
                 job,
                 "ERROR",
@@ -2910,6 +3583,7 @@ async def run_loop(
             )
         except FatalError as exc:
             mark_failed(task["id"], str(exc), db_path=job.db_path)
+            _mark_coverage_task_failed(job, task, str(exc))
             emit(
                 job,
                 "ERROR",
@@ -2926,6 +3600,7 @@ async def run_loop(
             continue
         except RetriableError as exc:
             mark_failed(task["id"], str(exc), db_path=job.db_path)
+            _mark_coverage_task_failed(job, task, str(exc))
             emit(
                 job,
                 "ERROR",
@@ -2945,6 +3620,7 @@ async def run_loop(
             # ValueError from a downstream library) must NOT bubble up and
             # kill the daemon. Mark the single task failed and keep draining.
             mark_failed(task["id"], str(exc), db_path=job.db_path)
+            _mark_coverage_task_failed(job, task, str(exc))
             emit(
                 job,
                 "ERROR",
@@ -2972,6 +3648,22 @@ async def run_loop(
             persistable = result
 
         mark_done(task["id"], persistable, db_path=job.db_path)
+        _update_coverage_from_result(job, task, persistable)
+        try:
+            _update_candidate_artifact_from_result(job, persistable)
+        except Exception as exc:  # noqa: BLE001 — artifact updates must not break task draining
+            emit(
+                job,
+                "WARN",
+                "loop",
+                "warning",
+                {
+                    "stage": "candidate_artifact_update",
+                    "task_id": task.get("id"),
+                    "error": str(exc),
+                },
+            )
+        _track_low_yield_connector(job, task, persistable, zero_result_streaks)
         emit(
             job,
             "INFO",
@@ -3004,7 +3696,7 @@ async def run_loop(
     if (
         deadline_ts is not None
         and not _should_stop(job)
-        and not plan.is_complete()
+        and not _is_goal_complete(job, plan)
         and not _within_time_cap()
     ):
         time_cap_hit = True
@@ -3037,17 +3729,40 @@ async def run_loop(
         stopped = True
         checkpoint(job, "stop_requested", {"tasks_done": tasks_done})
 
+    exhausted = _is_exhausted_termination(
+        job,
+        plan,
+        tasks_done=tasks_done,
+        max_tasks=max_tasks,
+        stopped=stopped,
+        cap_hit=cap_hit,
+        time_cap_hit=time_cap_hit,
+        last_drain_productive_task_count=last_drain_productive_task_count,
+    )
+    goal_complete = _is_goal_complete(job, plan)
+    complete_with_confirmed_gaps = _is_complete_with_confirmed_gaps(job, plan)
+
     return {
         "tasks_done": tasks_done,
         "stopped": stopped,
-        "completed": plan.is_complete(),
+        "completed": goal_complete,
         "cap_hit": cap_hit,
         "time_cap_hit": time_cap_hit,
         "completion_reason": (
-            "time_cap" if time_cap_hit else "task_cap" if cap_hit else None
+            "time_cap"
+            if time_cap_hit
+            else "task_cap"
+            if cap_hit
+            else "confirmed_gap"
+            if complete_with_confirmed_gaps
+            else "exhausted"
+            if exhausted
+            else None
         ),
         "elapsed_seconds": time.monotonic() - start_ts,
         "drain_replans": drain_replans,
+        "last_drain_productive_task_count": last_drain_productive_task_count,
+        "exhausted": exhausted,
     }
 
 

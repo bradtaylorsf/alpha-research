@@ -14,15 +14,30 @@ Searches the OpenFEC REST API across four indices. Default `kind=candidates`.
 | `kind` | What it is | Query target |
 |---|---|---|
 | `candidates` | Federal candidates (House / Senate / President) | Candidate name |
+| `candidates_enumerate` | Deterministic roster enumeration by cycle/office/state/district | Structured filters, not text |
 | `committees` | PACs, super PACs, party committees, principal campaign committees | Committee name |
 | `schedules/schedule_a` | Individual contributions to committees | Contributor name |
 | `schedules/schedule_e` | Independent expenditures (for/against a candidate) | Payee name (vendor/firm spending the money) |
 
 For "who funded X?", route to `schedules/schedule_a` with the candidate's principal committee name in the query, not the candidate name. For "who spent against Y?", use `schedules/schedule_e`.
 
+## Enumeration vs. text search
+
+Use `kind=candidates_enumerate` for "all candidates", "every House candidate
+in CA", "2026 Senate roster", or other complete-list work. It calls the
+structured OpenFEC candidates endpoint with `cycle`, `office`, `state`,
+`district`, `party`, and `candidate_status`, paginating until exhausted or
+`max_rows` is reached. Do not use broad text queries such as
+`"2026 House Senate filing"` for roster enumeration.
+
+Use `kind=candidates` only when resolving a known person or a small named set.
+Use `kind=committees` for known committee names, and schedule kinds for
+transaction lookups.
+
 ## Cycle / year filtering (CRITICAL)
 
-The connector does **not** currently expose a `cycle` knob. Include the cycle year in the query string to scope to a specific election.
+For `kind=candidates_enumerate`, set `cycle` explicitly. For text-search kinds,
+include the cycle year in the query string to scope to a specific election.
 
 | Office | Cycles |
 |---|---|
@@ -55,12 +70,17 @@ Resolve a candidate ID via `kind=candidates`, then pass the principal committee 
 
 - `kind` — `candidates` (default), `committees`, `schedules/schedule_a`, or `schedules/schedule_e`.
 - `max_results` — default 20.
+- `kind=candidates_enumerate` also accepts `cycle` (required), `office` (`H`,
+  `S`, or `P`, required), `state`, `district`, `party`, `candidate_status`,
+  `page`, `per_page`, and `max_rows`.
 - `timeout` — seconds; default 15.
 
 ## Anti-patterns
 
 - ❌ `search("Donald Trump", kind="schedules/schedule_a")` — schedule_a queries the *contributor* name. Use `kind=candidates` first to resolve the principal committee ID, then pivot.
 - ❌ Searching with no cycle keyword — surfaces every cycle the person/committee ran in; modern cycles drown.
+- ❌ Broad roster queries like `"2026 House Senate filing"` — use
+  `kind=candidates_enumerate` with structured filters instead.
 - ❌ Treating an `H0…` ID as a committee ID — H/S/P prefixes are *candidate* IDs; committee IDs start with `C0`.
 - ❌ Using `kind="contributions"` — not a valid kind. Use `schedules/schedule_a`.
 

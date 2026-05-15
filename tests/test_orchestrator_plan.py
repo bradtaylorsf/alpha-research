@@ -30,7 +30,7 @@ from research_agent.orchestrator.plan import (
     tactical_replan,
 )
 from research_agent.prompts import loader as prompts_loader
-from research_agent.storage import db
+from research_agent.storage import db, hypotheses
 from research_agent.storage.jobs import Job
 
 ALL_TASK_KINDS: tuple[str, ...] = get_args(TaskKind)
@@ -61,6 +61,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "bbb",
     "licensing",
     "sos",
+    "state_election",
     "calaccess",
     "scholar",
     "linkedin",
@@ -534,6 +535,170 @@ def test_tactical_replan_increments_version_and_uses_general_tier(
     assert sent[0]["task_id"] == 7
     assert sent[0]["kind"] == "web_search"
     assert payload["prior_plan"]["version"] == 1
+
+
+def test_compute_prior_attempts_for_inconclusive_subgoal() -> None:
+    prior = _sample_plan(
+        subgoals=[
+            Subgoal(id=1, description="Project 2025 EPA enforcement", done=False),
+            Subgoal(id=2, description="Closed item", done=True),
+        ]
+    )
+    rows = [
+        {
+            "kind": "web_search",
+            "status": "done",
+            "payload_json": json.dumps(
+                {
+                    "query": "Project 2025 EPA enforcement",
+                    "sub_question": "Project 2025 EPA enforcement",
+                }
+            ),
+            "result_json": json.dumps({"results": []}),
+            "error": None,
+        },
+        {
+            "kind": "web_search",
+            "status": "done",
+            "payload_json": json.dumps(
+                {
+                    "query": "Project 2025 EPA enforcement Trump",
+                    "sub_question": "Project 2025 EPA enforcement",
+                }
+            ),
+            "result_json": json.dumps({"results": []}),
+            "error": None,
+        },
+        {
+            "kind": "extract_findings",
+            "status": "done",
+            "payload_json": json.dumps(
+                {"sub_question": "Project 2025 EPA enforcement", "source_id": 10}
+            ),
+            "result_json": json.dumps({"findings_written": 0, "finding_ids": []}),
+            "error": None,
+        },
+    ]
+
+    attempts = plan_module._compute_prior_attempts_for_subgoal(prior, rows)
+
+    assert list(attempts) == [1]
+    item = attempts[1]
+    assert item["prior_task_kinds"] == ["web_search", "extract_findings"]
+    assert "project 2025 epa enforcement" in item["prior_query_stems"]
+    assert "0 results from web_search x 2" in item["prior_failure_reasons"]
+    assert "extract_findings returned empty findings x 1" in item["prior_failure_reasons"]
+
+
+def test_tactical_replan_includes_inconclusive_subgoals_payload(
+    job: Job,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    router, calls = router_with_spy
+    prior = _sample_plan()
+    _StubAgent.next_plan = _sample_plan(
+        version=99,
+        task_template=[
+            TaskSpec(
+                kind="news_search",
+                payload={"query": "new source angle", "sub_question": "new angle"},
+            )
+        ],
+    )
+    inconclusive = [
+        {
+            "id": 2,
+            "description": "Cross-reference sources",
+            "prior_task_kinds": ["web_search"],
+            "prior_query_stems": ["project 2025 epa"],
+            "prior_failure_reasons": ["0 results from web_search x 3"],
+        }
+    ]
+
+    result = asyncio.run(
+        tactical_replan(
+            job,
+            prior,
+            [],
+            router=router,
+            inconclusive_subgoals=inconclusive,
+        )
+    )
+
+    payload = json.loads(calls[0][2][0])
+    assert payload["inconclusive_subgoals"] == inconclusive
+    assert result.task_template[0].kind == "news_search"
+    assert result.task_template[0].kind not in inconclusive[0]["prior_task_kinds"]
+
+
+def test_tactical_replan_includes_hypotheses_payload(
+    job: Job,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    router, calls = router_with_spy
+    prior = _sample_plan()
+    hid = hypotheses.upsert_hypothesis(
+        job,
+        plan_version=1,
+        statement="Permitting friction is the primary delay driver.",
+        confidence=0.62,
+        supports=[10],
+        refutes=[],
+        status="open",
+    )
+    _StubAgent.next_plan = _sample_plan(version=2)
+
+    asyncio.run(tactical_replan(job, prior, [], router=router))
+
+    payload = json.loads(calls[0][2][0])
+    assert payload["hypotheses"][0]["id"] == hid
+    assert payload["hypotheses"][0]["statement"] == (
+        "Permitting friction is the primary delay driver."
+    )
+    assert payload["hypotheses"][0]["supports"] == [10]
+
+
+def test_tactical_replan_gap_reason_marks_subgoal_gapped(
+    job: Job,
+    db_path: Path,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    router, _calls = router_with_spy
+    prior = _sample_plan()
+    _StubAgent.next_plan = _sample_plan(
+        version=99,
+        subgoals=[
+            Subgoal(
+                id=1,
+                description="Gather background",
+                done=False,
+                gap_reason="no public source available",
+            ),
+            Subgoal(id=2, description="Cross-reference sources", done=False),
+        ],
+        task_template=[],
+    )
+
+    result = asyncio.run(tactical_replan(job, prior, [], router=router))
+
+    by_id = {sg.id: sg for sg in result.subgoals}
+    assert by_id[1].done is True
+    assert by_id[1].gap_reason == "no public source available"
+    assert by_id[1].gap_status == "documented_gap"
+
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'plan_subgoals_gapped'"
+            " ORDER BY id DESC LIMIT 1",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    payload = json.loads(row["payload_json"])
+    assert payload["gapped"] == [{"id": 1, "gap_reason": "no public source available"}]
 
 
 def test_cloud_replan_increments_version_and_routes_through_frontier(

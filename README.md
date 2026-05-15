@@ -119,11 +119,12 @@ from `src/research_agent/tools/_registry.py` via
 | `dpla_search` | Digital Public Library of America item metadata across US cultural institutions; requires DPLA_API_KEY | `max_results`, `provider` | `Maya land claims` |
 | `edgar_search` | SEC filings (10-K, 10-Q, 8-K, Form 4) — requires `RESEARCH_USER_AGENT` w/ contact email | `form_type: 10-K\|8-K\|...` | `Cisco cybersecurity` |
 | `europeana_search` | Europeana multilingual European cultural-heritage item metadata across museums, libraries, and archives; requires EUROPEANA_API_KEY | `max_results`, `lang` | `Algerian war 1954` |
-| `fec_search` | Candidates, committees, schedule A/E filings (OpenFEC) | `kind: candidates\|committees\|schedules/schedule_a\|schedules/schedule_e` | `Trump 2024 committee` |
+| `fec_search` | Candidates, committees, schedule A/E filings (OpenFEC) | `kind: candidates\|candidates_enumerate\|committees\|schedules/schedule_a\|schedules/schedule_e`, `cycle`, `office`, `state`, `district`, `party`, `candidate_status`, `max_rows` | `Trump 2024 committee` |
 | `fedregister_search` | Federal Register rules, proposed rules, agency notices since 1994 (no auth) | `since: YYYY-MM-DD`, `agencies: [...]` | `Schedule F` |
 | `gallica_search` | Gallica/BnF SRU XML search for French national-library newspapers, books, manuscripts, maps, and other digitized primary sources | `max_results` (SRU maximumRecords capped at 50) | `guerre d'Algerie` |
 | `gdelt_search` | GDELT — Global news event aggregator, no `site:` operator (no auth) | `since: YYYY-MM-DD`, `language: english` | `Project 2025 mainstream coverage` |
 | `iarchive_search` | Internet Archive texts, audio, movies, and web-archive collection metadata through advancedsearch.php | `mediatype: texts\|audio\|movies\|web`, `page: <int>` | `Pullman Strike` |
+| `iwm_search` | Imperial War Museums public collections: photographs, sound/oral histories, documents, film, objects (Playwright scrape, no auth) | `max_results`, `object_category`, `related_period`, `records_with_media`, `style`, `page_size` | `Battle of Britain` |
 | `lda_search` | Senate Lobbying Disclosure Act filings (registrants, contributions) | `kind: filings\|registrants\|contributions` | `Heritage Foundation` |
 | `licensing_search` | State contractor / licensing-board lookups (Playwright; CA wired, others stubs) | `state: CA\|TX\|FL\|NY` | `SBI Builders` |
 | `linkedin_search` | LinkedIn person/company lookup via Proxycurl or Lix — requires broker key | `kind: person\|company` | `Sundar Pichai` |
@@ -139,6 +140,7 @@ from `src/research_agent/tools/_registry.py` via
 | `scholar_search` | Google Scholar via SerpAPI — requires `SERPAPI_KEY` | `kind: case_law\|articles` | `Section 230 appellate` |
 | `si_search` | Smithsonian Open Access digitized collection objects, museum artifacts, images, 3D assets, and object metadata via api.data.gov | `max_results` | `Apollo 11` |
 | `sos_search` | State Secretary-of-State business entity filings (Playwright; CA wired, others stubs) | `state: CA\|DE\|NV\|...` | `Acme Corp` |
+| `state_election_search` | Official state election candidate roster sources and portals | `state`, `office`, `cycle`, `max_results` | `2026 House candidates` |
 | `trove_search` | Trove / National Library of Australia metadata for newspapers, books, photos, magazines, oral histories; metadata-only default | `category`, `zone`, `sortby` | `White Australia Policy 1901` |
 | `ukna_search` | UK National Archives Discovery catalogue metadata for Foreign Office, War Office, Colonial Office, and other UK archival records (no auth) | `max_results`, `page` | `Mau Mau Kenya` |
 | `usaspending_search` | Federal contracts, grants, loans (award-level detail, no auth) | `award_type: contracts\|grants\|loans` | `Heritage Foundation contract` |
@@ -369,7 +371,8 @@ research start --skip-intake \
     --goal "Compare Pydantic AI, LangGraph, and CrewAI" \
     --budget-usd 5.00 \
     --time-cap 24 \
-    --disk-cap-gb 10
+    --disk-cap-gb 10 \
+    --inbox
 # → Started job 2026-05-02-compare-pydantic-ai- (daemon pid 12345).
 #   Tail logs with: research logs 2026-05-02-compare-pydantic-ai- -f
 
@@ -413,9 +416,14 @@ jobs/<job-id>/
 ├── sources/              # symlinks/copies of canonical source markdown
 ├── synthesis/            # synthesis/NNNN.md (versioned)
 ├── critique/             # critique/NNNN.md (versioned)
+├── artifacts/            # structured outputs such as CSV tables
+├── coverage.json         # enumeration coverage ledger, when required
+├── inbox/                # optional human-supplied documents for live ingest
+│   └── processed/        # ingested inbox files, renamed with content hash
 ├── report.md             # current report (rotated to report.history/ on rewrite)
 ├── report.history/       # archived prior reports
 ├── events.jsonl          # append-only event log
+├── INBOX_REPLAN.json     # transient replan trigger after inbox ingest
 ├── daemon.pid            # written on spawn, removed on clean exit
 ├── daemon.out.log        # daemon stdout
 ├── daemon.err.log        # daemon stderr
@@ -451,7 +459,7 @@ Lockfiles (`uv.lock`) are committed.
 ```bash
 research start --skip-intake --goal "<goal>" \
     [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes] \
-    [--disk-cap-gb 10] [--translate-non-english]
+    [--disk-cap-gb 10] [--translate-non-english] [--inbox]
 
 research list                      # newest first; Rich on a TTY, JSON otherwise
 research list --json
@@ -464,6 +472,7 @@ research view <job-id>             # report.md in $EDITOR (or stdout off-TTY)
 research view <job-id> --report
 research view <job-id> --findings  # latest findings/NNNNNN.md
 research view <job-id> --sources
+research view <job-id> --hypotheses
 
 research logs <job-id>             # print existing events.jsonl entries
 research logs <job-id> -f          # follow appended events
@@ -475,6 +484,10 @@ research stop <job-id> --kill      # SIGTERM, then SIGKILL after 10s
 research resume <job-id>           # respawn daemon, restore from checkpoint
 research resume <job-id> --force   # resume even when completed/failed
 
+research inbox <job-id> add <file>  # copy a human-supplied doc into the live inbox
+research inbox <job-id> list        # show pending and processed inbox files
+# Registered verb paths: research inbox add, research inbox list.
+
 research search "<query>"          # hybrid FTS5 + semantic (cross-job)
 research search "<query>" --fts-only
 research search "<query>" --job <job-id>
@@ -484,6 +497,7 @@ research search "<query>" --json
 
 research export <job-id> --zip
 research export <job-id> --md-bundle
+research export <job-id> --csv <artifact-name>
 research export <job-id> --zip --out PATH
 research export <job-id> --md-bundle --include-history
 
@@ -498,6 +512,19 @@ DB row, and spawns a detached daemon via
 `subprocess.Popen(start_new_session=True)`. The PID is written atomically
 to `jobs/<id>/daemon.pid`; the daemon's stdout/stderr land in
 `jobs/<id>/daemon.{out,err}.log`.
+
+`--inbox` enables a live `jobs/<id>/inbox/` watcher for the daemon. Files
+added with `research inbox <job-id> add <file>` are indexed into the local
+corpus, moved to `inbox/processed/`, logged as `corpus_doc_added`, and
+used to trigger a tactical replan while the daemon is still running.
+
+`--input-csv PATH --artifact NAME --key COL` imports an existing CSV into
+`jobs/<id>/artifacts/` before the daemon starts so a run can enrich missing
+cells instead of creating a list from scratch. Repeat `--key` or pass
+comma-separated key columns. Use `--target-column COL` to restrict enrichment
+to specific columns, repeating it or passing comma-separated names as needed.
+Existing non-empty cells are preserved by default; `--update-existing`
+records overwrite intent in intake metadata.
 
 `--translate-non-english` is off by default. When enabled, extracted
 findings whose source metadata is non-English get a
@@ -516,7 +543,11 @@ debugging FTS5 syntax).
 `research export` bundles a job for sharing. `--zip` walks
 `jobs/<job-id>/` into a `ZIP_DEFLATED` archive; `--md-bundle` concatenates
 intake, `report.md`, every finding, and the source list into one navigable
-markdown file. Exactly one mode flag is required.
+markdown file; `--csv <artifact-name>` exports a structured table artifact
+from `jobs/<job-id>/artifacts/` with stable column order and empty cells
+for missing optional values. Exactly one mode flag is required. When
+structured artifacts exist, synthesis links them from the report instead
+of relying on prose-only list output.
 
 `research compare` diffs two runs by counts (tasks, findings, sources,
 plan versions, drain-replans, cornerstone hits), department coverage, and

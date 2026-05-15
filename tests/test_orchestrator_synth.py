@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from research_agent.llm.budgets import BudgetExceeded
+from research_agent.observability.events import emit
 from research_agent.orchestrator import synth as synth_module
 from research_agent.orchestrator.plan import Plan, Subgoal, TaskSpec
 from research_agent.orchestrator.synth import (
@@ -22,7 +23,7 @@ from research_agent.orchestrator.synth import (
     synthesize,
 )
 from research_agent.prompts import loader as prompts_loader
-from research_agent.storage import db
+from research_agent.storage import artifacts, coverage, db, hypotheses
 from research_agent.storage.jobs import Job
 from research_agent.storage.markdown import write_finding, write_plan
 from research_agent.storage.sources import write_source
@@ -353,49 +354,169 @@ def test_final_synthesis_uses_larger_top_n_and_final_flag(
     assert len(payload["findings"]) <= FINAL_TOP_N
 
 
-def test_synthesize_retry_exhaustion_writes_failed_and_emits_failed(
+def test_synthesize_primary_nonbudget_failure_uses_fallback_tier(
     job: Job, db_path: Path, plan: Plan
 ) -> None:
-    """Terminal retry exhaustion → failed md + ``synthesis_failed`` ERROR event."""
+    """HTTP 400-style primary failure tries ``frontier_speed`` before degrading."""
     _seed_findings(job, [0.6])
     router = _StubRouter(
+        content="# Fallback synthesis\n\nRecovered from the primary model.\n",
         side_effect={
-            "frontier": [RuntimeError("openrouter: connection reset after 6 retries")],
+            "frontier": [
+                RuntimeError(
+                    "HTTP 400 Bad Request: provider rejected reasoning/channel text. "
+                    "prompt=" + ("do not log prompt body " * 80)
+                )
+            ],
         },
     )
 
     out = asyncio.run(synthesize(job, plan, router=router))
 
-    # SynthesisOutput marks the failure shape so the loop can distinguish it.
+    assert out.truncated is False
+    assert out.model == "anthropic/claude-haiku-4-5"
+    assert [call[0] for call in router.calls] == ["frontier", "frontier_speed"]
+    assert not list((job.root / "synthesis").glob("*.failed.md"))
+    assert "Fallback synthesis" in (job.root / "report.md").read_text(encoding="utf-8")
+
+    events = _read_event_rows(db_path, job.id)
+    llm_failed = [e for e in events if e["kind"] == "synthesis_llm_failed"]
+    fallback = [e for e in events if e["kind"] == "synthesis_fallback_tier_used"]
+    deterministic = [
+        e for e in events if e["kind"] == "synthesis_deterministic_fallback_written"
+    ]
+    assert len(llm_failed) == 1
+    assert len(fallback) == 1
+    assert deterministic == []
+    payload = json.loads(llm_failed[0]["payload_json"])
+    assert payload["tier"] == "frontier"
+    assert payload["provider"] == "openrouter"
+    assert payload["model"] == "anthropic/claude-opus-4-7"
+    assert payload["provider_format_specific"] is True
+    assert "HTTP 400" in payload["diagnostic_snippet"]
+    assert len(payload["diagnostic_snippet"]) <= 500
+    assert "do not log prompt body" not in payload["diagnostic_snippet"]
+
+
+def test_synthesize_both_nonbudget_failures_write_deterministic_report(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    """Both LLM tiers fail → failed trace artifact plus deterministic report.md."""
+    _seed_findings(job, [0.85], base_claim="candidate roster finding")
+    artifacts.write_table_artifact(
+        job,
+        "candidates",
+        schema=artifacts.CANDIDATE_ROSTER_SCHEMA,
+        rows=[
+            {
+                "state": "CA",
+                "chamber": "House",
+                "district_or_seat": "1",
+                "candidate_name": "Jane Doe",
+                "party": "Democratic",
+                "candidate_status": "filed",
+                "confidence": "high",
+                "official_campaign_website": "https://jane.example",
+                "source_url": "https://example.com/jane",
+            }
+        ],
+        source_coverage="CA House fixture",
+    )
+    [unit] = coverage.declare_coverage(
+        job,
+        [{"state": "MD", "chamber": "House", "source_type": "state-ballot-qualified"}],
+    )
+    coverage.upsert_unit_status(
+        job,
+        unit.dim_key,
+        "confirmed_gap",
+        attempt={
+            "task_kind": "state_election_search",
+            "status": "failed",
+            "reason": "2026 list not yet public",
+        },
+        unblocker="Check the Maryland SBE site after filings close",
+    )
+    router = _StubRouter(
+        side_effect={
+            "frontier": [RuntimeError("HTTP 400 Bad Request: provider rejected channel")],
+            "frontier_speed": [RuntimeError("fallback parser failed")],
+        },
+    )
+
+    out = asyncio.run(synthesize(job, plan, router=router))
+
     assert out.truncated is True
-    assert out.model == "synthesis_failed"
-    assert out.cost_usd is None
+    assert out.model == "deterministic_fallback"
+    assert out.report_path == str(job.root / "report.md")
+    assert [call[0] for call in router.calls] == ["frontier", "frontier_speed"]
 
     failed_path = job.root / f"synthesis/{out.version:04d}.failed.md"
-    assert out.report_path == str(failed_path)
     assert failed_path.exists()
-    assert list((job.root / "synthesis").glob("*.partial.md")) == []
     failed_md = failed_path.read_text(encoding="utf-8")
     assert "## Partial Output" in failed_md
     assert "_No partial output captured._" in failed_md
     assert "## Traceback" in failed_md
-    assert "RuntimeError: openrouter: connection reset after 6 retries" in failed_md
+    assert "Primary Tier Traceback" in failed_md
+    assert "Fallback Tier Traceback" in failed_md
+    assert "RuntimeError: HTTP 400 Bad Request" in failed_md
+    assert "RuntimeError: fallback parser failed" in failed_md
 
     rows = _read_synthesis_rows(db_path, job.id)
-    assert rows == [], "failed writes must not insert a syntheses row"
+    assert len(rows) == 1
+    assert rows[0]["model"] == "deterministic_fallback"
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "Report (deterministic fallback)" in report
+    assert "## Findings" in report
+    assert "candidate roster finding 0" in report
+    assert "## Artifacts" in report
+    assert "[CSV](artifacts/candidates.csv)" in report
+    assert "## Coverage Ledger" in report
+    assert "confirmed_gap" in report
+    assert "## Confirmed Gaps" in report
+    assert "Maryland SBE" in report
 
     events = _read_event_rows(db_path, job.id)
-    failed = [e for e in events if e["kind"] == "synthesis_failed"]
-    assert len(failed) == 1
-    assert failed[0]["level"] == "ERROR"
-    payload = json.loads(failed[0]["payload_json"])
-    assert payload["tier"] == "frontier"
-    assert "connection reset" in payload["reason"]
-    assert payload["attempt_count"] == 1
+    assert [e["kind"] for e in events].count("synthesis_llm_failed") == 2
+    assert [e["kind"] for e in events].count("synthesis_fallback_tier_used") == 1
+    assert [e["kind"] for e in events].count("synthesis_deterministic_fallback_written") == 1
+    assert [e["kind"] for e in events].count("synthesis_failed") == 0
+    deterministic = [
+        e for e in events if e["kind"] == "synthesis_deterministic_fallback_written"
+    ][0]
+    payload = json.loads(deterministic["payload_json"])
+    assert payload["report_path"] == str(job.root / "report.md")
     assert payload["failed_path"].endswith(".failed.md")
-    assert (
-        "RuntimeError: openrouter: connection reset after 6 retries" in payload["traceback"]
+    assert payload["primary_tier"] == "frontier"
+    assert payload["fallback_tier"] == "frontier_speed"
+    assert payload["has_artifacts"] is True
+    assert payload["has_coverage_ledger"] is True
+
+
+def test_synthesize_both_nonbudget_failures_with_no_rows_still_writes_report(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    router = _StubRouter(
+        side_effect={
+            "frontier": [RuntimeError("primary model failed")],
+            "frontier_speed": [RuntimeError("fallback model failed")],
+        },
     )
+
+    out = asyncio.run(synthesize(job, plan, router=router))
+
+    assert out.truncated is True
+    assert out.model == "deterministic_fallback"
+    assert out.report_path == str(job.root / "report.md")
+    assert (job.root / f"synthesis/{out.version:04d}.failed.md").exists()
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "Report (deterministic fallback)" in report
+    assert "_No findings recorded" in report
+    assert "_No sources cited" in report
+
+    events = _read_event_rows(db_path, job.id)
+    assert [e["kind"] for e in events].count("synthesis_deterministic_fallback_written") == 1
 
 
 def test_failed_synthesis_artifact_includes_partial_content_and_traceback(
@@ -519,6 +640,40 @@ def test_final_synthesis_after_cap_falls_back_to_template_when_speed_capped(
     report = (job.root / "report.md").read_text(encoding="utf-8")
     assert "template stub" in report.lower()
     assert "claim 0" in report
+
+
+def test_final_synthesis_after_cap_nonbudget_failure_writes_deterministic_report(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    _seed_findings(job, [0.95])
+    router = _StubRouter(
+        side_effect={
+            "frontier_speed": [RuntimeError("post-cap provider parse failure")],
+        },
+    )
+
+    out = asyncio.run(synth_module.final_synthesis_after_cap(job, plan, router=router))
+
+    assert out.truncated is True
+    assert out.model == "deterministic_fallback"
+    assert [c[0] for c in router.calls] == ["frontier_speed"]
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "Report (deterministic fallback)" in report
+    assert "claim 0" in report
+    assert (job.root / f"synthesis/{out.version:04d}.failed.md").exists()
+
+    events = _read_event_rows(db_path, job.id)
+    failed = [e for e in events if e["kind"] == "synthesis_llm_failed"]
+    assert len(failed) == 1
+    assert json.loads(failed[0]["payload_json"])["post_cap"] is True
+    deterministic = [
+        e for e in events if e["kind"] == "synthesis_deterministic_fallback_written"
+    ]
+    assert len(deterministic) == 1
+    payload = json.loads(deterministic[0]["payload_json"])
+    assert payload["primary_tier"] is None
+    assert payload["fallback_tier"] == "frontier_speed"
+    assert payload["post_cap"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -822,6 +977,267 @@ def test_synthesize_repeat_status_skips_plan_version_bump(
     events = _read_event_rows(db_path, job.id)
     updated = [e for e in events if e["kind"] == "plan_subgoals_updated"]
     assert len(updated) == 1
+
+
+# ---------------------------------------------------------------------------
+# Confirmed Gaps (issue #258)
+# ---------------------------------------------------------------------------
+
+
+def _insert_failed_task(
+    job: Job,
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    error: str,
+    plan_version: int = 1,
+) -> None:
+    conn = db.connect(job.db_path)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO tasks"
+                " (job_id, plan_version, kind, payload_json, status, error, retry_count)"
+                " VALUES (?, ?, ?, ?, 'failed', ?, 1)",
+                (job.id, plan_version, kind, json.dumps(payload, sort_keys=True), error),
+            )
+    finally:
+        conn.close()
+
+
+def test_compute_confirmed_gaps_from_failed_tasks_plan_and_low_yield(
+    job: Job, db_path: Path
+) -> None:
+    gapped_plan = Plan(
+        version=1,
+        objective="Investigate Alameda restroom delay",
+        subgoals=[
+            Subgoal(
+                id=1,
+                description="Identify the prime contractor name",
+                done=False,
+                gap_reason="contract award file unavailable without city clerk records",
+            )
+        ],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=2,
+    )
+    write_plan(job, gapped_plan.model_dump())
+    payload = {
+        "query": "site:alamedaca.gov shoreline restroom contractor",
+        "sub_question": "Identify the prime contractor name",
+        "subgoal_id": 1,
+    }
+    for _ in range(3):
+        _insert_failed_task(
+            job,
+            kind="web_search",
+            payload=payload,
+            error="0 results",
+        )
+    emit(job, "INFO", "planner", "plan_subgoals_updated", {"inconclusive": [1]})
+    stem = synth_module._query_stem_for_payload(payload)
+    (job.root / "synthesis" / "low_yield.json").write_text(
+        json.dumps(
+            [
+                {
+                    "kind": "web_search",
+                    "query_stem": stem,
+                    "count": 3,
+                    "suggested_unblocker": (
+                        "FOIA the City of Alameda Clerk for the prime contract award file"
+                    ),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    gaps = synth_module._compute_confirmed_gaps(job, gapped_plan)
+
+    assert len(gaps) == 1
+    gap = gaps[0]
+    assert gap["topic"] == "Identify the prime contractor name"
+    assert "city clerk records" in gap["failure_summary"]
+    assert "FOIA the City of Alameda Clerk for the prime contract award file" in gap[
+        "suggested_unblocker"
+    ]
+    assert gap["attempts"] == [
+        {
+            "task_kind": "web_search",
+            "query": "site:alamedaca.gov shoreline restroom contractor",
+            "failure_reason": "0 results from web_search",
+            "count": 3,
+        }
+    ]
+
+
+def test_compute_confirmed_gaps_empty_without_failure_signals(job: Job, plan: Plan) -> None:
+    assert synth_module._compute_confirmed_gaps(job, plan) == []
+
+
+def test_build_context_includes_confirmed_gaps(job: Job, db_path: Path, plan: Plan) -> None:
+    context_json = synth_module._build_context(
+        goal=job.goal,
+        plan=plan,
+        findings=[],
+        sources={},
+        prior=None,
+        critique=None,
+        followup_recipes="",
+        paid_unblock_recipes="",
+        confirmed_gaps=[
+            {
+                "topic": "prime contractor name",
+                "attempts": [],
+                "failure_summary": "No public source identified.",
+                "suggested_unblocker": "FOIA the City of Alameda Clerk",
+            }
+        ],
+        final=False,
+    )
+    payload = json.loads(context_json)
+    assert payload["confirmed_gaps"][0]["topic"] == "prime contractor name"
+    assert payload["subgoals"][0]["gap_reason"] is None
+
+
+def test_synthesize_preserves_confirmed_gaps_section_and_strips_status_fence(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    _seed_findings(job, [0.9])
+    content = (
+        "# Investigation Report\n\n"
+        "## Executive Summary\n\n- finding [1].\n\n"
+        "## Confirmed Gaps\n\n"
+        "- **Prime contractor name** — Tried city records. Unblocker: "
+        "FOIA the City of Alameda Clerk\n"
+        "  - Attempted `web_search` for \"site:alamedaca.gov contractor\": "
+        "0 results (count: 3).\n\n"
+        "## Sources\n"
+        '1. https://example.com/0 — "Title" (retrieved 2026-05-06)\n'
+        "\n```json\n"
+        '{"subgoal_status": {"1": "inconclusive", "2": "inconclusive", "3": "inconclusive"}}'
+        "\n```\n"
+    )
+    router = _StubRouter(content=content)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "## Confirmed Gaps" in report
+    assert "FOIA the City of Alameda Clerk" in report
+    assert "subgoal_status" not in report
+
+
+# ---------------------------------------------------------------------------
+# Working hypotheses (issue #261)
+# ---------------------------------------------------------------------------
+
+
+def test_synthesize_extracts_hypothesis_updates_and_strips_fence(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    _source_ids, finding_ids = _seed_findings(job, [0.9])
+    content = (
+        "# Investigation Report\n\n"
+        "## Executive Summary\n\n- finding [1].\n\n"
+        "## Working Hypotheses\n\n"
+        "### H-new: Contractor underbid\n"
+        "**Status:** Open\n"
+        "**Confidence:** 0.65\n"
+        "- Supporting: finding [1].\n\n"
+        "## Sources\n"
+        '1. https://example.com/0 — "Title" (retrieved 2026-05-06)\n'
+        "\n```json\n"
+        '{"subgoal_status": {"1": "inconclusive", "2": "inconclusive", "3": "inconclusive"}}'
+        "\n```\n"
+        "```json\n"
+        '{"hypothesis_updates": ['
+        '{"statement": "The contractor underbid and is slow-walking change orders.", '
+        '"confidence": 0.65, '
+        f'"supports": [{finding_ids[0]}], '
+        '"refutes": [], "status": "open"}]}'
+        "\n```\n"
+    )
+    router = _StubRouter(content=content)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "## Working Hypotheses" in report
+    assert "hypothesis_updates" not in report
+    assert "subgoal_status" not in report
+
+    rows = hypotheses.list_hypotheses(job)
+    assert len(rows) == 1
+    assert rows[0]["statement"] == "The contractor underbid and is slow-walking change orders."
+    assert rows[0]["confidence"] == pytest.approx(0.65)
+    assert rows[0]["supports"] == [finding_ids[0]]
+    assert rows[0]["status"] == "open"
+
+    events = _read_event_rows(db_path, job.id)
+    updated = [e for e in events if e["kind"] == "hypothesis_updated"]
+    assert len(updated) == 1
+    payload = json.loads(updated[0]["payload_json"])
+    assert payload["id"] == rows[0]["id"]
+    assert payload["status"] == "open"
+
+
+def test_synthesize_context_includes_current_hypotheses(job: Job, plan: Plan) -> None:
+    _source_ids, finding_ids = _seed_findings(job, [0.8])
+    hid = hypotheses.upsert_hypothesis(
+        job,
+        plan_version=1,
+        statement="Permitting friction is the primary delay driver.",
+        confidence=0.55,
+        supports=[finding_ids[0]],
+        refutes=[],
+        status="open",
+    )
+    router = _StubRouter()
+
+    asyncio.run(synthesize(job, plan, router=router))
+
+    _tier, args, _kwargs = router.calls[0]
+    payload = json.loads(args[0])
+    assert payload["current_hypotheses"][0]["id"] == hid
+    assert payload["current_hypotheses"][0]["statement"] == (
+        "Permitting friction is the primary delay driver."
+    )
+    assert payload["current_hypotheses"][0]["supports"] == [finding_ids[0]]
+    assert payload["current_hypotheses"][0]["supporting_findings"][0]["id"] == finding_ids[0]
+
+
+def test_synthesize_context_includes_generated_artifacts(job: Job, plan: Plan) -> None:
+    artifacts.write_table_artifact(
+        job,
+        "candidates",
+        schema=artifacts.CANDIDATE_ROSTER_SCHEMA,
+        rows=[
+            {
+                "state": "CA",
+                "chamber": "House",
+                "candidate_name": "Jane Doe",
+                "source_url": "https://example.com/jane",
+            }
+        ],
+    )
+    router = _StubRouter()
+
+    asyncio.run(synthesize(job, plan, router=router))
+
+    _tier, args, _kwargs = router.calls[0]
+    payload = json.loads(args[0])
+    assert payload["artifacts"] == [
+        {
+            "name": "candidates",
+            "schema_version": 1,
+            "row_count": 1,
+            "generated_at_epoch": payload["artifacts"][0]["generated_at_epoch"],
+            "source_coverage": "",
+            "csv_path": "artifacts/candidates.csv",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

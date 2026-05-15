@@ -5,23 +5,28 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import typer
 from rich.console import Console
 from rich.live import Live
+from rich.table import Table
 
 from research_agent import __version__, config, daemon, doctor, intake
 from research_agent.storage import db
 from research_agent.storage.jobs import (
     _JOB_ID_RE,
     DEFAULT_JOBS_ROOT,
+    INBOX_REPLAN_FILE,
+    RESUME_REPLAN_FILE,
     Job,
     _atomic_write_json,
     list_jobs,
@@ -43,6 +48,25 @@ config_app = typer.Typer(
 )
 app.add_typer(config_app)
 
+inbox_app = typer.Typer(
+    name="inbox",
+    help="Manage jobs/<id>/inbox/ human-supplied documents.",
+    no_args_is_help=True,
+)
+app.add_typer(inbox_app)
+
+
+@inbox_app.callback()
+def inbox_callback(
+    ctx: typer.Context,
+    job_id: str = typer.Argument(  # noqa: B008
+        ...,
+        help="Job id (e.g. 2026-05-02-some-slug).",
+    ),
+) -> None:
+    """Inbox command group for one job."""
+    ctx.obj = {"job_id": job_id}
+
 
 @config_app.command(name="cache-clear")
 def cache_clear_command() -> None:
@@ -57,6 +81,16 @@ def _version_callback(value: bool) -> None:
     if value:
         typer.echo(__version__)
         raise typer.Exit()
+
+
+def _split_key_columns(raw: list[str] | None) -> list[str]:
+    keys: list[str] = []
+    for item in raw or []:
+        for part in str(item).split(","):
+            cleaned = part.strip()
+            if cleaned and cleaned not in keys:
+                keys.append(cleaned)
+    return keys
 
 
 @app.callback()
@@ -140,6 +174,44 @@ def start_command(
         " --fresh-reset to opt out and require a clean slate (which fails with"
         " FileExistsError if the folder still exists — run _reset-job first).",
     ),
+    inbox: bool = typer.Option(
+        False,
+        "--inbox",
+        help="Enable jobs/<id>/inbox/ watcher for mid-run document ingest.",
+    ),
+    input_csv: Path = typer.Option(  # noqa: B008
+        None,
+        "--input-csv",
+        help="Import an existing CSV into jobs/<id>/artifacts/ for enrichment.",
+    ),
+    artifact_name: str = typer.Option(  # noqa: B008
+        "candidates",
+        "--artifact",
+        help="Artifact name for --input-csv (default: candidates).",
+    ),
+    key_columns_raw: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--key",
+        help="Key column for --input-csv. Repeat or pass comma-separated names.",
+    ),
+    target_columns_raw: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--target-column",
+        help=(
+            "Column to enrich in --input-csv artifacts. Repeat or pass "
+            "comma-separated names. Defaults to any non-key column."
+        ),
+    ),
+    update_existing: bool = typer.Option(  # noqa: B008
+        False,
+        "--update-existing",
+        help="Allow later enrichment to overwrite non-empty cells.",
+    ),
+    no_overwrite: bool = typer.Option(  # noqa: B008
+        False,
+        "--no-overwrite",
+        help="Explicitly preserve non-empty cells during enrichment (default behavior).",
+    ),
 ) -> None:
     """Register a new research job and spawn its background daemon."""
     if skip_intake:
@@ -153,6 +225,7 @@ def start_command(
             "budget_cap_usd": budget_usd,
             "disk_cap_gb": disk_cap_gb,
             "translate_non_english": translate_non_english,
+            "inbox": inbox,
         }
         if corpus:
             intake_data["corpus"] = corpus
@@ -165,6 +238,7 @@ def start_command(
             "corpus": answers["corpus_path"],
             "disk_cap_gb": disk_cap_gb,
             "translate_non_english": translate_non_english,
+            "inbox": inbox,
         }
 
     if max_tasks is not None:
@@ -172,6 +246,27 @@ def start_command(
             typer.echo("--max-tasks must be >= 1", err=True)
             raise typer.Exit(code=2)
         intake_data["max_tasks"] = max_tasks
+
+    key_columns = _split_key_columns(key_columns_raw)
+    target_columns = _split_key_columns(target_columns_raw)
+    if input_csv is not None:
+        if not input_csv.is_file():
+            typer.echo(f"--input-csv not found: {input_csv}", err=True)
+            raise typer.Exit(code=2)
+        if not key_columns:
+            typer.echo("--key is required when --input-csv is set", err=True)
+            raise typer.Exit(code=2)
+        if update_existing and no_overwrite:
+            typer.echo("--update-existing conflicts with --no-overwrite", err=True)
+            raise typer.Exit(code=2)
+        intake_data["input_csv_artifact"] = artifact_name
+        intake_data["enrichment"] = {
+            "artifact": artifact_name,
+            "input_csv": str(input_csv),
+            "key_columns": key_columns,
+            "target_columns": target_columns,
+            "overwrite_non_empty": bool(update_existing and not no_overwrite),
+        }
 
     if local:
         # Spawned daemon inherits parent env; setting these here propagates
@@ -236,6 +331,21 @@ def start_command(
     else:
         job = Job.create(intake_data)
 
+    if input_csv is not None:
+        from research_agent.storage.enrichment import import_csv_as_artifact
+
+        try:
+            import_csv_as_artifact(
+                job,
+                input_csv,
+                artifact_name=artifact_name,
+                key_columns=key_columns,
+                target_columns=target_columns,
+            )
+        except Exception as exc:
+            typer.echo(f"failed to import --input-csv: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
     pid = daemon.spawn_daemon(job.id)
     typer.echo(
         f"Started job {job.id} (daemon pid {pid}). Tail logs with: research logs {job.id} -f"
@@ -269,6 +379,75 @@ def _load_job_or_exit(job_id: str) -> Job:
         raise typer.Exit(code=1) from e
 
 
+def _job_inbox_dir(job: Job) -> Path:
+    inbox_dir = job.root / "inbox"
+    (inbox_dir / "processed").mkdir(parents=True, exist_ok=True)
+    return inbox_dir
+
+
+@inbox_app.command(name="add")
+def inbox_add_command(
+    ctx: typer.Context,
+    file: Path = typer.Argument(  # noqa: B008
+        ...,
+        help="File to copy into jobs/<id>/inbox/.",
+    ),
+) -> None:
+    """Copy a human-supplied document into a job inbox."""
+    job_id = str((ctx.obj or {}).get("job_id") or "")
+    job = _load_job_or_exit(job_id)
+    source = Path(file)
+    if not source.is_file():
+        typer.echo(f"file not found: {source}", err=True)
+        raise typer.Exit(code=1)
+    inbox_dir = _job_inbox_dir(job)
+    dest = inbox_dir / source.name
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    try:
+        shutil.copyfile(source, tmp)
+        os.replace(tmp, dest)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+    typer.echo(str(dest))
+
+
+@inbox_app.command(name="list")
+def inbox_list_command(
+    ctx: typer.Context,
+) -> None:
+    """List pending and processed files in a job inbox."""
+    job_id = str((ctx.obj or {}).get("job_id") or "")
+    job = _load_job_or_exit(job_id)
+    inbox_dir = _job_inbox_dir(job)
+    processed_dir = inbox_dir / "processed"
+    table = Table(title=f"Inbox for {job.id}")
+    table.add_column("state")
+    table.add_column("file")
+    table.add_column("bytes", justify="right")
+
+    rows = 0
+    for path in sorted(inbox_dir.iterdir()):
+        if path.name == "processed" or not path.is_file() or path.name.endswith(".tmp"):
+            continue
+        table.add_row("pending", path.name, str(path.stat().st_size))
+        rows += 1
+    for path in sorted(processed_dir.iterdir()) if processed_dir.exists() else []:
+        if not path.is_file():
+            continue
+        table.add_row("processed", path.name, str(path.stat().st_size))
+        rows += 1
+    if (job.root / INBOX_REPLAN_FILE).exists():
+        table.add_row("replan", INBOX_REPLAN_FILE, "")
+        rows += 1
+    if rows == 0:
+        typer.echo(f"no inbox files for job {job.id}")
+        return
+    Console().print(table)
+
+
 @app.command(name="status")
 def status_command(
     job_id: str = typer.Argument(..., help="Job id (e.g. 2026-05-02-some-slug)."),
@@ -291,6 +470,7 @@ def status_command(
             started_at=data["started_at"],
             eta_seconds=data["eta_seconds"],
             current_task=data["current_task"],
+            completion_reason=data["completion_reason"],
         )
 
     if not watch:
@@ -336,15 +516,52 @@ def _render_sources_block(job: Job) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_hypotheses_block(job: Job) -> str:
+    from research_agent.storage import hypotheses as hypotheses_store
+
+    rows = hypotheses_store.latest_for_job(job)
+    if not rows:
+        return f"# Hypotheses for {job.id}\n\n(no hypotheses recorded)\n"
+
+    table = Table(title=f"Hypotheses for {job.id}")
+    table.add_column("id", justify="right")
+    table.add_column("status")
+    table.add_column("confidence", justify="right")
+    table.add_column("supports")
+    table.add_column("refutes")
+    table.add_column("statement")
+    for row in rows:
+        table.add_row(
+            str(row["id"]),
+            str(row["status"]),
+            f"{float(row['confidence']):.2f}",
+            ",".join(str(x) for x in row.get("supports") or []),
+            ",".join(str(x) for x in row.get("refutes") or []),
+            str(row["statement"]),
+        )
+    console = Console(record=True, width=140)
+    console.print(table)
+    return console.export_text()
+
+
 @app.command(name="view")
 def view_command(
     job_id: str = typer.Argument(..., help="Job id (e.g. 2026-05-02-some-slug)."),
     report: bool = typer.Option(False, "--report", help="View report.md (default)."),
     findings: bool = typer.Option(False, "--findings", help="View the latest finding."),
     sources: bool = typer.Option(False, "--sources", help="View a list of job sources."),
+    hypotheses: bool = typer.Option(
+        False,
+        "--hypotheses",
+        help="View the current working hypotheses ledger.",
+    ),
 ) -> None:
-    """View a research artifact (report, finding, or sources list)."""
+    """View a research artifact (report, finding, sources, or hypotheses)."""
     job = _load_job_or_exit(job_id)
+
+    if sum(bool(flag) for flag in (report, findings, sources, hypotheses)) > 1:
+        typer.echo("choose only one of --report, --findings, --sources, or --hypotheses", err=True)
+        raise typer.Exit(code=2)
 
     if findings:
         path = _latest_finding_path(job.root)
@@ -355,6 +572,9 @@ def view_command(
     elif sources:
         body = _render_sources_block(job)
         path = None
+    elif hypotheses:
+        body = _render_hypotheses_block(job)
+        path = None
     else:  # report (default; --report is treated as the same path)
         _ = report  # accepted explicitly even though it's the default
         path = job.root / "report.md"
@@ -362,6 +582,8 @@ def view_command(
             typer.echo(f"report.md not present for job {job_id}", err=True)
             raise typer.Exit(code=1)
         body = path.read_text(encoding="utf-8")
+        if job.completion_reason:
+            body = f"<!-- completion_reason: {job.completion_reason} -->\n\n{body}"
 
     editor = os.environ.get("EDITOR")
     if path is not None and editor and sys.stdout.isatty():
@@ -432,6 +654,7 @@ def reset_job_command(
                 "critiques",
                 "findings",
                 "events",
+                "hypotheses",
                 "checkpoints",
                 "syntheses",
                 "llm_calls",
@@ -613,6 +836,16 @@ def resume_command(
         "--force",
         help="Resume even if the job is in a terminal state (completed/failed).",
     ),
+    replan: bool = typer.Option(
+        False,
+        "--replan",
+        help="Run tactical_replan before resuming the existing queue.",
+    ),
+    note: str | None = typer.Option(
+        None,
+        "--note",
+        help="Operator hint to include in the resume replan context.",
+    ),
 ) -> None:
     """Restart a stranded job's daemon — checkpoint-restore happens at startup."""
     job = _load_job_or_exit(job_id)
@@ -641,6 +874,16 @@ def resume_command(
         stop_flag.unlink()
     except FileNotFoundError:
         pass
+
+    if note and not replan:
+        typer.echo("--note requires --replan", err=True)
+        raise typer.Exit(code=2)
+
+    if replan:
+        payload: dict[str, Any] = {}
+        if note:
+            payload["note"] = note
+        _atomic_write_json(job.root / RESUME_REPLAN_FILE, payload)
 
     pid = daemon.spawn_daemon(job.id)
     typer.echo(f"Resumed job {job.id} (daemon pid {pid}).")
@@ -671,6 +914,11 @@ def export_command(
         "--md-bundle",
         help="Concatenate report + findings + sources into one markdown file.",
     ),
+    csv_artifact: str = typer.Option(
+        None,
+        "--csv",
+        help="Export a named table artifact from jobs/<id>/artifacts/ as CSV.",
+    ),
     out: Path = typer.Option(  # noqa: B008 — Typer captures defaults at decoration time
         None,
         "--out",
@@ -682,16 +930,21 @@ def export_command(
         help="Include report.history/ in the export.",
     ),
 ) -> None:
-    """Export a job as a shareable bundle (zip archive or single markdown file)."""
-    from research_agent.storage.export import export_md_bundle, export_zip
+    """Export a job as a shareable bundle or table artifact."""
+    from research_agent.storage.artifacts import list_artifacts
+    from research_agent.storage.export import export_csv, export_md_bundle, export_zip
 
-    if zip_ == md_bundle:
-        typer.echo("exactly one of --zip or --md-bundle must be set", err=True)
+    selected = sum([bool(zip_), bool(md_bundle), bool(csv_artifact)])
+    if selected != 1:
+        typer.echo("exactly one of --zip, --md-bundle, or --csv must be set", err=True)
         raise typer.Exit(code=2)
 
     job = _load_job_or_exit(job_id)
-    suffix = ".zip" if zip_ else ".md"
-    default_name = f"{job.id}{suffix}"
+    if csv_artifact:
+        default_name = f"{job.id}-{csv_artifact}.csv"
+    else:
+        suffix = ".zip" if zip_ else ".md"
+        default_name = f"{job.id}{suffix}"
 
     if out is None:
         out_path = Path.cwd() / default_name
@@ -702,8 +955,17 @@ def export_command(
 
     if zip_:
         written = export_zip(job, out_path, include_history=include_history)
-    else:
+    elif md_bundle:
         written = export_md_bundle(job, out_path, include_history=include_history)
+    else:
+        assert csv_artifact is not None  # noqa: S101
+        try:
+            written = export_csv(job, csv_artifact, out_path)
+        except FileNotFoundError as exc:
+            available = [item["name"] for item in list_artifacts(job)]
+            suffix = f" Available artifacts: {', '.join(available)}." if available else ""
+            typer.echo(f"{exc}.{suffix}", err=True)
+            raise typer.Exit(code=1) from exc
     typer.echo(str(written))
 
 

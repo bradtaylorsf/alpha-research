@@ -20,12 +20,13 @@ from research_agent.orchestrator.loop import (
     _is_cornerstone_source,
     _load_source_text,
     _run_extract_findings,
+    _update_candidate_artifact_from_result,
     default_handlers,
     run_loop,
 )
 from research_agent.orchestrator.plan import Plan, ScopeClass, Subgoal, TaskSpec
-from research_agent.storage import db
-from research_agent.storage.jobs import Job
+from research_agent.storage import artifacts, db, enrichment
+from research_agent.storage.jobs import INBOX_REPLAN_FILE, Job
 from research_agent.storage.markdown import write_plan
 from research_agent.storage.tasks import (
     STATUS_DONE,
@@ -167,6 +168,138 @@ def _ok_handler(result: dict[str, Any] | None = None) -> Handler:
         return result if result is not None else {"hits": 1}
 
     return _h
+
+
+def test_candidate_results_enrich_imported_artifact_without_losing_columns(
+    job: Job,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "candidate_roster.csv"
+    source.write_text(
+        "candidate_name,state,operator_note,candidate_status\n"
+        "Jane Example,CO,keep-me,Filed\n",
+        encoding="utf-8",
+    )
+    job.intake["enrichment"] = {
+        "artifact": "candidate_roster",
+        "key_columns": ["candidate_name", "state"],
+        "target_columns": ["official_campaign_website", "candidate_status"],
+        "overwrite_non_empty": False,
+    }
+    enrichment.import_csv_as_artifact(
+        job,
+        source,
+        artifact_name="candidate_roster",
+        key_columns=["candidate_name", "state"],
+        target_columns=["official_campaign_website", "candidate_status"],
+    )
+
+    _update_candidate_artifact_from_result(
+        job,
+        {
+            "results": [
+                {
+                    "title": "Jane Example",
+                    "url": "https://state.example/candidates/jane-example",
+                    "extras": {
+                        "source_kind": "state_election",
+                        "candidate_name": "Jane Example",
+                        "state": "CO",
+                        "chamber": "House",
+                        "district": "1",
+                        "status": "Qualified",
+                        "website": "https://jane.example",
+                        "source_url": "https://state.example/candidates/jane-example",
+                    },
+                }
+            ]
+        },
+    )
+
+    schema, rows = artifacts.read_artifact(job, "candidate_roster")
+    assert [column.name for column in schema.columns] == [
+        "candidate_name",
+        "state",
+        "operator_note",
+        "candidate_status",
+        "official_campaign_website",
+    ]
+    assert len(rows) == 1
+    assert rows[0]["operator_note"] == "keep-me"
+    assert rows[0]["official_campaign_website"] == "https://jane.example"
+    assert rows[0]["candidate_status"] == "Filed"
+
+    conflicts_path = job.root / "artifacts" / "candidate_roster.conflicts.jsonl"
+    conflicts = [
+        json.loads(line)
+        for line in conflicts_path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert [conflict["column"] for conflict in conflicts] == ["candidate_status"]
+    meta = json.loads((job.root / "artifacts" / "candidate_roster.meta.json").read_text())
+    assert meta["key_columns"] == ["candidate_name", "state"]
+    assert meta["target_columns"] == ["official_campaign_website", "candidate_status"]
+    assert meta["original_columns"] == [
+        "candidate_name",
+        "state",
+        "operator_note",
+        "candidate_status",
+    ]
+
+
+def test_candidate_append_preserves_imported_artifact_metadata(
+    job: Job,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "candidate_roster.csv"
+    source.write_text(
+        "candidate_name,state,operator_note\n"
+        "Jane Example,CO,keep-me\n",
+        encoding="utf-8",
+    )
+    job.intake["enrichment"] = {
+        "artifact": "candidate_roster",
+        "key_columns": ["candidate_name", "state"],
+        "target_columns": ["official_campaign_website"],
+        "overwrite_non_empty": False,
+    }
+    enrichment.import_csv_as_artifact(
+        job,
+        source,
+        artifact_name="candidate_roster",
+        key_columns=["candidate_name", "state"],
+        target_columns=["official_campaign_website"],
+    )
+
+    _update_candidate_artifact_from_result(
+        job,
+        {
+            "results": [
+                {
+                    "title": "Ana Example",
+                    "url": "https://state.example/candidates/ana-example",
+                    "extras": {
+                        "source_kind": "state_election",
+                        "candidate_name": "Ana Example",
+                        "state": "CO",
+                        "chamber": "House",
+                        "district": "2",
+                        "status": "Qualified",
+                        "website": "https://ana.example",
+                        "source_url": "https://state.example/candidates/ana-example",
+                    },
+                }
+            ]
+        },
+    )
+
+    _, rows = artifacts.read_artifact(job, "candidate_roster")
+    assert [row["candidate_name"] for row in rows] == ["Jane Example", "Ana Example"]
+    meta = json.loads((job.root / "artifacts" / "candidate_roster.meta.json").read_text())
+    assert meta["row_count"] == 2
+    assert meta["key_columns"] == ["candidate_name", "state"]
+    assert meta["target_columns"] == ["official_campaign_website"]
+    assert meta["original_columns"] == ["candidate_name", "state", "operator_note"]
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +680,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "bbb",
     "licensing",
     "sos",
+    "state_election",
     "calaccess",
     "scholar",
     "linkedin",
@@ -1385,6 +1519,74 @@ async def test_critique_heuristic_failure_warning_has_traceback_and_model_contex
 
 
 # ---------------------------------------------------------------------------
+# Inbox replan (issue #262)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inbox_replan_sidecar_triggers_tactical_replan(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (job.root / INBOX_REPLAN_FILE).write_text(
+        json.dumps(
+            {
+                "trigger": "inbox",
+                "filename": "foia-response.md",
+                "sha": "a" * 64,
+                "note": "user added foia-response.md (contract file); identify NEW angles",
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_tactical_replan(
+        job_arg: Job,
+        prior_plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
+        user_note: str | None = None,
+    ) -> Plan:
+        captured["user_note"] = user_note
+        new = Plan(
+            version=prior_plan.version + 1,
+            objective=prior_plan.objective,
+            subgoals=[Subgoal(id=1, description="Gather", done=True)],
+            task_template=[],
+            expected_iterations=prior_plan.expected_iterations,
+        )
+        write_plan(job_arg, new.model_dump())
+        return new
+
+    monkeypatch.setattr(plan_module, "tactical_replan", fake_tactical_replan)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert captured["user_note"] == (
+        "user added foia-response.md (contract file); identify NEW angles"
+    )
+    assert not (job.root / INBOX_REPLAN_FILE).exists()
+    assert result["tasks_done"] == 0
+    events = _read_events_by_kind(db_path, job.id, "replan_triggered")
+    assert len(events) == 1
+    assert events[0]["payload"]["stage"] == "inbox"
+    assert events[0]["payload"]["filename"] == "foia-response.md"
+
+
+# ---------------------------------------------------------------------------
 # Drain-replan (issue #117) — keep the loop running when the queue empties
 # but the plan is not yet complete and the cap hasn't fired.
 # ---------------------------------------------------------------------------
@@ -1560,6 +1762,335 @@ async def test_drain_replan_break_on_empty_template(
     assert result["tasks_done"] == 1
     events = _read_event_kinds(db_path, job.id)
     assert events.count("drain_replan") == 1
+
+
+@pytest.mark.asyncio
+async def test_clean_drain_exhaust_sets_exhausted_completion_reason(
+    job: Job,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No inconclusive subgoals + empty final replan is true exhaustion."""
+    _seed_tasks(job, ["web_search"])
+
+    async def fake_tactical_replan(
+        job_arg: Job,
+        prior_plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
+    ) -> Plan:
+        new = Plan(
+            version=prior_plan.version + 1,
+            objective=prior_plan.objective,
+            subgoals=[Subgoal(id=1, description="Gather", done=True)],
+            task_template=[],
+            expected_iterations=prior_plan.expected_iterations,
+        )
+        write_plan(job_arg, new.model_dump())
+        return new
+
+    monkeypatch.setattr(plan_module, "tactical_replan", fake_tactical_replan)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["completion_reason"] == "exhausted"
+    assert result["exhausted"] is True
+    assert result["completed"] is True
+    assert result["last_drain_productive_task_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_productive_drain_replan_does_not_mark_exhausted(
+    job: Job,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A final replan with more than two productive tasks is not exhausted."""
+    _seed_tasks(job, ["web_search"])
+
+    async def fake_tactical_replan(
+        job_arg: Job,
+        prior_plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
+    ) -> Plan:
+        template = [
+            TaskSpec(kind="web_search", payload={"query": f"fresh angle {i}"})
+            for i in range(3)
+        ]
+        new = Plan(
+            version=prior_plan.version + 1,
+            objective=prior_plan.objective,
+            subgoals=[Subgoal(id=1, description="Gather", done=True)],
+            task_template=template,
+            expected_iterations=prior_plan.expected_iterations,
+        )
+        write_plan(job_arg, new.model_dump())
+        enqueue(job_arg, template, new.version)
+        return new
+
+    monkeypatch.setattr(plan_module, "tactical_replan", fake_tactical_replan)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["completed"] is True
+    assert result["completion_reason"] is None
+    assert result["exhausted"] is False
+    assert result["last_drain_productive_task_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_inconclusive_subgoal_remaining_does_not_mark_exhausted(
+    job: Job,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Open subgoals recently marked inconclusive leave drilling possible."""
+    _seed_tasks(job, ["web_search"])
+
+    from research_agent.observability.events import emit
+
+    emit(
+        job,
+        "INFO",
+        "planner",
+        "plan_subgoals_updated",
+        {"version": plan.version, "closed": [], "reopened": [], "inconclusive": [1]},
+    )
+
+    async def fake_tactical_replan(
+        job_arg: Job,
+        prior_plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
+    ) -> Plan:
+        new = Plan(
+            version=prior_plan.version + 1,
+            objective=prior_plan.objective,
+            subgoals=[Subgoal(id=1, description="Gather", done=False)],
+            task_template=[],
+            expected_iterations=prior_plan.expected_iterations,
+        )
+        write_plan(job_arg, new.model_dump())
+        return new
+
+    monkeypatch.setattr(plan_module, "tactical_replan", fake_tactical_replan)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["completed"] is False
+    assert result["completion_reason"] is None
+    assert result["exhausted"] is False
+
+
+@pytest.mark.asyncio
+async def test_drain_replan_receives_inconclusive_prior_attempts(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Open inconclusive subgoals carry prior kinds/stems into tactical_replan."""
+    p = Plan(
+        version=1,
+        objective="Investigate EPA",
+        subgoals=[Subgoal(id=1, description="EPA status", done=False)],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=3,
+    )
+    write_plan(job, p.model_dump())
+    enqueue(
+        job,
+        [
+            TaskSpec(
+                kind="web_search",
+                payload={"query": "Project 2025 EPA", "sub_question": "EPA status"},
+            )
+        ],
+        plan_version=1,
+    )
+
+    from research_agent.observability.events import emit
+
+    emit(
+        job,
+        "INFO",
+        "planner",
+        "plan_subgoals_updated",
+        {"version": p.version, "closed": [], "reopened": [], "inconclusive": [1]},
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_tactical_replan(
+        job_arg: Job,
+        prior_plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
+        inconclusive_subgoals: list[dict[str, Any]] | None = None,
+    ) -> Plan:
+        captured["inconclusive_subgoals"] = inconclusive_subgoals
+        new = Plan(
+            version=prior_plan.version + 1,
+            objective=prior_plan.objective,
+            subgoals=[Subgoal(id=1, description="EPA status", done=True)],
+            task_template=[],
+            expected_iterations=prior_plan.expected_iterations,
+        )
+        write_plan(job_arg, new.model_dump())
+        return new
+
+    monkeypatch.setattr(plan_module, "tactical_replan", fake_tactical_replan)
+
+    await run_loop(
+        job,
+        router=None,
+        plan=p,
+        handlers={"web_search": _ok_handler({"results": []})},
+        retry_waits=(0,),
+    )
+
+    assert captured["inconclusive_subgoals"] is not None
+    item = captured["inconclusive_subgoals"][0]
+    assert item["id"] == 1
+    assert item["prior_task_kinds"] == ["web_search"]
+    assert "project 2025 epa" in item["prior_query_stems"]
+    assert item["prior_failure_reasons"] == ["0 results from web_search x 1"]
+
+
+@pytest.mark.asyncio
+async def test_low_yield_connector_event_after_three_zero_results(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+) -> None:
+    enqueue(
+        job,
+        [
+            TaskSpec(
+                kind="calaccess_search",
+                payload={
+                    "query": "Marilyn Ezzy Ashcraft",
+                    "sub_question": "campaign finance for Marilyn Ezzy Ashcraft",
+                },
+            )
+            for _ in range(3)
+        ],
+        plan_version=1,
+    )
+
+    await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"calaccess_search": _ok_handler({"results": []})},
+        retry_waits=(0,),
+    )
+
+    events = _read_events_by_kind(db_path, job.id, "low_yield_connector")
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload["kind"] == "calaccess_search"
+    assert payload["query_stem"] == "marilyn ezzy ashcraft"
+    assert payload["count"] == 3
+    assert "city clerk" in payload["suggested_unblocker"].lower()
+
+    sidecar = job.root / "synthesis" / "low_yield.json"
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert data[0]["suggested_unblocker"] == payload["suggested_unblocker"]
+
+
+@pytest.mark.asyncio
+async def test_low_yield_connector_resets_after_nonzero_result(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+) -> None:
+    enqueue(
+        job,
+        [
+            TaskSpec(kind="calaccess_search", payload={"query": "Marilyn Ezzy Ashcraft"})
+            for _ in range(5)
+        ],
+        plan_version=1,
+    )
+    calls = {"n": 0}
+
+    async def handler(job: Job, task: dict[str, Any]) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            return {"results": [{"title": "hit"}]}
+        return {"results": []}
+
+    await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"calaccess_search": handler},
+        retry_waits=(0,),
+    )
+
+    assert _read_events_by_kind(db_path, job.id, "low_yield_connector") == []
+    assert not (job.root / "synthesis" / "low_yield.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_low_yield_connector_tracks_query_stems_independently(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+) -> None:
+    specs = [
+        TaskSpec(kind="calaccess_search", payload={"query": "Marilyn Ezzy Ashcraft"}),
+        TaskSpec(kind="calaccess_search", payload={"query": "Tom Smith"}),
+        TaskSpec(kind="calaccess_search", payload={"query": "Marilyn Ezzy Ashcraft"}),
+        TaskSpec(kind="calaccess_search", payload={"query": "Tom Smith"}),
+        TaskSpec(kind="calaccess_search", payload={"query": "Marilyn Ezzy Ashcraft"}),
+    ]
+    enqueue(job, specs, plan_version=1)
+
+    await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"calaccess_search": _ok_handler({"results": []})},
+        retry_waits=(0,),
+    )
+
+    events = _read_events_by_kind(db_path, job.id, "low_yield_connector")
+    assert len(events) == 1
+    assert events[0]["payload"]["query_stem"] == "marilyn ezzy ashcraft"
 
 
 def test_max_drain_replans_default_is_ten() -> None:
