@@ -23,7 +23,7 @@ from research_agent.orchestrator.synth import (
     synthesize,
 )
 from research_agent.prompts import loader as prompts_loader
-from research_agent.storage import artifacts, db, hypotheses
+from research_agent.storage import artifacts, coverage, db, hypotheses
 from research_agent.storage.jobs import Job
 from research_agent.storage.markdown import write_finding, write_plan
 from research_agent.storage.sources import write_source
@@ -354,49 +354,169 @@ def test_final_synthesis_uses_larger_top_n_and_final_flag(
     assert len(payload["findings"]) <= FINAL_TOP_N
 
 
-def test_synthesize_retry_exhaustion_writes_failed_and_emits_failed(
+def test_synthesize_primary_nonbudget_failure_uses_fallback_tier(
     job: Job, db_path: Path, plan: Plan
 ) -> None:
-    """Terminal retry exhaustion → failed md + ``synthesis_failed`` ERROR event."""
+    """HTTP 400-style primary failure tries ``frontier_speed`` before degrading."""
     _seed_findings(job, [0.6])
     router = _StubRouter(
+        content="# Fallback synthesis\n\nRecovered from the primary model.\n",
         side_effect={
-            "frontier": [RuntimeError("openrouter: connection reset after 6 retries")],
+            "frontier": [
+                RuntimeError(
+                    "HTTP 400 Bad Request: provider rejected reasoning/channel text. "
+                    "prompt=" + ("do not log prompt body " * 80)
+                )
+            ],
         },
     )
 
     out = asyncio.run(synthesize(job, plan, router=router))
 
-    # SynthesisOutput marks the failure shape so the loop can distinguish it.
+    assert out.truncated is False
+    assert out.model == "anthropic/claude-haiku-4-5"
+    assert [call[0] for call in router.calls] == ["frontier", "frontier_speed"]
+    assert not list((job.root / "synthesis").glob("*.failed.md"))
+    assert "Fallback synthesis" in (job.root / "report.md").read_text(encoding="utf-8")
+
+    events = _read_event_rows(db_path, job.id)
+    llm_failed = [e for e in events if e["kind"] == "synthesis_llm_failed"]
+    fallback = [e for e in events if e["kind"] == "synthesis_fallback_tier_used"]
+    deterministic = [
+        e for e in events if e["kind"] == "synthesis_deterministic_fallback_written"
+    ]
+    assert len(llm_failed) == 1
+    assert len(fallback) == 1
+    assert deterministic == []
+    payload = json.loads(llm_failed[0]["payload_json"])
+    assert payload["tier"] == "frontier"
+    assert payload["provider"] == "openrouter"
+    assert payload["model"] == "anthropic/claude-opus-4-7"
+    assert payload["provider_format_specific"] is True
+    assert "HTTP 400" in payload["diagnostic_snippet"]
+    assert len(payload["diagnostic_snippet"]) <= 500
+    assert "do not log prompt body" not in payload["diagnostic_snippet"]
+
+
+def test_synthesize_both_nonbudget_failures_write_deterministic_report(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    """Both LLM tiers fail → failed trace artifact plus deterministic report.md."""
+    _seed_findings(job, [0.85], base_claim="candidate roster finding")
+    artifacts.write_table_artifact(
+        job,
+        "candidates",
+        schema=artifacts.CANDIDATE_ROSTER_SCHEMA,
+        rows=[
+            {
+                "state": "CA",
+                "chamber": "House",
+                "district_or_seat": "1",
+                "candidate_name": "Jane Doe",
+                "party": "Democratic",
+                "candidate_status": "filed",
+                "confidence": "high",
+                "official_campaign_website": "https://jane.example",
+                "source_url": "https://example.com/jane",
+            }
+        ],
+        source_coverage="CA House fixture",
+    )
+    [unit] = coverage.declare_coverage(
+        job,
+        [{"state": "MD", "chamber": "House", "source_type": "state-ballot-qualified"}],
+    )
+    coverage.upsert_unit_status(
+        job,
+        unit.dim_key,
+        "confirmed_gap",
+        attempt={
+            "task_kind": "state_election_search",
+            "status": "failed",
+            "reason": "2026 list not yet public",
+        },
+        unblocker="Check the Maryland SBE site after filings close",
+    )
+    router = _StubRouter(
+        side_effect={
+            "frontier": [RuntimeError("HTTP 400 Bad Request: provider rejected channel")],
+            "frontier_speed": [RuntimeError("fallback parser failed")],
+        },
+    )
+
+    out = asyncio.run(synthesize(job, plan, router=router))
+
     assert out.truncated is True
-    assert out.model == "synthesis_failed"
-    assert out.cost_usd is None
+    assert out.model == "deterministic_fallback"
+    assert out.report_path == str(job.root / "report.md")
+    assert [call[0] for call in router.calls] == ["frontier", "frontier_speed"]
 
     failed_path = job.root / f"synthesis/{out.version:04d}.failed.md"
-    assert out.report_path == str(failed_path)
     assert failed_path.exists()
-    assert list((job.root / "synthesis").glob("*.partial.md")) == []
     failed_md = failed_path.read_text(encoding="utf-8")
     assert "## Partial Output" in failed_md
     assert "_No partial output captured._" in failed_md
     assert "## Traceback" in failed_md
-    assert "RuntimeError: openrouter: connection reset after 6 retries" in failed_md
+    assert "Primary Tier Traceback" in failed_md
+    assert "Fallback Tier Traceback" in failed_md
+    assert "RuntimeError: HTTP 400 Bad Request" in failed_md
+    assert "RuntimeError: fallback parser failed" in failed_md
 
     rows = _read_synthesis_rows(db_path, job.id)
-    assert rows == [], "failed writes must not insert a syntheses row"
+    assert len(rows) == 1
+    assert rows[0]["model"] == "deterministic_fallback"
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "Report (deterministic fallback)" in report
+    assert "## Findings" in report
+    assert "candidate roster finding 0" in report
+    assert "## Artifacts" in report
+    assert "[CSV](artifacts/candidates.csv)" in report
+    assert "## Coverage Ledger" in report
+    assert "confirmed_gap" in report
+    assert "## Confirmed Gaps" in report
+    assert "Maryland SBE" in report
 
     events = _read_event_rows(db_path, job.id)
-    failed = [e for e in events if e["kind"] == "synthesis_failed"]
-    assert len(failed) == 1
-    assert failed[0]["level"] == "ERROR"
-    payload = json.loads(failed[0]["payload_json"])
-    assert payload["tier"] == "frontier"
-    assert "connection reset" in payload["reason"]
-    assert payload["attempt_count"] == 1
+    assert [e["kind"] for e in events].count("synthesis_llm_failed") == 2
+    assert [e["kind"] for e in events].count("synthesis_fallback_tier_used") == 1
+    assert [e["kind"] for e in events].count("synthesis_deterministic_fallback_written") == 1
+    assert [e["kind"] for e in events].count("synthesis_failed") == 0
+    deterministic = [
+        e for e in events if e["kind"] == "synthesis_deterministic_fallback_written"
+    ][0]
+    payload = json.loads(deterministic["payload_json"])
+    assert payload["report_path"] == str(job.root / "report.md")
     assert payload["failed_path"].endswith(".failed.md")
-    assert (
-        "RuntimeError: openrouter: connection reset after 6 retries" in payload["traceback"]
+    assert payload["primary_tier"] == "frontier"
+    assert payload["fallback_tier"] == "frontier_speed"
+    assert payload["has_artifacts"] is True
+    assert payload["has_coverage_ledger"] is True
+
+
+def test_synthesize_both_nonbudget_failures_with_no_rows_still_writes_report(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    router = _StubRouter(
+        side_effect={
+            "frontier": [RuntimeError("primary model failed")],
+            "frontier_speed": [RuntimeError("fallback model failed")],
+        },
     )
+
+    out = asyncio.run(synthesize(job, plan, router=router))
+
+    assert out.truncated is True
+    assert out.model == "deterministic_fallback"
+    assert out.report_path == str(job.root / "report.md")
+    assert (job.root / f"synthesis/{out.version:04d}.failed.md").exists()
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "Report (deterministic fallback)" in report
+    assert "_No findings recorded" in report
+    assert "_No sources cited" in report
+
+    events = _read_event_rows(db_path, job.id)
+    assert [e["kind"] for e in events].count("synthesis_deterministic_fallback_written") == 1
 
 
 def test_failed_synthesis_artifact_includes_partial_content_and_traceback(
@@ -520,6 +640,40 @@ def test_final_synthesis_after_cap_falls_back_to_template_when_speed_capped(
     report = (job.root / "report.md").read_text(encoding="utf-8")
     assert "template stub" in report.lower()
     assert "claim 0" in report
+
+
+def test_final_synthesis_after_cap_nonbudget_failure_writes_deterministic_report(
+    job: Job, db_path: Path, plan: Plan
+) -> None:
+    _seed_findings(job, [0.95])
+    router = _StubRouter(
+        side_effect={
+            "frontier_speed": [RuntimeError("post-cap provider parse failure")],
+        },
+    )
+
+    out = asyncio.run(synth_module.final_synthesis_after_cap(job, plan, router=router))
+
+    assert out.truncated is True
+    assert out.model == "deterministic_fallback"
+    assert [c[0] for c in router.calls] == ["frontier_speed"]
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "Report (deterministic fallback)" in report
+    assert "claim 0" in report
+    assert (job.root / f"synthesis/{out.version:04d}.failed.md").exists()
+
+    events = _read_event_rows(db_path, job.id)
+    failed = [e for e in events if e["kind"] == "synthesis_llm_failed"]
+    assert len(failed) == 1
+    assert json.loads(failed[0]["payload_json"])["post_cap"] is True
+    deterministic = [
+        e for e in events if e["kind"] == "synthesis_deterministic_fallback_written"
+    ]
+    assert len(deterministic) == 1
+    payload = json.loads(deterministic[0]["payload_json"])
+    assert payload["primary_tier"] is None
+    assert payload["fallback_tier"] == "frontier_speed"
+    assert payload["post_cap"] is True
 
 
 # ---------------------------------------------------------------------------

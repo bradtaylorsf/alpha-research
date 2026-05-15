@@ -1162,6 +1162,12 @@ async def run_daemon(
             elif loop_time_capped:
                 final_status = "completed"
                 completion_reason = "time_cap"
+            elif (
+                loop_result is not None
+                and loop_result.get("completion_reason") == "confirmed_gap"
+            ):
+                final_status = "completed"
+                completion_reason = "confirmed_gap"
             elif loop_result is not None and loop_result.get("completion_reason") == "exhausted":
                 final_status = "completed"
                 completion_reason = "exhausted"
