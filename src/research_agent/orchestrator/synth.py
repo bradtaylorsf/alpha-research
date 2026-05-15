@@ -1963,10 +1963,13 @@ def _write_deterministic_fallback_output(
     post_cap: bool = False,
 ) -> SynthesisOutput:
     """Write a no-LLM report after terminal non-budget synthesis failures."""
+    # The traceback section in _render_failed_synthesis_md already wraps the
+    # body in a ```text fence, so emit plain section markers here and let the
+    # outer fence apply — nested fences would break markdown rendering.
     traceback_parts: list[str] = []
     if primary_exc is not None:
         traceback_parts.append(
-            "## Primary Tier Traceback\n\n```text\n"
+            "--- Primary Tier Traceback ---\n"
             + "".join(
                 traceback.format_exception(
                     type(primary_exc),
@@ -1974,10 +1977,9 @@ def _write_deterministic_fallback_output(
                     primary_exc.__traceback__,
                 )
             ).strip()
-            + "\n```"
         )
     traceback_parts.append(
-        "## Fallback Tier Traceback\n\n```text\n"
+        "--- Fallback Tier Traceback ---\n"
         + "".join(
             traceback.format_exception(
                 type(fallback_exc),
@@ -1985,7 +1987,6 @@ def _write_deterministic_fallback_output(
                 fallback_exc.__traceback__,
             )
         ).strip()
-        + "\n```"
     )
     failed_version = write_synthesis_failed(
         job,
