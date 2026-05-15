@@ -64,7 +64,15 @@ _SLUG_FORBIDDEN = ("/", "\\", "..")
 
 # Allowed values for ``completion_reason`` per issue #39 §9.
 ALLOWED_COMPLETION_REASONS = frozenset(
-    {"goal_complete", "time_cap", "budget_cap", "task_cap", "user_stopped", "exhausted"}
+    {
+        "goal_complete",
+        "time_cap",
+        "budget_cap",
+        "task_cap",
+        "user_stopped",
+        "exhausted",
+        "confirmed_gap",
+    }
 )
 
 

@@ -576,6 +576,50 @@ async def test_run_daemon_persists_exhausted_completion_reason(
 
 
 @pytest.mark.asyncio
+async def test_run_daemon_persists_confirmed_gap_completion_reason(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Complete-with-gaps runs must persist their terminal reason."""
+
+    async def _confirmed_gap_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        plan_dump = {
+            "version": 2,
+            "objective": "Investigate the target",
+            "subgoals": [{"id": 1, "description": "Gather", "done": True}],
+            "task_template": [],
+            "expected_iterations": 3,
+        }
+        write_plan(job, plan_dump)
+        return {
+            "tasks_done": 1,
+            "stopped": False,
+            "completed": False,
+            "cap_hit": False,
+            "time_cap_hit": False,
+            "completion_reason": "confirmed_gap",
+        }
+
+    _patch_run_daemon_for_in_process(monkeypatch, run_loop_impl=_confirmed_gap_run_loop)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert exit_code == 0
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "completed"
+    assert refreshed.completion_reason == "confirmed_gap"
+    meta = json.loads((seeded_job.root / "job.json").read_text(encoding="utf-8"))
+    assert meta["completion_reason"] == "confirmed_gap"
+
+
+@pytest.mark.asyncio
 async def test_run_daemon_resume_replan_runs_before_loop(
     seeded_job: Job, monkeypatch: pytest.MonkeyPatch
 ) -> None:

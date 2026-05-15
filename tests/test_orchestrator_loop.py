@@ -20,11 +20,12 @@ from research_agent.orchestrator.loop import (
     _is_cornerstone_source,
     _load_source_text,
     _run_extract_findings,
+    _update_candidate_artifact_from_result,
     default_handlers,
     run_loop,
 )
 from research_agent.orchestrator.plan import Plan, ScopeClass, Subgoal, TaskSpec
-from research_agent.storage import db
+from research_agent.storage import artifacts, db, enrichment
 from research_agent.storage.jobs import INBOX_REPLAN_FILE, Job
 from research_agent.storage.markdown import write_plan
 from research_agent.storage.tasks import (
@@ -167,6 +168,138 @@ def _ok_handler(result: dict[str, Any] | None = None) -> Handler:
         return result if result is not None else {"hits": 1}
 
     return _h
+
+
+def test_candidate_results_enrich_imported_artifact_without_losing_columns(
+    job: Job,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "candidate_roster.csv"
+    source.write_text(
+        "candidate_name,state,operator_note,candidate_status\n"
+        "Jane Example,CO,keep-me,Filed\n",
+        encoding="utf-8",
+    )
+    job.intake["enrichment"] = {
+        "artifact": "candidate_roster",
+        "key_columns": ["candidate_name", "state"],
+        "target_columns": ["official_campaign_website", "candidate_status"],
+        "overwrite_non_empty": False,
+    }
+    enrichment.import_csv_as_artifact(
+        job,
+        source,
+        artifact_name="candidate_roster",
+        key_columns=["candidate_name", "state"],
+        target_columns=["official_campaign_website", "candidate_status"],
+    )
+
+    _update_candidate_artifact_from_result(
+        job,
+        {
+            "results": [
+                {
+                    "title": "Jane Example",
+                    "url": "https://state.example/candidates/jane-example",
+                    "extras": {
+                        "source_kind": "state_election",
+                        "candidate_name": "Jane Example",
+                        "state": "CO",
+                        "chamber": "House",
+                        "district": "1",
+                        "status": "Qualified",
+                        "website": "https://jane.example",
+                        "source_url": "https://state.example/candidates/jane-example",
+                    },
+                }
+            ]
+        },
+    )
+
+    schema, rows = artifacts.read_artifact(job, "candidate_roster")
+    assert [column.name for column in schema.columns] == [
+        "candidate_name",
+        "state",
+        "operator_note",
+        "candidate_status",
+        "official_campaign_website",
+    ]
+    assert len(rows) == 1
+    assert rows[0]["operator_note"] == "keep-me"
+    assert rows[0]["official_campaign_website"] == "https://jane.example"
+    assert rows[0]["candidate_status"] == "Filed"
+
+    conflicts_path = job.root / "artifacts" / "candidate_roster.conflicts.jsonl"
+    conflicts = [
+        json.loads(line)
+        for line in conflicts_path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert [conflict["column"] for conflict in conflicts] == ["candidate_status"]
+    meta = json.loads((job.root / "artifacts" / "candidate_roster.meta.json").read_text())
+    assert meta["key_columns"] == ["candidate_name", "state"]
+    assert meta["target_columns"] == ["official_campaign_website", "candidate_status"]
+    assert meta["original_columns"] == [
+        "candidate_name",
+        "state",
+        "operator_note",
+        "candidate_status",
+    ]
+
+
+def test_candidate_append_preserves_imported_artifact_metadata(
+    job: Job,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "candidate_roster.csv"
+    source.write_text(
+        "candidate_name,state,operator_note\n"
+        "Jane Example,CO,keep-me\n",
+        encoding="utf-8",
+    )
+    job.intake["enrichment"] = {
+        "artifact": "candidate_roster",
+        "key_columns": ["candidate_name", "state"],
+        "target_columns": ["official_campaign_website"],
+        "overwrite_non_empty": False,
+    }
+    enrichment.import_csv_as_artifact(
+        job,
+        source,
+        artifact_name="candidate_roster",
+        key_columns=["candidate_name", "state"],
+        target_columns=["official_campaign_website"],
+    )
+
+    _update_candidate_artifact_from_result(
+        job,
+        {
+            "results": [
+                {
+                    "title": "Ana Example",
+                    "url": "https://state.example/candidates/ana-example",
+                    "extras": {
+                        "source_kind": "state_election",
+                        "candidate_name": "Ana Example",
+                        "state": "CO",
+                        "chamber": "House",
+                        "district": "2",
+                        "status": "Qualified",
+                        "website": "https://ana.example",
+                        "source_url": "https://state.example/candidates/ana-example",
+                    },
+                }
+            ]
+        },
+    )
+
+    _, rows = artifacts.read_artifact(job, "candidate_roster")
+    assert [row["candidate_name"] for row in rows] == ["Jane Example", "Ana Example"]
+    meta = json.loads((job.root / "artifacts" / "candidate_roster.meta.json").read_text())
+    assert meta["row_count"] == 2
+    assert meta["key_columns"] == ["candidate_name", "state"]
+    assert meta["target_columns"] == ["official_campaign_website"]
+    assert meta["original_columns"] == ["candidate_name", "state", "operator_note"]
 
 
 # ---------------------------------------------------------------------------

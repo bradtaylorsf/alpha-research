@@ -90,6 +90,7 @@ def import_csv_as_artifact(
     *,
     artifact_name: str,
     key_columns: list[str],
+    target_columns: list[str] | None = None,
     schema: ArtifactSchema | None = None,
 ) -> Path:
     """Import an operator-supplied CSV into a structured artifact."""
@@ -123,6 +124,7 @@ def import_csv_as_artifact(
         artifact_name,
         {
             "key_columns": key_columns,
+            "target_columns": target_columns or [],
             "original_columns": columns,
             "original_row_count": len(rows),
             "input_csv_path": str(source),
@@ -175,15 +177,24 @@ def _schema_with_columns(schema: ArtifactSchema, columns: list[str]) -> Artifact
     )
 
 
-def _update_values(update: dict[str, Any], key_columns: list[str]) -> dict[str, Any]:
+def _update_values(
+    update: dict[str, Any],
+    key_columns: list[str],
+    target_columns: list[str] | None = None,
+) -> dict[str, Any]:
     values = update.get("values")
     if isinstance(values, dict):
-        return dict(values)
-    return {
-        key: value
-        for key, value in update.items()
-        if key not in set(key_columns) | _UPDATE_META_KEYS
-    }
+        raw = dict(values)
+    else:
+        raw = {
+            key: value
+            for key, value in update.items()
+            if key not in set(key_columns) | _UPDATE_META_KEYS
+        }
+    if target_columns is None:
+        return raw
+    allowed = set(target_columns)
+    return {key: value for key, value in raw.items() if key in allowed}
 
 
 def enrich_artifact(
@@ -192,6 +203,7 @@ def enrich_artifact(
     *,
     updates: list[dict[str, Any]],
     key_columns: list[str] | None = None,
+    target_columns: list[str] | None = None,
     overwrite_non_empty: bool = False,
     conflict_policy: str = "review_needed",
 ) -> dict[str, int]:
@@ -201,6 +213,11 @@ def enrich_artifact(
     schema, rows = artifacts.read_artifact(job, name)
     meta = _read_meta(job, name)
     keys = key_columns or [str(k) for k in meta.get("key_columns") or []]
+    targets = target_columns
+    if targets is None and isinstance(meta.get("target_columns"), list):
+        targets = [str(column) for column in meta.get("target_columns") or []]
+    if targets == []:
+        targets = None
     _validate_keys([column.name for column in schema.columns], keys)
     row_by_key = {_key_tuple(row, keys): row for row in rows}
 
@@ -215,7 +232,7 @@ def enrich_artifact(
         row = row_by_key.get(key)
         if row is None:
             continue
-        values = _update_values(update, keys)
+        values = _update_values(update, keys, targets)
         for column, incoming in values.items():
             if incoming in (None, ""):
                 continue
@@ -269,6 +286,7 @@ def enrich_artifact(
         {
             **meta,
             "key_columns": keys,
+            "target_columns": targets or [],
             "last_enriched_at_epoch": _now_epoch(),
             "last_enrichment_changed_cells": changed,
             "last_enrichment_conflicts": conflicts,

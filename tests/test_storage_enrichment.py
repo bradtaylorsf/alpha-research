@@ -63,6 +63,7 @@ def test_import_csv_as_artifact_preserves_rows_columns_and_provenance(tmp_path: 
     assert [row["candidate_id"] for row in exported] == ["H1", "H2", "H3"]
     meta = json.loads((job.root / "artifacts" / "candidates.meta.json").read_text())
     assert meta["key_columns"] == ["candidate_id"]
+    assert meta["target_columns"] == []
     assert meta["original_columns"] == ["candidate_id", "candidate_name", "website", "status"]
 
     provenance = _read_jsonl(job.root / "artifacts" / "candidates.provenance.jsonl")
@@ -165,6 +166,39 @@ def test_enrich_artifact_can_overwrite_non_empty_cells(tmp_path: Path) -> None:
     assert rows[1]["website"] == "https://replacement.example"
     provenance = _read_jsonl(job.root / "artifacts" / "candidates.provenance.jsonl")
     assert provenance[-1]["action"] == "overwrote_non_empty"
+
+
+def test_enrich_artifact_respects_target_columns(tmp_path: Path) -> None:
+    job = _job(tmp_path)
+    enrichment.import_csv_as_artifact(
+        job,
+        _fixture_csv(tmp_path),
+        artifact_name="candidates",
+        key_columns=["candidate_id"],
+        target_columns=["website"],
+    )
+
+    result = enrichment.enrich_artifact(
+        job,
+        "candidates",
+        updates=[
+            {
+                "candidate_id": "H1",
+                "website": "https://jane.example",
+                "status": "Qualified",
+                "source_url": "https://state.example/h1",
+                "source_kind": "state_election",
+                "confidence": 0.91,
+            }
+        ],
+    )
+
+    _, rows = artifacts.read_artifact(job, "candidates")
+    assert result == {"changed": 1, "conflicts": 0, "rows": 3}
+    assert rows[0]["website"] == "https://jane.example"
+    assert rows[0]["status"] == "Filed"
+    meta = json.loads((job.root / "artifacts" / "candidates.meta.json").read_text())
+    assert meta["target_columns"] == ["website"]
 
 
 def test_read_artifact_with_provenance_round_trips(tmp_path: Path) -> None:

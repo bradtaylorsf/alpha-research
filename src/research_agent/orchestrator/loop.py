@@ -1115,6 +1115,110 @@ def _candidate_key(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
     )
 
 
+def _candidate_config_columns(value: Any) -> list[str]:
+    columns: list[str] = []
+    if isinstance(value, str):
+        raw_items: list[Any] = value.split(",")
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = []
+    for item in raw_items:
+        column = str(item).strip()
+        if column and column not in columns:
+            columns.append(column)
+    return columns
+
+
+def _candidate_artifact_config(job: Job) -> dict[str, Any]:
+    intake = job.intake if isinstance(job.intake, dict) else {}
+    raw_enrichment = intake.get("enrichment")
+    enrichment = raw_enrichment if isinstance(raw_enrichment, dict) else {}
+    artifact_name = str(
+        enrichment.get("artifact") or intake.get("input_csv_artifact") or "candidates"
+    ).strip()
+    return {
+        "artifact": artifact_name or "candidates",
+        "key_columns": _candidate_config_columns(enrichment.get("key_columns")),
+        "target_columns": _candidate_config_columns(enrichment.get("target_columns")),
+        "overwrite_non_empty": bool(enrichment.get("overwrite_non_empty")),
+    }
+
+
+def _key_tuple_for_columns(
+    row: dict[str, Any],
+    key_columns: list[str],
+) -> tuple[str, ...] | None:
+    values = [str(row.get(column) or "").strip().lower() for column in key_columns]
+    if not values or any(value == "" for value in values):
+        return None
+    return tuple(values)
+
+
+def _schema_with_row_columns(
+    schema: Any,
+    rows: list[dict[str, Any]],
+) -> Any:
+    from research_agent.storage.artifacts import ArtifactColumn
+
+    existing = [column.name for column in schema.columns]
+    discovered: list[str] = []
+    for row in rows:
+        for column in row:
+            if column not in existing and column not in discovered:
+                discovered.append(column)
+    if not discovered:
+        return schema
+    return schema.model_copy(
+        update={
+            "schema_version": schema.schema_version + 1,
+            "columns": [
+                *schema.columns,
+                *[ArtifactColumn(name=column, required=False) for column in discovered],
+            ],
+        }
+    )
+
+
+def _enrichment_only_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    artifact_owned_keys = {
+        "artifact_name",
+        "schema_version",
+        "row_count",
+        "generated_at_epoch",
+        "source_job_id",
+        "source_coverage",
+    }
+    return {key: value for key, value in meta.items() if key not in artifact_owned_keys}
+
+
+def _candidate_rows_to_append(
+    existing_rows: list[dict[str, Any]],
+    candidate_rows: list[dict[str, Any]],
+    key_columns: list[str],
+) -> list[dict[str, Any]]:
+    matched_keys = {
+        key
+        for row in existing_rows
+        for key in [_key_tuple_for_columns(row, key_columns)]
+        if key is not None
+    }
+    seen_candidate_keys = {_candidate_key(row) for row in existing_rows}
+    new_rows: list[dict[str, Any]] = []
+    for row in candidate_rows:
+        configured_key = _key_tuple_for_columns(row, key_columns)
+        if configured_key is not None and configured_key in matched_keys:
+            continue
+        candidate_key = _candidate_key(row)
+        if candidate_key in seen_candidate_keys:
+            continue
+        seen_candidate_keys.add(candidate_key)
+        if configured_key is not None:
+            matched_keys.add(configured_key)
+        new_rows.append(row)
+    return new_rows
+
+
 def _update_candidate_artifact_from_result(
     job: Job,
     result: dict[str, Any] | None,
@@ -1134,31 +1238,50 @@ def _update_candidate_artifact_from_result(
     if not candidate_rows:
         return
 
-    from research_agent.storage import artifacts
+    from research_agent.storage import artifacts, enrichment
 
+    config = _candidate_artifact_config(job)
+    artifact_name = str(config["artifact"])
+    key_columns = list(config["key_columns"])
+    target_columns = list(config["target_columns"])
     try:
-        _schema, existing_rows = artifacts.read_artifact(job, "candidates")
+        schema, existing_rows = artifacts.read_artifact(job, artifact_name)
     except FileNotFoundError:
+        schema = artifacts.CANDIDATE_ROSTER_SCHEMA.model_copy(
+            update={"name": artifact_name}
+        )
         existing_rows = []
+        enrichment_meta: dict[str, Any] = {}
+    else:
+        enrichment_meta = enrichment._read_meta(job, artifact_name)
 
-    seen = {_candidate_key(row) for row in existing_rows}
-    merged = list(existing_rows)
-    for row in candidate_rows:
-        key = _candidate_key(row)
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(row)
-    if len(merged) == len(existing_rows):
+    if key_columns and existing_rows:
+        enrichment.enrich_artifact(
+            job,
+            artifact_name,
+            updates=candidate_rows,
+            key_columns=key_columns,
+            target_columns=target_columns or None,
+            overwrite_non_empty=bool(config["overwrite_non_empty"]),
+        )
+        schema, existing_rows = artifacts.read_artifact(job, artifact_name)
+        enrichment_meta = enrichment._read_meta(job, artifact_name)
+
+    new_rows = _candidate_rows_to_append(existing_rows, candidate_rows, key_columns)
+    if not new_rows:
         return
 
+    merged = [*existing_rows, *new_rows]
     artifacts.write_table_artifact(
         job,
-        "candidates",
-        schema=artifacts.CANDIDATE_ROSTER_SCHEMA,
+        artifact_name,
+        schema=_schema_with_row_columns(schema, merged),
         rows=merged,
         source_coverage=f"{len(merged)} candidate rows from connector results",
     )
+    preserved_meta = _enrichment_only_meta(enrichment_meta)
+    if preserved_meta:
+        enrichment._write_meta(job, artifact_name, preserved_meta)
 
 
 def _is_zero_result_search(kind: str, result: dict[str, Any] | None) -> bool | None:

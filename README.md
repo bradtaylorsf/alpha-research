@@ -521,8 +521,10 @@ used to trigger a tactical replan while the daemon is still running.
 `--input-csv PATH --artifact NAME --key COL` imports an existing CSV into
 `jobs/<id>/artifacts/` before the daemon starts so a run can enrich missing
 cells instead of creating a list from scratch. Repeat `--key` or pass
-comma-separated key columns. Existing non-empty cells are preserved by
-default; `--update-existing` records overwrite intent in intake metadata.
+comma-separated key columns. Use `--target-column COL` to restrict enrichment
+to specific columns, repeating it or passing comma-separated names as needed.
+Existing non-empty cells are preserved by default; `--update-existing`
+records overwrite intent in intake metadata.
 
 `--translate-non-english` is off by default. When enabled, extracted
 findings whose source metadata is non-English get a

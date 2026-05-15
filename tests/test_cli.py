@@ -304,6 +304,8 @@ def test_start_input_csv_imports_artifact_and_enrichment_intake(
             "candidates",
             "--key",
             "candidate_id",
+            "--target-column",
+            "website,status",
         ],
     )
 
@@ -325,6 +327,7 @@ def test_start_input_csv_imports_artifact_and_enrichment_intake(
         "artifact": "candidates",
         "input_csv": str(csv_path),
         "key_columns": ["candidate_id"],
+        "target_columns": ["website", "status"],
         "overwrite_non_empty": False,
     }
     rows = list(csv.DictReader((artifact_dir / "candidates.csv").open()))

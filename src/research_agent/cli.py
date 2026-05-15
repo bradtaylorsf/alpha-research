@@ -194,6 +194,14 @@ def start_command(
         "--key",
         help="Key column for --input-csv. Repeat or pass comma-separated names.",
     ),
+    target_columns_raw: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--target-column",
+        help=(
+            "Column to enrich in --input-csv artifacts. Repeat or pass "
+            "comma-separated names. Defaults to any non-key column."
+        ),
+    ),
     update_existing: bool = typer.Option(  # noqa: B008
         False,
         "--update-existing",
@@ -240,6 +248,7 @@ def start_command(
         intake_data["max_tasks"] = max_tasks
 
     key_columns = _split_key_columns(key_columns_raw)
+    target_columns = _split_key_columns(target_columns_raw)
     if input_csv is not None:
         if not input_csv.is_file():
             typer.echo(f"--input-csv not found: {input_csv}", err=True)
@@ -255,6 +264,7 @@ def start_command(
             "artifact": artifact_name,
             "input_csv": str(input_csv),
             "key_columns": key_columns,
+            "target_columns": target_columns,
             "overwrite_non_empty": bool(update_existing and not no_overwrite),
         }
 
@@ -330,6 +340,7 @@ def start_command(
                 input_csv,
                 artifact_name=artifact_name,
                 key_columns=key_columns,
+                target_columns=target_columns,
             )
         except Exception as exc:
             typer.echo(f"failed to import --input-csv: {exc}", err=True)

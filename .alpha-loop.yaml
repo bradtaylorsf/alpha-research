@@ -10,8 +10,8 @@ auto_merge: true
 # dependencies — scaffold must land before pyproject, pyproject before
 # `research doctor`). Once Phase 1 ships, flip `batch: true` for the
 # parallel-friendly later phases (e.g. independent connectors in Phase 3).
-batch: false
-batch_size: 5
+batch: true
+batch_size: 4
 
 # --- Validation commands (Python 3.12 stack per research-agent-implementation-guide.md) ---
 # `uv` manages the venv and installs from pyproject.toml on first run, so these
@@ -95,6 +95,25 @@ smoke_test: |
 # Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
   - codex
+  - claude
+
+# === Pipeline overrides (advanced) ==========================================
+# Use a different agent or model for specific pipeline steps. Useful for
+# routing cheap models to grunt work and reserving the expensive ones for
+# planning and review. Each step accepts { agent?, model? }.
+pipeline:
+  plan:
+    agent: claude
+  implement:
+    agent: codex
+  test_fix:
+    agent: codex
+  review:
+    agent: claude
+  verify:
+    agent: codex
+  learn:
+    agent: codex
 
 # --- Safety limits (0 = unlimited) ---
 # Goal: drain the entire 45-issue backlog overnight. Realistic completion is
