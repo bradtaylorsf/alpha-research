@@ -369,7 +369,8 @@ research start --skip-intake \
     --goal "Compare Pydantic AI, LangGraph, and CrewAI" \
     --budget-usd 5.00 \
     --time-cap 24 \
-    --disk-cap-gb 10
+    --disk-cap-gb 10 \
+    --inbox
 # → Started job 2026-05-02-compare-pydantic-ai- (daemon pid 12345).
 #   Tail logs with: research logs 2026-05-02-compare-pydantic-ai- -f
 
@@ -413,9 +414,13 @@ jobs/<job-id>/
 ├── sources/              # symlinks/copies of canonical source markdown
 ├── synthesis/            # synthesis/NNNN.md (versioned)
 ├── critique/             # critique/NNNN.md (versioned)
+├── artifacts/            # structured outputs such as CSV tables
+├── inbox/                # optional human-supplied documents for live ingest
+│   └── processed/        # ingested inbox files, renamed with content hash
 ├── report.md             # current report (rotated to report.history/ on rewrite)
 ├── report.history/       # archived prior reports
 ├── events.jsonl          # append-only event log
+├── INBOX_REPLAN.json     # transient replan trigger after inbox ingest
 ├── daemon.pid            # written on spawn, removed on clean exit
 ├── daemon.out.log        # daemon stdout
 ├── daemon.err.log        # daemon stderr
@@ -451,7 +456,7 @@ Lockfiles (`uv.lock`) are committed.
 ```bash
 research start --skip-intake --goal "<goal>" \
     [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes] \
-    [--disk-cap-gb 10] [--translate-non-english]
+    [--disk-cap-gb 10] [--translate-non-english] [--inbox]
 
 research list                      # newest first; Rich on a TTY, JSON otherwise
 research list --json
@@ -464,6 +469,7 @@ research view <job-id>             # report.md in $EDITOR (or stdout off-TTY)
 research view <job-id> --report
 research view <job-id> --findings  # latest findings/NNNNNN.md
 research view <job-id> --sources
+research view <job-id> --hypotheses
 
 research logs <job-id>             # print existing events.jsonl entries
 research logs <job-id> -f          # follow appended events
@@ -475,6 +481,10 @@ research stop <job-id> --kill      # SIGTERM, then SIGKILL after 10s
 research resume <job-id>           # respawn daemon, restore from checkpoint
 research resume <job-id> --force   # resume even when completed/failed
 
+research inbox <job-id> add <file>  # copy a human-supplied doc into the live inbox
+research inbox <job-id> list        # show pending and processed inbox files
+# Registered verb paths: research inbox add, research inbox list.
+
 research search "<query>"          # hybrid FTS5 + semantic (cross-job)
 research search "<query>" --fts-only
 research search "<query>" --job <job-id>
@@ -484,6 +494,7 @@ research search "<query>" --json
 
 research export <job-id> --zip
 research export <job-id> --md-bundle
+research export <job-id> --csv <artifact-name>
 research export <job-id> --zip --out PATH
 research export <job-id> --md-bundle --include-history
 
@@ -498,6 +509,11 @@ DB row, and spawns a detached daemon via
 `subprocess.Popen(start_new_session=True)`. The PID is written atomically
 to `jobs/<id>/daemon.pid`; the daemon's stdout/stderr land in
 `jobs/<id>/daemon.{out,err}.log`.
+
+`--inbox` enables a live `jobs/<id>/inbox/` watcher for the daemon. Files
+added with `research inbox <job-id> add <file>` are indexed into the local
+corpus, moved to `inbox/processed/`, logged as `corpus_doc_added`, and
+used to trigger a tactical replan while the daemon is still running.
 
 `--translate-non-english` is off by default. When enabled, extracted
 findings whose source metadata is non-English get a
@@ -516,7 +532,11 @@ debugging FTS5 syntax).
 `research export` bundles a job for sharing. `--zip` walks
 `jobs/<job-id>/` into a `ZIP_DEFLATED` archive; `--md-bundle` concatenates
 intake, `report.md`, every finding, and the source list into one navigable
-markdown file. Exactly one mode flag is required.
+markdown file; `--csv <artifact-name>` exports a structured table artifact
+from `jobs/<job-id>/artifacts/` with stable column order and empty cells
+for missing optional values. Exactly one mode flag is required. When
+structured artifacts exist, synthesis links them from the report instead
+of relying on prose-only list output.
 
 `research compare` diffs two runs by counts (tasks, findings, sources,
 plan versions, drain-replans, cornerstone hits), department coverage, and

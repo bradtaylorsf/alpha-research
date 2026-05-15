@@ -30,7 +30,7 @@ from research_agent.orchestrator.plan import (
     tactical_replan,
 )
 from research_agent.prompts import loader as prompts_loader
-from research_agent.storage import db
+from research_agent.storage import db, hypotheses
 from research_agent.storage.jobs import Job
 
 ALL_TASK_KINDS: tuple[str, ...] = get_args(TaskKind)
@@ -628,6 +628,33 @@ def test_tactical_replan_includes_inconclusive_subgoals_payload(
     assert payload["inconclusive_subgoals"] == inconclusive
     assert result.task_template[0].kind == "news_search"
     assert result.task_template[0].kind not in inconclusive[0]["prior_task_kinds"]
+
+
+def test_tactical_replan_includes_hypotheses_payload(
+    job: Job,
+    router_with_spy: tuple[Router, list[Any]],
+) -> None:
+    router, calls = router_with_spy
+    prior = _sample_plan()
+    hid = hypotheses.upsert_hypothesis(
+        job,
+        plan_version=1,
+        statement="Permitting friction is the primary delay driver.",
+        confidence=0.62,
+        supports=[10],
+        refutes=[],
+        status="open",
+    )
+    _StubAgent.next_plan = _sample_plan(version=2)
+
+    asyncio.run(tactical_replan(job, prior, [], router=router))
+
+    payload = json.loads(calls[0][2][0])
+    assert payload["hypotheses"][0]["id"] == hid
+    assert payload["hypotheses"][0]["statement"] == (
+        "Permitting friction is the primary delay driver."
+    )
+    assert payload["hypotheses"][0]["supports"] == [10]
 
 
 def test_tactical_replan_gap_reason_marks_subgoal_gapped(

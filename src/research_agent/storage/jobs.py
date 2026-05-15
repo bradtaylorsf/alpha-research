@@ -37,6 +37,7 @@ from research_agent.storage import db
 
 DEFAULT_JOBS_ROOT = Path("jobs")
 RESUME_REPLAN_FILE = "RESUME_REPLAN.json"
+INBOX_REPLAN_FILE = "INBOX_REPLAN.json"
 
 # Daemon kill escalation window. Module-level so tests can monkeypatch it
 # down from 10s to keep the suite fast.
@@ -51,6 +52,9 @@ _SUBDIRS = (
     "critique",
     "report.history",
     "archive",
+    "inbox",
+    "inbox/processed",
+    "artifacts",
 )
 # Subdirs that get wiped on a soft reset; ``archive`` is preserved on purpose
 # so prior reports stay around for ``research compare``.
@@ -384,6 +388,7 @@ class Job:
                     "critiques",
                     "findings",
                     "events",
+                    "hypotheses",
                     "checkpoints",
                     "syntheses",
                     "llm_calls",
@@ -553,6 +558,7 @@ def list_jobs(
 
 __all__ = [
     "DEFAULT_JOBS_ROOT",
+    "INBOX_REPLAN_FILE",
     "KILL_ESCALATION_SECONDS",
     "KILL_POLL_INTERVAL_SECONDS",
     "Job",

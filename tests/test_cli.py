@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import time
 from datetime import UTC, date, datetime
@@ -11,7 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from research_agent import __version__, cli, config
-from research_agent.storage import db
+from research_agent.storage import artifacts, db, hypotheses
 from research_agent.storage.jobs import RESUME_REPLAN_FILE, Job
 from research_agent.ui import render
 
@@ -257,6 +258,23 @@ def test_start_translate_non_english_flag_is_persisted(
     job_root = isolated_jobs_repo / "jobs" / f"{today}-translate-archival-findings"
     intake_data = json.loads((job_root / "intake.json").read_text(encoding="utf-8"))
     assert intake_data["translate_non_english"] is True
+
+
+def test_start_inbox_flag_is_persisted(isolated_jobs_repo: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 12345)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        ["start", "--skip-intake", "--goal", "Inbox enabled target", "--inbox"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    job_root = isolated_jobs_repo / "jobs" / f"{today}-inbox-enabled-target"
+    intake_data = json.loads((job_root / "intake.json").read_text(encoding="utf-8"))
+    assert intake_data["inbox"] is True
+    assert (job_root / "inbox" / "processed").is_dir()
 
 
 def test_start_runs_intake_when_not_skipped(isolated_jobs_repo: Path, monkeypatch):
@@ -606,6 +624,74 @@ def test_view_findings_when_none_fails(isolated_jobs_repo: Path):
     runner = CliRunner()
     result = runner.invoke(cli.app, ["view", job.id, "--findings"], env={"EDITOR": ""})
     assert result.exit_code != 0
+
+
+def test_view_hypotheses_prints_ledger(isolated_jobs_repo: Path):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    hypotheses.upsert_hypothesis(
+        job,
+        plan_version=1,
+        statement="Permitting friction is the primary delay driver.",
+        confidence=0.62,
+        supports=[10],
+        refutes=[11],
+        status="open",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["view", job.id, "--hypotheses"], env={"EDITOR": ""})
+
+    assert result.exit_code == 0, result.stdout
+    assert "Hypotheses for" in result.stdout
+    assert "Permitting friction is the primary delay driver." in result.stdout
+    assert "0.62" in result.stdout
+    assert "open" in result.stdout
+
+
+def test_view_rejects_multiple_modes(isolated_jobs_repo: Path):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        ["view", job.id, "--report", "--hypotheses"],
+        env={"EDITOR": ""},
+    )
+    assert result.exit_code == 2
+    assert "choose only one" in (result.stdout + (result.stderr or ""))
+
+
+def test_inbox_add_copies_file_and_list_shows_pending(isolated_jobs_repo: Path, tmp_path: Path):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    source = tmp_path / "foia-response.md"
+    source.write_text("# FOIA response\n\nContract file attached.\n", encoding="utf-8")
+
+    runner = CliRunner()
+    added = runner.invoke(cli.app, ["inbox", job.id, "add", str(source)])
+
+    assert added.exit_code == 0, added.stdout
+    dest = job.root / "inbox" / source.name
+    assert dest.exists()
+    assert dest.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert not list((job.root / "inbox").glob("*.tmp"))
+
+    listed = runner.invoke(cli.app, ["inbox", job.id, "list"])
+    assert listed.exit_code == 0, listed.stdout
+    assert "pending" in listed.stdout
+    assert "foia-response.md" in listed.stdout
+
+
+def test_inbox_list_shows_processed_files(isolated_jobs_repo: Path):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    processed = job.root / "inbox" / "processed" / "abc123-doc.md"
+    processed.parent.mkdir(parents=True, exist_ok=True)
+    processed.write_text("processed", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["inbox", job.id, "list"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "processed" in result.stdout
+    assert processed.name in result.stdout
 
 
 def test_logs_prints_existing_events(isolated_jobs_repo: Path):
@@ -1444,6 +1530,63 @@ def test_export_md_bundle_writes_markdown(isolated_jobs_repo: Path):
     assert "### Finding 000001" in body
     assert "## Sources" in body
     assert "https://web.archive.org/web/2026/x" in body
+
+
+def test_export_csv_writes_named_table_artifact(isolated_jobs_repo: Path):
+    job = _seed_export_job(isolated_jobs_repo)
+    rows = [
+        {
+            "state": "CA",
+            "chamber": "House",
+            "district_or_seat": "12",
+            "candidate_name": "Jane Doe",
+            "source_url": "https://example.com/jane",
+        },
+        {
+            "state": "NV",
+            "chamber": "Senate",
+            "candidate_name": "John Smith",
+            "party": "Independent",
+            "source_url": "https://example.com/john",
+        },
+    ]
+    artifacts.write_table_artifact(
+        job,
+        "candidates",
+        schema=artifacts.CANDIDATE_ROSTER_SCHEMA,
+        rows=rows,
+    )
+    out_path = isolated_jobs_repo / "candidates-export.csv"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        ["export", job.id, "--csv", "candidates", "--out", str(out_path)],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    exported = list(csv.DictReader(out_path.open()))
+    assert exported[0]["candidate_name"] == "Jane Doe"
+    assert exported[1]["party"] == "Independent"
+    assert exported[0]["official_campaign_website"] == ""
+
+
+def test_export_csv_missing_artifact_errors_with_available_names(isolated_jobs_repo: Path):
+    job = _seed_export_job(isolated_jobs_repo)
+    artifacts.write_table_artifact(
+        job,
+        "candidates",
+        schema=artifacts.CANDIDATE_ROSTER_SCHEMA,
+        rows=[],
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["export", job.id, "--csv", "missing"])
+
+    assert result.exit_code == 1
+    combined = result.stdout + (result.stderr or "")
+    assert "artifact 'missing' not found" in combined
+    assert "candidates" in combined
 
 
 def test_export_requires_a_mode(isolated_jobs_repo: Path):

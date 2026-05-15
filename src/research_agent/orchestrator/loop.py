@@ -53,7 +53,7 @@ from research_agent.orchestrator.errors import FatalError, RetriableError
 from research_agent.orchestrator.plan import Plan, TaskKind, TaskSpec
 from research_agent.skills import load_skill, load_strategies
 from research_agent.storage import db
-from research_agent.storage.jobs import Job, _atomic_write_text
+from research_agent.storage.jobs import INBOX_REPLAN_FILE, Job, _atomic_write_text
 from research_agent.storage.tasks import (
     enqueue,
     mark_done,
@@ -1274,6 +1274,78 @@ async def _drain_replan(
         productive_task_count=productive_count,
         should_continue=True,
     )
+
+
+def _consume_inbox_replan_request(job: Job) -> dict[str, Any] | None:
+    path = job.root / INBOX_REPLAN_FILE
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _inbox_replan(
+    job: Job,
+    plan: Plan,
+    *,
+    router: Any,
+    request: dict[str, Any],
+) -> Plan | None:
+    from research_agent.orchestrator.plan import (
+        _compute_prior_attempts_for_subgoal,
+        tactical_replan,
+    )
+
+    recent_results = _load_recent_task_results(job)
+    prior_attempts = _compute_prior_attempts_for_subgoal(plan, _load_all_task_attempts(job))
+    inconclusive_context = [
+        item for item in prior_attempts.values() if item.get("prior_task_kinds")
+    ]
+    kwargs: dict[str, Any] = {}
+    if inconclusive_context:
+        kwargs["inconclusive_subgoals"] = inconclusive_context
+    note = request.get("note")
+    if isinstance(note, str) and note.strip():
+        kwargs["user_note"] = note.strip()
+    emit(
+        job,
+        "INFO",
+        "loop",
+        "replan_triggered",
+        {
+            "stage": "inbox",
+            "filename": request.get("filename"),
+            "sha": request.get("sha"),
+            "has_note": "user_note" in kwargs,
+        },
+    )
+    try:
+        return await tactical_replan(
+            job,
+            plan,
+            recent_results,
+            router=router,
+            findings=_load_all_findings(job),
+            synthesis_md=_load_latest_synthesis_md(job),
+            follow_up_questions=_load_pending_follow_up_questions(recent_results),
+            **kwargs,
+        )
+    except Exception as exc:  # noqa: BLE001 — inbox replan failure must not kill loop
+        emit(
+            job,
+            "WARN",
+            "loop",
+            "warning",
+            {"inbox_replan_failed": True, "error": str(exc)},
+        )
+        return None
 
 
 def _make_wait_fn(wait_seq: tuple[int, ...]) -> Callable[[Any], int]:
@@ -3089,6 +3161,13 @@ async def run_loop(
         and tasks_done < max_tasks
         and _within_time_cap()
     ):
+        inbox_request = _consume_inbox_replan_request(job)
+        if inbox_request is not None:
+            inbox_plan = await _inbox_replan(job, plan, router=router, request=inbox_request)
+            if inbox_plan is not None:
+                plan = inbox_plan
+            continue
+
         task = next_pending(job)
         if task is None:
             cap = _resolve_drain_cap(plan)
