@@ -4,9 +4,12 @@ Implements the load-bearing convention from §4 of the implementation guide:
 every job is a self-contained folder under ``jobs/<job-id>/`` with a fixed
 sidecar layout (``job.json``, ``intake.json``, ``goal.md``, the ``plan/``,
 ``findings/``, ``sources/``, ``synthesis/``, ``critique/``, ``report.history/``
-subfolders, and an append-only ``events.jsonl``). The cross-job ``jobs`` table
-in :mod:`research_agent.storage.db` mirrors the canonical metadata so the
-future UI and the ``research list`` CLI can query without scanning disk.
+subfolders, and an append-only ``events.jsonl``). Transient control files
+live next to those sidecars: ``STOP`` requests graceful shutdown and
+``RESUME_REPLAN.json`` asks the daemon to run one tactical replan before
+resuming the queue. The cross-job ``jobs`` table in
+:mod:`research_agent.storage.db` mirrors the canonical metadata so the future
+UI and the ``research list`` CLI can query without scanning disk.
 
 Job IDs are deterministic ``YYYY-MM-DD-<slug>`` strings derived from the
 intake goal. The slug is normalized aggressively (lowercased, non-alphanum
@@ -33,6 +36,7 @@ from typing import Any
 from research_agent.storage import db
 
 DEFAULT_JOBS_ROOT = Path("jobs")
+RESUME_REPLAN_FILE = "RESUME_REPLAN.json"
 
 # Daemon kill escalation window. Module-level so tests can monkeypatch it
 # down from 10s to keep the suite fast.
@@ -56,7 +60,7 @@ _SLUG_FORBIDDEN = ("/", "\\", "..")
 
 # Allowed values for ``completion_reason`` per issue #39 §9.
 ALLOWED_COMPLETION_REASONS = frozenset(
-    {"goal_complete", "time_cap", "budget_cap", "task_cap", "user_stopped"}
+    {"goal_complete", "time_cap", "budget_cap", "task_cap", "user_stopped", "exhausted"}
 )
 
 

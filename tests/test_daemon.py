@@ -32,7 +32,7 @@ import pytest
 from research_agent import daemon
 from research_agent.orchestrator.plan import Plan, Subgoal, TaskSpec
 from research_agent.storage import db
-from research_agent.storage.jobs import Job
+from research_agent.storage.jobs import RESUME_REPLAN_FILE, Job
 from research_agent.storage.markdown import write_plan
 
 # ---------------------------------------------------------------------------
@@ -531,6 +531,156 @@ async def test_run_daemon_passes_time_cap_and_marks_time_cap_completion(
     )
     assert refreshed.status == "completed"
     assert refreshed.completion_reason == "time_cap"
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_persists_exhausted_completion_reason(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loop-level exhausted signal wins over goal_complete classification."""
+
+    async def _exhausted_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        plan_dump = {
+            "version": 2,
+            "objective": "Investigate the target",
+            "subgoals": [{"id": 1, "description": "Gather", "done": True}],
+            "task_template": [],
+            "expected_iterations": 3,
+        }
+        write_plan(job, plan_dump)
+        return {
+            "tasks_done": 1,
+            "stopped": False,
+            "completed": True,
+            "cap_hit": False,
+            "time_cap_hit": False,
+            "completion_reason": "exhausted",
+        }
+
+    _patch_run_daemon_for_in_process(monkeypatch, run_loop_impl=_exhausted_run_loop)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert exit_code == 0
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "completed"
+    assert refreshed.completion_reason == "exhausted"
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_resume_replan_runs_before_loop(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resume sidecar triggers tactical_replan before run_loop pulls work."""
+    monkeypatch.setenv("RESEARCH_DAEMON_SKIP_HEALTH_CHECKS", "1")
+    (seeded_job.root / RESUME_REPLAN_FILE).write_text(
+        json.dumps({"note": "user added FOIA response"}),
+        encoding="utf-8",
+    )
+    sequence: list[str] = []
+    captured: dict[str, Any] = {}
+
+    async def _resume_replan(
+        job: Job,
+        plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
+        inconclusive_subgoals: list[dict[str, Any]] | None = None,
+        user_note: str | None = None,
+    ) -> Plan:
+        sequence.append("replan")
+        captured["user_note"] = user_note
+        new = plan.model_copy(update={"version": plan.version + 1})
+        write_plan(job, new.model_dump())
+        return new
+
+    async def _run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        sequence.append("run_loop")
+        plan_dump = {
+            "version": 3,
+            "objective": "Investigate the target",
+            "subgoals": [{"id": 1, "description": "Gather", "done": True}],
+            "task_template": [],
+            "expected_iterations": 3,
+        }
+        write_plan(job, plan_dump)
+        return {"tasks_done": 0, "stopped": False, "completed": True, "cap_hit": False}
+
+    async def _final_synth_stub(job: Job, plan: Plan, *, router: Any) -> None:
+        return None
+
+    monkeypatch.setattr("research_agent.orchestrator.plan.tactical_replan", _resume_replan)
+    monkeypatch.setattr("research_agent.orchestrator.loop.run_loop", _run_loop)
+    monkeypatch.setattr(
+        "research_agent.orchestrator.synth.final_synthesis",
+        _final_synth_stub,
+    )
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+
+    assert exit_code == 0
+    assert sequence == ["replan", "run_loop"]
+    assert captured["user_note"] == "user added FOIA response"
+    assert not (seeded_job.root / RESUME_REPLAN_FILE).exists()
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_without_resume_replan_skips_tactical_replan(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Normal resume behavior still goes straight into run_loop."""
+    monkeypatch.setenv("RESEARCH_DAEMON_SKIP_HEALTH_CHECKS", "1")
+    calls = {"replan": 0}
+
+    async def _resume_replan(*args: Any, **kwargs: Any) -> Plan:
+        calls["replan"] += 1
+        raise AssertionError("tactical_replan should not run without sidecar")
+
+    async def _run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        plan_dump = {
+            "version": 2,
+            "objective": "Investigate the target",
+            "subgoals": [{"id": 1, "description": "Gather", "done": True}],
+            "task_template": [],
+            "expected_iterations": 3,
+        }
+        write_plan(job, plan_dump)
+        return {"tasks_done": 0, "stopped": False, "completed": True, "cap_hit": False}
+
+    async def _final_synth_stub(job: Job, plan: Plan, *, router: Any) -> None:
+        return None
+
+    monkeypatch.setattr("research_agent.orchestrator.plan.tactical_replan", _resume_replan)
+    monkeypatch.setattr("research_agent.orchestrator.loop.run_loop", _run_loop)
+    monkeypatch.setattr(
+        "research_agent.orchestrator.synth.final_synthesis",
+        _final_synth_stub,
+    )
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+
+    assert exit_code == 0
+    assert calls["replan"] == 0
 
 
 @pytest.mark.asyncio

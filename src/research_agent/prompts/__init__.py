@@ -11,6 +11,7 @@ from research_agent.prompts.loader import (
     PromptNotFoundError,
     PromptVariableMissing,
     clear_cache,
+    load_data_source_followups,
     load_prompt,
     load_prompt_meta,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "PromptNotFoundError",
     "PromptVariableMissing",
     "clear_cache",
+    "load_data_source_followups",
     "load_prompt",
     "load_prompt_meta",
 ]

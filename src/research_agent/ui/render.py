@@ -142,7 +142,7 @@ def load_status_data(job: Job, *, db_path: Path | None = None) -> dict[str, Any]
         task_counts: dict[str, int] = {str(r["status"]): int(r["n"]) for r in task_rows}
 
         job_row = conn.execute(
-            "SELECT cost_so_far_usd, time_cap_hours, created_at, started_at"
+            "SELECT cost_so_far_usd, time_cap_hours, created_at, started_at, completion_reason"
             " FROM jobs WHERE id = ?",
             (job.id,),
         ).fetchone()
@@ -156,6 +156,9 @@ def load_status_data(job: Job, *, db_path: Path | None = None) -> dict[str, Any]
         started_at_val = job_row["started_at"] if job_row is not None else None
         created_at_val = job_row["created_at"] if job_row is not None else job.created_at
         started_at = int(started_at_val or created_at_val or job.created_at)
+        completion_reason = (
+            job_row["completion_reason"] if job_row is not None else job.completion_reason
+        )
 
         # Rolling-average ETA from the last few finished tasks. We need both
         # started_at and finished_at populated to derive a duration; tasks
@@ -222,6 +225,7 @@ def load_status_data(job: Job, *, db_path: Path | None = None) -> dict[str, Any]
         "budget_cap": budget_cap,
         "time_cap_hours": time_cap_hours,
         "started_at": started_at,
+        "completion_reason": completion_reason,
         "eta_seconds": eta_seconds,
         "current_task": current_task,
         "recent_events": recent_events,
@@ -256,6 +260,7 @@ def render_status_panel(
     started_at: int | None = None,
     eta_seconds: float | None = None,
     current_task: dict[str, Any] | None = None,
+    completion_reason: str | None = None,
     now: int | None = None,
 ) -> Panel:
     """Render the detail panel for `research status <job-id>`."""
@@ -282,6 +287,9 @@ def render_status_panel(
         ),
         f"[bold]ETA:[/bold] ~{_humanize_duration(eta_seconds)}",
     ]
+    reason = completion_reason or job.completion_reason
+    if reason:
+        summary_lines.insert(1, f"[bold]Completion reason:[/bold] {escape(str(reason))}")
 
     if current_task is not None:
         kind = escape(str(current_task.get("kind") or "?"))

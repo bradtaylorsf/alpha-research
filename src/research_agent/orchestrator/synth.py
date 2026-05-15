@@ -17,6 +17,9 @@ Two public entry points:
 
 Both functions persist via :func:`write_synthesis` and rotate ``report.md``
 into ``report.history/`` via :func:`write_report` (atomic per §16).
+The loop may also write ``synthesis/low_yield.json`` as a list of
+``{kind, query_stem, count, suggested_unblocker}`` records for later
+Confirmed Gaps rendering.
 
 Budget handling implements the §16 anti-pattern guard: if a frontier call
 hits :class:`BudgetExceeded`, we log WARN, emit a ``warning`` event, and

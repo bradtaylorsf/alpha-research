@@ -75,6 +75,7 @@ class Prompt(BaseModel):
 
 
 _CACHE: dict[str, Prompt] = {}
+_DATA_SOURCE_FOLLOWUPS_CACHE: dict[str, list[dict[str, Any]]] | None = None
 
 
 def _prompts_dir() -> Path:
@@ -180,16 +181,16 @@ def _render_registry_vars() -> dict[str, str]:
     re-introduce the multi-PR merge-conflict surface this refactor exists
     to retire. ``research doctor`` enforces the round-trip.
     """
-    from research_agent.tools._registry import (
-        render_direct_kinds_table,
-        render_kinds_allowlist,
-        render_tactical_replan_kinds,
-    )
     # Eagerly import the tools package so connector modules register
     # themselves before we render. Done here (not at module top) so
     # ``prompts.loader`` stays importable even when the connector graph is
     # being rebuilt under test.
     import research_agent.tools  # noqa: F401 — side-effecting registration
+    from research_agent.tools._registry import (
+        render_direct_kinds_table,
+        render_kinds_allowlist,
+        render_tactical_replan_kinds,
+    )
 
     return {
         "direct_kinds_table": render_direct_kinds_table(),
@@ -234,9 +235,40 @@ def load_prompt(name: str, *, job: Job | None = None, **vars: object) -> str:
     return _VAR_RE.sub(_sub, prompt.template)
 
 
+def load_data_source_followups() -> dict[str, list[dict[str, Any]]]:
+    """Load the low-yield connector follow-up recipe catalog."""
+    global _DATA_SOURCE_FOLLOWUPS_CACHE
+    if _DATA_SOURCE_FOLLOWUPS_CACHE is not None:
+        return _DATA_SOURCE_FOLLOWUPS_CACHE
+
+    path = _prompts_dir() / "data_source_followups.md"
+    raw = path.read_text(encoding="utf-8")
+    match = _FRONTMATTER_RE.match(raw)
+    body = match.group("body") if match is not None else raw
+    parsed = yaml.safe_load(body) or {}
+    if not isinstance(parsed, dict):
+        _DATA_SOURCE_FOLLOWUPS_CACHE = {}
+        return _DATA_SOURCE_FOLLOWUPS_CACHE
+    rows = parsed.get("followups") or []
+    out: dict[str, list[dict[str, Any]]] = {}
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            kind = row.get("kind")
+            suggest = row.get("suggest")
+            if not isinstance(kind, str) or not isinstance(suggest, str):
+                continue
+            out.setdefault(kind, []).append(dict(row))
+    _DATA_SOURCE_FOLLOWUPS_CACHE = out
+    return out
+
+
 def clear_cache() -> None:
     """Reset the in-process prompt cache. For tests."""
+    global _DATA_SOURCE_FOLLOWUPS_CACHE
     _CACHE.clear()
+    _DATA_SOURCE_FOLLOWUPS_CACHE = None
 
 
 __all__ = [
@@ -245,6 +277,7 @@ __all__ = [
     "PromptNotFoundError",
     "PromptVariableMissing",
     "clear_cache",
+    "load_data_source_followups",
     "load_prompt",
     "load_prompt_meta",
 ]
