@@ -103,3 +103,67 @@ def test_intake_dimension_shape_expands_to_units(tmp_path: Path) -> None:
 
     assert len(units) == 3
     assert {unit.dimensions["state"] for unit in units} == {"CA", "TX", "FL"}
+
+
+def test_fec_enum_row_matches_full_chamber_name_declaration(tmp_path: Path) -> None:
+    """FEC enum emits office='H' + office_full='House'; declared coverage is
+    'House'. The dimension extractor must prefer office_full so the FEC row
+    actually marks the declared unit complete."""
+    job = _job(tmp_path)
+    [unit] = coverage.declare_coverage(
+        job,
+        [{"state": "NC", "chamber": "House", "source_type": "fec-filed"}],
+    )
+
+    task = {"id": 1, "kind": "fec_search", "payload": {"kind": "candidates_enumerate"}}
+    result = {
+        "results": [
+            {
+                "url": "https://www.fec.gov/data/candidate/H6NC01123/",
+                "extras": {
+                    "candidate_id": "H6NC01123",
+                    "state": "NC",
+                    "office": "H",
+                    "office_full": "House",
+                    "district_or_seat": "01",
+                    "source_type": "fec-filed",
+                },
+            }
+        ]
+    }
+    coverage.update_from_task_result(job, task, result)
+
+    [reloaded] = coverage.list_units(job)
+    assert reloaded.dim_key == unit.dim_key
+    assert reloaded.status == "complete"
+
+
+def test_state_election_row_carries_state_ballot_qualified_source_type(tmp_path: Path) -> None:
+    """state_election rows must emit source_type='state-ballot-qualified' so
+    declared coverage with that source_type is matched. File-format details
+    belong on a different field."""
+    job = _job(tmp_path)
+    coverage.declare_coverage(
+        job,
+        [{"state": "MD", "chamber": "Senate", "source_type": "state-ballot-qualified"}],
+    )
+
+    task = {"id": 1, "kind": "state_election_search", "payload": {"state": "MD"}}
+    result = {
+        "results": [
+            {
+                "url": "https://elections.maryland.gov/...",
+                "extras": {
+                    "state": "MD",
+                    "chamber": "Senate",
+                    "source_type": "state-ballot-qualified",
+                    "source_file_type": "html",
+                    "candidate_name": "Robert Example",
+                },
+            }
+        ]
+    }
+    coverage.update_from_task_result(job, task, result)
+
+    [reloaded] = coverage.list_units(job)
+    assert reloaded.status == "complete"

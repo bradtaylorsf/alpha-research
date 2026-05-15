@@ -389,7 +389,7 @@ def _extract_dimensions_from_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
         state = pool.get("state")
         if state and "state" not in dims:
             dims["state"] = state
-        chamber = pool.get("chamber") or pool.get("office") or pool.get("office_full")
+        chamber = pool.get("chamber") or pool.get("office_full") or pool.get("office")
         if chamber and "chamber" not in dims:
             dims["chamber"] = chamber
         district = (
