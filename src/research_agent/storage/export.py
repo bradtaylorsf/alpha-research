@@ -16,12 +16,15 @@ half-written output.
 
 from __future__ import annotations
 
+import csv
+import io
 import os
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
 from research_agent.storage import db
+from research_agent.storage.artifacts import read_artifact
 from research_agent.storage.jobs import Job
 
 _HISTORY_DIRNAME = "report.history"
@@ -190,7 +193,26 @@ def export_md_bundle(job: Job, out_path: Path, *, include_history: bool) -> Path
     return out_path
 
 
+def export_csv(job: Job, artifact_name: str, out_path: Path) -> Path:
+    """Export one table artifact as CSV with schema-defined column ordering."""
+    schema, rows = read_artifact(job, artifact_name)
+    out_path = Path(out_path)
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [column.name for column in schema.columns]
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({field: row.get(field, "") for field in fieldnames})
+    tmp_path.write_text(buffer.getvalue(), encoding="utf-8")
+    _atomic_replace(tmp_path, out_path)
+    return out_path
+
+
 __all__ = [
+    "export_csv",
     "export_md_bundle",
     "export_zip",
 ]

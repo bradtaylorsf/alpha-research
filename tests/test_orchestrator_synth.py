@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from research_agent.llm.budgets import BudgetExceeded
+from research_agent.observability.events import emit
 from research_agent.orchestrator import synth as synth_module
 from research_agent.orchestrator.plan import Plan, Subgoal, TaskSpec
 from research_agent.orchestrator.synth import (
@@ -22,7 +23,7 @@ from research_agent.orchestrator.synth import (
     synthesize,
 )
 from research_agent.prompts import loader as prompts_loader
-from research_agent.storage import db
+from research_agent.storage import artifacts, db, hypotheses
 from research_agent.storage.jobs import Job
 from research_agent.storage.markdown import write_finding, write_plan
 from research_agent.storage.sources import write_source
@@ -822,6 +823,267 @@ def test_synthesize_repeat_status_skips_plan_version_bump(
     events = _read_event_rows(db_path, job.id)
     updated = [e for e in events if e["kind"] == "plan_subgoals_updated"]
     assert len(updated) == 1
+
+
+# ---------------------------------------------------------------------------
+# Confirmed Gaps (issue #258)
+# ---------------------------------------------------------------------------
+
+
+def _insert_failed_task(
+    job: Job,
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    error: str,
+    plan_version: int = 1,
+) -> None:
+    conn = db.connect(job.db_path)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO tasks"
+                " (job_id, plan_version, kind, payload_json, status, error, retry_count)"
+                " VALUES (?, ?, ?, ?, 'failed', ?, 1)",
+                (job.id, plan_version, kind, json.dumps(payload, sort_keys=True), error),
+            )
+    finally:
+        conn.close()
+
+
+def test_compute_confirmed_gaps_from_failed_tasks_plan_and_low_yield(
+    job: Job, db_path: Path
+) -> None:
+    gapped_plan = Plan(
+        version=1,
+        objective="Investigate Alameda restroom delay",
+        subgoals=[
+            Subgoal(
+                id=1,
+                description="Identify the prime contractor name",
+                done=False,
+                gap_reason="contract award file unavailable without city clerk records",
+            )
+        ],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=2,
+    )
+    write_plan(job, gapped_plan.model_dump())
+    payload = {
+        "query": "site:alamedaca.gov shoreline restroom contractor",
+        "sub_question": "Identify the prime contractor name",
+        "subgoal_id": 1,
+    }
+    for _ in range(3):
+        _insert_failed_task(
+            job,
+            kind="web_search",
+            payload=payload,
+            error="0 results",
+        )
+    emit(job, "INFO", "planner", "plan_subgoals_updated", {"inconclusive": [1]})
+    stem = synth_module._query_stem_for_payload(payload)
+    (job.root / "synthesis" / "low_yield.json").write_text(
+        json.dumps(
+            [
+                {
+                    "kind": "web_search",
+                    "query_stem": stem,
+                    "count": 3,
+                    "suggested_unblocker": (
+                        "FOIA the City of Alameda Clerk for the prime contract award file"
+                    ),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    gaps = synth_module._compute_confirmed_gaps(job, gapped_plan)
+
+    assert len(gaps) == 1
+    gap = gaps[0]
+    assert gap["topic"] == "Identify the prime contractor name"
+    assert "city clerk records" in gap["failure_summary"]
+    assert "FOIA the City of Alameda Clerk for the prime contract award file" in gap[
+        "suggested_unblocker"
+    ]
+    assert gap["attempts"] == [
+        {
+            "task_kind": "web_search",
+            "query": "site:alamedaca.gov shoreline restroom contractor",
+            "failure_reason": "0 results from web_search",
+            "count": 3,
+        }
+    ]
+
+
+def test_compute_confirmed_gaps_empty_without_failure_signals(job: Job, plan: Plan) -> None:
+    assert synth_module._compute_confirmed_gaps(job, plan) == []
+
+
+def test_build_context_includes_confirmed_gaps(job: Job, db_path: Path, plan: Plan) -> None:
+    context_json = synth_module._build_context(
+        goal=job.goal,
+        plan=plan,
+        findings=[],
+        sources={},
+        prior=None,
+        critique=None,
+        followup_recipes="",
+        paid_unblock_recipes="",
+        confirmed_gaps=[
+            {
+                "topic": "prime contractor name",
+                "attempts": [],
+                "failure_summary": "No public source identified.",
+                "suggested_unblocker": "FOIA the City of Alameda Clerk",
+            }
+        ],
+        final=False,
+    )
+    payload = json.loads(context_json)
+    assert payload["confirmed_gaps"][0]["topic"] == "prime contractor name"
+    assert payload["subgoals"][0]["gap_reason"] is None
+
+
+def test_synthesize_preserves_confirmed_gaps_section_and_strips_status_fence(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    _seed_findings(job, [0.9])
+    content = (
+        "# Investigation Report\n\n"
+        "## Executive Summary\n\n- finding [1].\n\n"
+        "## Confirmed Gaps\n\n"
+        "- **Prime contractor name** — Tried city records. Unblocker: "
+        "FOIA the City of Alameda Clerk\n"
+        "  - Attempted `web_search` for \"site:alamedaca.gov contractor\": "
+        "0 results (count: 3).\n\n"
+        "## Sources\n"
+        '1. https://example.com/0 — "Title" (retrieved 2026-05-06)\n'
+        "\n```json\n"
+        '{"subgoal_status": {"1": "inconclusive", "2": "inconclusive", "3": "inconclusive"}}'
+        "\n```\n"
+    )
+    router = _StubRouter(content=content)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "## Confirmed Gaps" in report
+    assert "FOIA the City of Alameda Clerk" in report
+    assert "subgoal_status" not in report
+
+
+# ---------------------------------------------------------------------------
+# Working hypotheses (issue #261)
+# ---------------------------------------------------------------------------
+
+
+def test_synthesize_extracts_hypothesis_updates_and_strips_fence(
+    job: Job, db_path: Path, multi_subgoal_plan: Plan
+) -> None:
+    _source_ids, finding_ids = _seed_findings(job, [0.9])
+    content = (
+        "# Investigation Report\n\n"
+        "## Executive Summary\n\n- finding [1].\n\n"
+        "## Working Hypotheses\n\n"
+        "### H-new: Contractor underbid\n"
+        "**Status:** Open\n"
+        "**Confidence:** 0.65\n"
+        "- Supporting: finding [1].\n\n"
+        "## Sources\n"
+        '1. https://example.com/0 — "Title" (retrieved 2026-05-06)\n'
+        "\n```json\n"
+        '{"subgoal_status": {"1": "inconclusive", "2": "inconclusive", "3": "inconclusive"}}'
+        "\n```\n"
+        "```json\n"
+        '{"hypothesis_updates": ['
+        '{"statement": "The contractor underbid and is slow-walking change orders.", '
+        '"confidence": 0.65, '
+        f'"supports": [{finding_ids[0]}], '
+        '"refutes": [], "status": "open"}]}'
+        "\n```\n"
+    )
+    router = _StubRouter(content=content)
+
+    asyncio.run(synthesize(job, multi_subgoal_plan, router=router))
+
+    report = (job.root / "report.md").read_text(encoding="utf-8")
+    assert "## Working Hypotheses" in report
+    assert "hypothesis_updates" not in report
+    assert "subgoal_status" not in report
+
+    rows = hypotheses.list_hypotheses(job)
+    assert len(rows) == 1
+    assert rows[0]["statement"] == "The contractor underbid and is slow-walking change orders."
+    assert rows[0]["confidence"] == pytest.approx(0.65)
+    assert rows[0]["supports"] == [finding_ids[0]]
+    assert rows[0]["status"] == "open"
+
+    events = _read_event_rows(db_path, job.id)
+    updated = [e for e in events if e["kind"] == "hypothesis_updated"]
+    assert len(updated) == 1
+    payload = json.loads(updated[0]["payload_json"])
+    assert payload["id"] == rows[0]["id"]
+    assert payload["status"] == "open"
+
+
+def test_synthesize_context_includes_current_hypotheses(job: Job, plan: Plan) -> None:
+    _source_ids, finding_ids = _seed_findings(job, [0.8])
+    hid = hypotheses.upsert_hypothesis(
+        job,
+        plan_version=1,
+        statement="Permitting friction is the primary delay driver.",
+        confidence=0.55,
+        supports=[finding_ids[0]],
+        refutes=[],
+        status="open",
+    )
+    router = _StubRouter()
+
+    asyncio.run(synthesize(job, plan, router=router))
+
+    _tier, args, _kwargs = router.calls[0]
+    payload = json.loads(args[0])
+    assert payload["current_hypotheses"][0]["id"] == hid
+    assert payload["current_hypotheses"][0]["statement"] == (
+        "Permitting friction is the primary delay driver."
+    )
+    assert payload["current_hypotheses"][0]["supports"] == [finding_ids[0]]
+    assert payload["current_hypotheses"][0]["supporting_findings"][0]["id"] == finding_ids[0]
+
+
+def test_synthesize_context_includes_generated_artifacts(job: Job, plan: Plan) -> None:
+    artifacts.write_table_artifact(
+        job,
+        "candidates",
+        schema=artifacts.CANDIDATE_ROSTER_SCHEMA,
+        rows=[
+            {
+                "state": "CA",
+                "chamber": "House",
+                "candidate_name": "Jane Doe",
+                "source_url": "https://example.com/jane",
+            }
+        ],
+    )
+    router = _StubRouter()
+
+    asyncio.run(synthesize(job, plan, router=router))
+
+    _tier, args, _kwargs = router.calls[0]
+    payload = json.loads(args[0])
+    assert payload["artifacts"] == [
+        {
+            "name": "candidates",
+            "schema_version": 1,
+            "row_count": 1,
+            "generated_at_epoch": payload["artifacts"][0]["generated_at_epoch"],
+            "source_coverage": "",
+            "csv_path": "artifacts/candidates.csv",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

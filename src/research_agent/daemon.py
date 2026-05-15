@@ -33,9 +33,11 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -49,9 +51,16 @@ import httpx
 from research_agent.config import get as cfg_get
 from research_agent.observability.events import emit
 from research_agent.storage import db
-from research_agent.storage.jobs import DEFAULT_JOBS_ROOT, RESUME_REPLAN_FILE, Job
+from research_agent.storage.jobs import (
+    DEFAULT_JOBS_ROOT,
+    INBOX_REPLAN_FILE,
+    RESUME_REPLAN_FILE,
+    Job,
+)
 
 logger = logging.getLogger(__name__)
+
+INBOX_POLL_INTERVAL_S = 30.0
 
 
 def _atomic_write_text(path: Path, data: str) -> None:
@@ -594,6 +603,130 @@ async def _disk_cap_watcher(
         return
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _inbox_topic_guess(path: Path) -> str:
+    stem = re.sub(r"[_-]+", " ", path.stem).strip()
+    return stem[:120] if stem else path.name[:120]
+
+
+def _inbox_summary(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".md", ".txt", ".html", ".htm"}:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        text = " ".join(text.split())
+        if text:
+            return text[:240]
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    return f"{path.suffix.lower().lstrip('.') or 'file'}; {size} bytes"
+
+
+def _processed_inbox_path(inbox_dir: Path, sha: str, filename: str) -> Path:
+    processed_dir = inbox_dir / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-") or "document"
+    return processed_dir / f"{sha}-{safe_name}"
+
+
+async def _inbox_watcher(
+    job: Job,
+    should_stop: asyncio.Event,
+    *,
+    interval_s: float | None = None,
+) -> None:
+    """Poll ``jobs/<id>/inbox`` for human-supplied documents."""
+    from research_agent.tools import local_corpus
+
+    poll_s = interval_s if interval_s is not None else INBOX_POLL_INTERVAL_S
+    inbox_dir = job.root / "inbox"
+    inbox_dir.mkdir(parents=True, exist_ok=True)
+    (inbox_dir / "processed").mkdir(parents=True, exist_ok=True)
+
+    try:
+        while not should_stop.is_set():
+            for file_path in sorted(inbox_dir.iterdir()):
+                if should_stop.is_set():
+                    break
+                if not file_path.is_file():
+                    continue
+                if file_path.name.endswith(".tmp"):
+                    continue
+                try:
+                    sha = _file_sha256(file_path)
+                    summary = _inbox_summary(file_path)
+                    topic_guess = _inbox_topic_guess(file_path)
+                    indexed = local_corpus.index(file_path, job)
+                    processed_path = _processed_inbox_path(inbox_dir, sha, file_path.name)
+                    os.replace(file_path, processed_path)
+                    note = (
+                        f"user added {file_path.name} ({summary}); "
+                        "identify NEW angles enabled by this evidence"
+                    )
+                    _atomic_write_text(
+                        job.root / INBOX_REPLAN_FILE,
+                        json.dumps(
+                            {
+                                "trigger": "inbox",
+                                "filename": file_path.name,
+                                "sha": sha,
+                                "summary": summary,
+                                "note": note,
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
+                        + "\n",
+                    )
+                    emit(
+                        job,
+                        "INFO",
+                        "daemon",
+                        "corpus_doc_added",
+                        {
+                            "sha": sha,
+                            "filename": file_path.name,
+                            "processed_path": str(processed_path.relative_to(job.root)),
+                            "topic_guess": topic_guess,
+                            "summary_chars": len(summary),
+                            **indexed,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001 — keep watcher alive
+                    logger.exception("inbox watcher failed for %s", file_path)
+                    try:
+                        emit(
+                            job,
+                            "WARN",
+                            "daemon",
+                            "warning",
+                            {
+                                "stage": "inbox_watcher",
+                                "path": str(file_path),
+                                "error": str(exc),
+                            },
+                        )
+                    except Exception:
+                        pass
+            try:
+                await asyncio.wait_for(should_stop.wait(), timeout=poll_s)
+            except TimeoutError:
+                continue
+    except asyncio.CancelledError:
+        return
+
+
 def _should_show_foreground_progress(stream: Any) -> bool:
     """True when the daemon should drive a Rich Progress bar on ``stream``.
 
@@ -912,6 +1045,9 @@ async def run_daemon(
         disk_cap_gb = DEFAULT_DISK_CAP_GB
     cap_bytes = max(1, int(disk_cap_gb * 1024 * 1024 * 1024))
     disk_cap_task = aloop.create_task(_disk_cap_watcher(job, cap_bytes, should_stop))
+    inbox_task: asyncio.Task | None = None
+    if intake.get("inbox") is True:
+        inbox_task = aloop.create_task(_inbox_watcher(job, should_stop))
     progress_task = aloop.create_task(_foreground_progress_task(job, should_stop))
 
     from research_agent.llm.budgets import BudgetExceeded
@@ -1052,6 +1188,8 @@ async def run_daemon(
         # synth, then sat idle for 48 min in this finally block.
         await _cancel_with_timeout(watcher_task, "stop_flag_watcher", timeout=5.0)
         await _cancel_with_timeout(disk_cap_task, "disk_cap_watcher", timeout=5.0)
+        if inbox_task is not None:
+            await _cancel_with_timeout(inbox_task, "inbox_watcher", timeout=5.0)
         await _cancel_with_timeout(progress_task, "foreground_progress_task", timeout=5.0)
         if signals_installed:
             for sig in (signal.SIGTERM, signal.SIGINT):

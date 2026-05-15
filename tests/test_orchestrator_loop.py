@@ -25,7 +25,7 @@ from research_agent.orchestrator.loop import (
 )
 from research_agent.orchestrator.plan import Plan, ScopeClass, Subgoal, TaskSpec
 from research_agent.storage import db
-from research_agent.storage.jobs import Job
+from research_agent.storage.jobs import INBOX_REPLAN_FILE, Job
 from research_agent.storage.markdown import write_plan
 from research_agent.storage.tasks import (
     STATUS_DONE,
@@ -1382,6 +1382,74 @@ async def test_critique_heuristic_failure_warning_has_traceback_and_model_contex
 
     checkpoints = _read_checkpoint_kinds(db_path, job.id)
     assert "critique_done" not in checkpoints
+
+
+# ---------------------------------------------------------------------------
+# Inbox replan (issue #262)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inbox_replan_sidecar_triggers_tactical_replan(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (job.root / INBOX_REPLAN_FILE).write_text(
+        json.dumps(
+            {
+                "trigger": "inbox",
+                "filename": "foia-response.md",
+                "sha": "a" * 64,
+                "note": "user added foia-response.md (contract file); identify NEW angles",
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_tactical_replan(
+        job_arg: Job,
+        prior_plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
+        user_note: str | None = None,
+    ) -> Plan:
+        captured["user_note"] = user_note
+        new = Plan(
+            version=prior_plan.version + 1,
+            objective=prior_plan.objective,
+            subgoals=[Subgoal(id=1, description="Gather", done=True)],
+            task_template=[],
+            expected_iterations=prior_plan.expected_iterations,
+        )
+        write_plan(job_arg, new.model_dump())
+        return new
+
+    monkeypatch.setattr(plan_module, "tactical_replan", fake_tactical_replan)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert captured["user_note"] == (
+        "user added foia-response.md (contract file); identify NEW angles"
+    )
+    assert not (job.root / INBOX_REPLAN_FILE).exists()
+    assert result["tasks_done"] == 0
+    events = _read_events_by_kind(db_path, job.id, "replan_triggered")
+    assert len(events) == 1
+    assert events[0]["payload"]["stage"] == "inbox"
+    assert events[0]["payload"]["filename"] == "foia-response.md"
 
 
 # ---------------------------------------------------------------------------

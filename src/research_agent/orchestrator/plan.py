@@ -838,6 +838,9 @@ async def tactical_replan(
         "prior_plan": plan.model_dump(),
         "recent_results": summarized,
     }
+    from research_agent.storage import hypotheses
+
+    payload["hypotheses"] = hypotheses.list_hypotheses(job)
 
     # issue #179: include a bounded view of the running ``findings`` so the
     # planner can drill into named claims (Schedule F, WOTUS, mifepristone)
@@ -1046,10 +1049,13 @@ async def cloud_replan(
     """
     _assert_under_cap(job)
     next_version = plan.version + 1
+    from research_agent.storage import hypotheses
+
     context = json.dumps(
         {
             "prior_plan": plan.model_dump(),
             "critique": critique,
+            "hypotheses": hypotheses.list_hypotheses(job),
         },
         sort_keys=True,
         default=str,

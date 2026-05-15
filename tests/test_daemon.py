@@ -1143,6 +1143,69 @@ async def test_foreground_progress_updates_as_tasks_transition(
     assert final[1]["total"] == 3
 
 
+@pytest.mark.asyncio
+async def test_inbox_watcher_indexes_moves_and_requests_replan(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inbox = seeded_job.root / "inbox"
+    inbox.mkdir(exist_ok=True)
+    doc = inbox / "foia-response.md"
+    doc.write_text("# FOIA\n\nContract award file from the clerk.\n", encoding="utf-8")
+    calls: list[Path] = []
+
+    def _fake_index(path: Path, job: Job) -> dict[str, int]:
+        calls.append(path)
+        return {
+            "files_indexed": 1,
+            "files_skipped": 0,
+            "chunks_indexed": 1,
+            "chunks_skipped": 0,
+            "embed_dim": 1024,
+        }
+
+    monkeypatch.setattr("research_agent.tools.local_corpus.index", _fake_index)
+    should_stop = asyncio.Event()
+    task = asyncio.create_task(
+        daemon._inbox_watcher(seeded_job, should_stop, interval_s=0.02)
+    )
+    try:
+        for _ in range(100):
+            if (seeded_job.root / "INBOX_REPLAN.json").exists():
+                should_stop.set()
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        should_stop.set()
+        if not task.done():
+            task.cancel()
+
+    assert calls == [doc]
+    assert not doc.exists()
+    processed = list((inbox / "processed").glob("*-foia-response.md"))
+    assert len(processed) == 1
+
+    sidecar = json.loads((seeded_job.root / "INBOX_REPLAN.json").read_text(encoding="utf-8"))
+    assert sidecar["trigger"] == "inbox"
+    assert sidecar["filename"] == "foia-response.md"
+    assert "identify NEW angles" in sidecar["note"]
+
+    conn = db.connect(seeded_job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'corpus_doc_added'",
+            (seeded_job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["filename"] == "foia-response.md"
+    assert payload["files_indexed"] == 1
+    assert payload["chunks_indexed"] == 1
+
+
 
 # ---------------------------------------------------------------------------
 # _cancel_with_timeout — bounds daemon teardown so a hung watcher can't block exit

@@ -375,6 +375,13 @@ The tactical-replan user payload may include:
 
 ```yaml
 user_note: "operator supplied hint, if present"
+hypotheses:
+  - id: 1
+    statement: "The delay is primarily due to permitting friction."
+    confidence: 0.62
+    supports: [12, 19]
+    refutes: []
+    status: open
 inconclusive_subgoals:
   - id: 2
     description: "..."
@@ -389,6 +396,12 @@ When `user_note` is present, treat it as authoritative high-priority
 operator guidance. Weight it ahead of inferred drill-downs and use it to
 choose the first new source surface when it names a document, portal,
 person, date, or entity.
+
+When `hypotheses` is present, use it as the current theory ledger. Weight
+new tasks toward high-confidence `open` or `inconclusive` hypotheses that
+still have weak or one-sided evidence. Prefer tasks that could clearly
+support or refute one named hypothesis; avoid generic searches that do not
+move any listed hypothesis.
 
 For each entry in `inconclusive_subgoals`, you MUST either:
 
