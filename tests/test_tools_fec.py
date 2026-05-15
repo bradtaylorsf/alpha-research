@@ -71,6 +71,49 @@ _CANDIDATE_SEARCH_PAYLOAD = {
 }
 
 
+_CANDIDATE_ENUM_HOUSE_PAYLOAD = {
+    "pagination": {"page": 1, "pages": 1, "count": 1},
+    "results": [
+        {
+            "candidate_id": "H6NC01123",
+            "name": "RODRIGUEZ, ANA",
+            "party": "DEM",
+            "state": "NC",
+            "office": "H",
+            "office_full": "House",
+            "district": "01",
+            "incumbent_challenge_full": "Challenger",
+            "election_years": [2026],
+            "principal_committees": [
+                {
+                    "committee_id": "C00999999",
+                    "name": "ANA RODRIGUEZ FOR CONGRESS",
+                }
+            ],
+        }
+    ],
+}
+
+
+_CANDIDATE_ENUM_SENATE_PAYLOAD = {
+    "pagination": {"page": 1, "pages": 1, "count": 1},
+    "results": [
+        {
+            "candidate_id": "S6GA00001",
+            "name": "SMITH, ROBERT",
+            "party": "REP",
+            "state": "GA",
+            "office": "S",
+            "office_full": "Senate",
+            "incumbent_challenge_full": "Open seat",
+            "cycles": [2026],
+            "principal_committee_id": "C00888888",
+            "principal_committee_name": "ROBERT SMITH FOR SENATE",
+        }
+    ],
+}
+
+
 _COMMITTEE_SEARCH_PAYLOAD = {
     "results": [
         {
@@ -218,7 +261,7 @@ def _patch_httpx(monkeypatch, *, responder):
         class _Client:
             async def get(self, url, *, params=None, **_kwargs):
                 captured["urls"].append(url)
-                captured["params"].append(params)
+                captured["params"].append(dict(params or {}))
                 status, text = responder(url, params)
                 return _FakeResp(status, text)
 
@@ -261,6 +304,135 @@ async def test_search_candidates_builds_correct_query(monkeypatch):
     assert first.extras["election_years"] == [2020, 2022, 2024]
     assert "REP" in first.snippet
     assert "NY" in first.snippet
+
+
+async def test_candidates_enumerate_house_state_uses_structured_filters(monkeypatch):
+    payload = json.dumps(_CANDIDATE_ENUM_HOUSE_PAYLOAD)
+
+    def _respond(url, params):
+        return 200, payload
+
+    captured = _patch_httpx(monkeypatch, responder=_respond)
+
+    results = await fec.search(
+        "",
+        kind="candidates_enumerate",
+        cycle=2026,
+        office="H",
+        state="NC",
+        district="01",
+        max_rows=25,
+    )
+
+    assert len(results) == 1
+    assert captured["urls"][0].endswith("/v1/candidates/")
+    params = captured["params"][0]
+    assert params["election_year"] == 2026
+    assert params["office"] == "H"
+    assert params["state"] == "NC"
+    assert params["district"] == "01"
+    assert "q" not in params
+
+    row = results[0]
+    assert row.url == "https://www.fec.gov/data/candidate/H6NC01123/"
+    assert row.extras["candidate_id"] == "H6NC01123"
+    assert row.extras["candidate_name"] == "RODRIGUEZ, ANA"
+    assert row.extras["office"] == "H"
+    assert row.extras["state"] == "NC"
+    assert row.extras["district_or_seat"] == "01"
+    assert row.extras["source_url"] == row.url
+    assert row.extras["source_type"] == "fec-filed"
+    assert row.extras["principal_committee_id"] == "C00999999"
+
+
+async def test_candidates_enumerate_senate_state(monkeypatch):
+    payload = json.dumps(_CANDIDATE_ENUM_SENATE_PAYLOAD)
+
+    def _respond(url, params):
+        return 200, payload
+
+    captured = _patch_httpx(monkeypatch, responder=_respond)
+
+    results = await fec.search(
+        "2026 Georgia Senate",
+        kind="candidates_enumerate",
+        cycle=2026,
+        office="S",
+        state="GA",
+    )
+
+    assert len(results) == 1
+    assert captured["params"][0]["office"] == "S"
+    row = results[0]
+    assert row.extras["candidate_id"] == "S6GA00001"
+    assert row.extras["office"] == "S"
+    assert row.extras["state"] == "GA"
+    assert row.extras["cycles"] == [2026]
+    assert row.extras["principal_committee_name"] == "ROBERT SMITH FOR SENATE"
+
+
+async def test_candidates_enumerate_paginates_until_cap(monkeypatch):
+    calls: list[int] = []
+
+    def _respond(url, params):
+        page = int(params["page"])
+        calls.append(page)
+        payload = {
+            "pagination": {"page": page, "pages": 2, "count": 3},
+            "results": [
+                {
+                    "candidate_id": f"H6CA0000{page}{idx}",
+                    "name": f"CANDIDATE {page}-{idx}",
+                    "party": "DEM",
+                    "state": "CA",
+                    "office": "H",
+                    "district": "12",
+                    "election_years": [2026],
+                }
+                for idx in range(2)
+            ],
+        }
+        return 200, json.dumps(payload)
+
+    _patch_httpx(monkeypatch, responder=_respond)
+
+    results = await fec.search(
+        "",
+        kind="candidates_enumerate",
+        cycle=2026,
+        office="H",
+        state="CA",
+        district="12",
+        per_page=2,
+        max_rows=3,
+    )
+
+    assert calls == [1, 2]
+    assert len(results) == 3
+    assert [row.extras["candidate_id"] for row in results] == [
+        "H6CA000010",
+        "H6CA000011",
+        "H6CA000020",
+    ]
+
+
+async def test_candidates_enumerate_empty_logs_diagnostic(monkeypatch, caplog):
+    def _respond(url, params):
+        return 200, json.dumps({"pagination": {"page": 1, "pages": 1}, "results": []})
+
+    _patch_httpx(monkeypatch, responder=_respond)
+
+    with caplog.at_level("WARNING", logger=fec.logger.name):
+        results = await fec.search(
+            "",
+            kind="candidates_enumerate",
+            cycle=2026,
+            office="H",
+            state="WY",
+        )
+
+    assert results == []
+    assert "returned 0 rows" in caplog.text
 
 
 async def test_search_committees_endpoint(monkeypatch):

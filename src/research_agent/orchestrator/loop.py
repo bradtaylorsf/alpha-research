@@ -220,7 +220,14 @@ _CONNECTOR_SEARCH_PASSTHROUGH: frozenset[str] = frozenset(
     {
         "kind",
         "max_results",
+        "cycle",
+        "office",
         "state",
+        "district",
+        "party",
+        "candidate_status",
+        "max_rows",
+        "per_page",
         "form_type",
         "since",
         "agencies",
@@ -966,7 +973,54 @@ def _is_exhausted_termination(
         return False
     if _latest_inconclusive_subgoal_ids(job, plan):
         return False
+    from research_agent.storage import coverage
+
+    if coverage.has_coverage(job) and not coverage.is_coverage_complete(job):
+        return False
     return plan.is_complete()
+
+
+def _is_goal_complete(job: Job, plan: Plan) -> bool:
+    """True only when narrative subgoals and required coverage units are closed."""
+    if not plan.is_complete():
+        return False
+    from research_agent.storage import coverage
+
+    return coverage.is_coverage_complete(job)
+
+
+def _update_coverage_from_result(
+    job: Job,
+    task: dict[str, Any],
+    result: dict[str, Any] | None,
+) -> None:
+    from research_agent.storage import coverage
+
+    try:
+        coverage.update_from_task_result(job, task, result)
+    except Exception as exc:  # noqa: BLE001 — coverage must not break task persistence
+        emit(
+            job,
+            "WARN",
+            "loop",
+            "warning",
+            {"stage": "coverage_update", "task_id": task.get("id"), "error": str(exc)},
+        )
+
+
+def _mark_coverage_task_failed(job: Job, task: dict[str, Any], reason: str) -> None:
+    from research_agent.storage import coverage
+
+    try:
+        coverage.mark_task_failed(job, task, reason)
+    except Exception as exc:  # noqa: BLE001 — coverage must not mask task failure
+        emit(
+            job,
+            "WARN",
+            "loop",
+            "warning",
+            {"stage": "coverage_failed_update", "task_id": task.get("id"), "error": str(exc)},
+        )
 
 
 def _is_zero_result_search(kind: str, result: dict[str, Any] | None) -> bool | None:
@@ -3157,7 +3211,7 @@ async def run_loop(
 
     while (
         not _should_stop(job)
-        and not plan.is_complete()
+        and not _is_goal_complete(job, plan)
         and tasks_done < max_tasks
         and _within_time_cap()
     ):
@@ -3246,6 +3300,7 @@ async def run_loop(
         if handler is None:
             err = f"no handler registered for kind={task['kind']!r}"
             mark_failed(task["id"], err, db_path=job.db_path)
+            _mark_coverage_task_failed(job, task, err)
             emit(
                 job,
                 "ERROR",
@@ -3266,6 +3321,7 @@ async def run_loop(
             )
         except FatalError as exc:
             mark_failed(task["id"], str(exc), db_path=job.db_path)
+            _mark_coverage_task_failed(job, task, str(exc))
             emit(
                 job,
                 "ERROR",
@@ -3282,6 +3338,7 @@ async def run_loop(
             continue
         except RetriableError as exc:
             mark_failed(task["id"], str(exc), db_path=job.db_path)
+            _mark_coverage_task_failed(job, task, str(exc))
             emit(
                 job,
                 "ERROR",
@@ -3301,6 +3358,7 @@ async def run_loop(
             # ValueError from a downstream library) must NOT bubble up and
             # kill the daemon. Mark the single task failed and keep draining.
             mark_failed(task["id"], str(exc), db_path=job.db_path)
+            _mark_coverage_task_failed(job, task, str(exc))
             emit(
                 job,
                 "ERROR",
@@ -3328,6 +3386,7 @@ async def run_loop(
             persistable = result
 
         mark_done(task["id"], persistable, db_path=job.db_path)
+        _update_coverage_from_result(job, task, persistable)
         _track_low_yield_connector(job, task, persistable, zero_result_streaks)
         emit(
             job,
@@ -3361,7 +3420,7 @@ async def run_loop(
     if (
         deadline_ts is not None
         and not _should_stop(job)
-        and not plan.is_complete()
+        and not _is_goal_complete(job, plan)
         and not _within_time_cap()
     ):
         time_cap_hit = True
@@ -3408,7 +3467,7 @@ async def run_loop(
     return {
         "tasks_done": tasks_done,
         "stopped": stopped,
-        "completed": plan.is_complete(),
+        "completed": _is_goal_complete(job, plan),
         "cap_hit": cap_hit,
         "time_cap_hit": time_cap_hit,
         "completion_reason": (

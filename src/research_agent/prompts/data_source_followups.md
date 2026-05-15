@@ -22,3 +22,6 @@ followups:
   - kind: fec_search
     if_zero_for_query_family: "state or local campaign finance"
     suggest: "FEC covers federal campaign finance. For state or local races, try the state campaign-finance portal, county registrar, or city clerk filings."
+  - kind: fec_search
+    if_zero_for_query_family: "federal candidate roster enumeration"
+    suggest: "For complete federal candidate rosters, use fec_search with kind=candidates_enumerate and structured cycle/office/state/district filters; if that remains empty, confirm whether the filing window has opened or use state ballot-qualified rosters."

@@ -61,6 +61,7 @@ CONNECTOR_KIND_PREFIXES: tuple[str, ...] = (
     "bbb",
     "licensing",
     "sos",
+    "state_election",
     "calaccess",
     "scholar",
     "linkedin",

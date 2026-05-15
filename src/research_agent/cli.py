@@ -83,6 +83,16 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _split_key_columns(raw: list[str] | None) -> list[str]:
+    keys: list[str] = []
+    for item in raw or []:
+        for part in str(item).split(","):
+            cleaned = part.strip()
+            if cleaned and cleaned not in keys:
+                keys.append(cleaned)
+    return keys
+
+
 @app.callback()
 def _main(
     version: bool = typer.Option(  # noqa: ARG001 — eager callback handles exit
@@ -169,6 +179,31 @@ def start_command(
         "--inbox",
         help="Enable jobs/<id>/inbox/ watcher for mid-run document ingest.",
     ),
+    input_csv: Path = typer.Option(  # noqa: B008
+        None,
+        "--input-csv",
+        help="Import an existing CSV into jobs/<id>/artifacts/ for enrichment.",
+    ),
+    artifact_name: str = typer.Option(  # noqa: B008
+        "candidates",
+        "--artifact",
+        help="Artifact name for --input-csv (default: candidates).",
+    ),
+    key_columns_raw: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--key",
+        help="Key column for --input-csv. Repeat or pass comma-separated names.",
+    ),
+    update_existing: bool = typer.Option(  # noqa: B008
+        False,
+        "--update-existing",
+        help="Allow later enrichment to overwrite non-empty cells.",
+    ),
+    no_overwrite: bool = typer.Option(  # noqa: B008
+        False,
+        "--no-overwrite",
+        help="Explicitly preserve non-empty cells during enrichment (default behavior).",
+    ),
 ) -> None:
     """Register a new research job and spawn its background daemon."""
     if skip_intake:
@@ -203,6 +238,25 @@ def start_command(
             typer.echo("--max-tasks must be >= 1", err=True)
             raise typer.Exit(code=2)
         intake_data["max_tasks"] = max_tasks
+
+    key_columns = _split_key_columns(key_columns_raw)
+    if input_csv is not None:
+        if not input_csv.is_file():
+            typer.echo(f"--input-csv not found: {input_csv}", err=True)
+            raise typer.Exit(code=2)
+        if not key_columns:
+            typer.echo("--key is required when --input-csv is set", err=True)
+            raise typer.Exit(code=2)
+        if update_existing and no_overwrite:
+            typer.echo("--update-existing conflicts with --no-overwrite", err=True)
+            raise typer.Exit(code=2)
+        intake_data["input_csv_artifact"] = artifact_name
+        intake_data["enrichment"] = {
+            "artifact": artifact_name,
+            "input_csv": str(input_csv),
+            "key_columns": key_columns,
+            "overwrite_non_empty": bool(update_existing and not no_overwrite),
+        }
 
     if local:
         # Spawned daemon inherits parent env; setting these here propagates
@@ -266,6 +320,20 @@ def start_command(
         job = existing
     else:
         job = Job.create(intake_data)
+
+    if input_csv is not None:
+        from research_agent.storage.enrichment import import_csv_as_artifact
+
+        try:
+            import_csv_as_artifact(
+                job,
+                input_csv,
+                artifact_name=artifact_name,
+                key_columns=key_columns,
+            )
+        except Exception as exc:
+            typer.echo(f"failed to import --input-csv: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
 
     pid = daemon.spawn_daemon(job.id)
     typer.echo(

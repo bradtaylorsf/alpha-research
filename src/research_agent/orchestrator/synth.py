@@ -646,6 +646,40 @@ def _compute_confirmed_gaps(job: Job, plan: Plan) -> list[dict[str, Any]]:
         if suggested_unblocker:
             gap["suggested_unblocker"] = suggested_unblocker
 
+    from research_agent.storage import coverage
+
+    for unit in coverage.list_units(job, {"confirmed_gap"}):
+        topic = unit.dim_key
+        unblocker = (
+            unit.unblocker
+            or "Use a non-public records request or wait for the source owner "
+            "to publish this coverage unit"
+        )
+        gap = _ensure_gap(
+            topic,
+            gap_reason="coverage unit confirmed gap",
+            suggested_unblocker=unblocker,
+        )
+        attempts = unit.recent_attempts or []
+        if not attempts:
+            _add_attempt(
+                gap,
+                kind="coverage_ledger",
+                query=topic,
+                failure_reason="coverage unit marked confirmed_gap",
+                count=1,
+                suggested_unblocker=unblocker,
+            )
+        for attempt in attempts:
+            _add_attempt(
+                gap,
+                kind=attempt.task_kind or "coverage_ledger",
+                query=topic,
+                failure_reason=attempt.reason or "coverage attempt did not complete unit",
+                count=1,
+                suggested_unblocker=unblocker,
+            )
+
     subgoal_payload_attempts: dict[int, list[tuple[dict[str, Any], dict[str, Any], str]]] = {
         sid: [] for sid in subgoals_by_id
     }

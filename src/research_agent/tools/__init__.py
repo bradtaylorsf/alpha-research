@@ -43,6 +43,7 @@ from research_agent.tools import (  # noqa: F401, E402 — side-effecting regist
     scholar,
     smithsonian,
     sos,
+    state_election,
     trove,
     ukna,
     usaspending,

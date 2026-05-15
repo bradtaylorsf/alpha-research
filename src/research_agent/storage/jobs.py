@@ -68,6 +68,21 @@ ALLOWED_COMPLETION_REASONS = frozenset(
 )
 
 
+def is_enumeration_intake(intake: dict[str, Any] | None) -> bool:
+    """Return True when intake explicitly asks for complete-list coverage."""
+    if not isinstance(intake, dict):
+        return False
+    enum = intake.get("enumeration")
+    if isinstance(enum, dict) and (
+        enum.get("required") is True
+        or isinstance(enum.get("units"), (list, dict))
+        or isinstance(enum.get("coverage_units"), list)
+    ):
+        return True
+    orientation = str(intake.get("output_orientation") or "").strip().lower()
+    return orientation in {"roster", "complete list", "enumeration"}
+
+
 def _slugify(text: str, max_len: int = 60) -> str:
     """Normalize ``text`` into a safe slug for a job folder name.
 
@@ -393,6 +408,7 @@ class Job:
                     "syntheses",
                     "llm_calls",
                     "plans",
+                    "coverage_units",
                 ):
                     conn.execute(f"DELETE FROM {tbl} WHERE job_id = ?", (self.id,))
                 conn.execute(
@@ -412,8 +428,9 @@ class Job:
                 shutil.rmtree(sub_path)
             sub_path.mkdir()
 
-        # Wipe transient sidecars: events.jsonl, STOP flag, daemon.pid.
-        for sidecar in ("events.jsonl", "STOP", "daemon.pid"):
+        # Wipe transient sidecars: events.jsonl, STOP flag, daemon.pid,
+        # and generated coverage ledger.
+        for sidecar in ("events.jsonl", "STOP", "daemon.pid", "coverage.json"):
             try:
                 (self.root / sidecar).unlink()
             except FileNotFoundError:
@@ -562,5 +579,6 @@ __all__ = [
     "KILL_ESCALATION_SECONDS",
     "KILL_POLL_INTERVAL_SECONDS",
     "Job",
+    "is_enumeration_intake",
     "list_jobs",
 ]

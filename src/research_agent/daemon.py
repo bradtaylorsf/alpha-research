@@ -1168,9 +1168,12 @@ async def run_daemon(
             elif loop_result is not None and loop_result.get("cap_hit"):
                 final_status = "completed"
                 completion_reason = "task_cap"
-            elif plan is not None and plan.is_complete():
+            elif plan is not None and _loop._is_goal_complete(job, plan):
                 final_status = "completed"
                 completion_reason = "goal_complete"
+            elif plan is not None and plan.is_complete():
+                final_status = "completed"
+                completion_reason = "exhausted"
             else:
                 final_status = "stopped"
                 completion_reason = "user_stopped"
