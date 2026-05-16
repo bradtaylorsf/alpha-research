@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "model": "fixture-critic",
+  "cost_usd": 0,
+  "should_replan": false,
+  "payload": {
+    "gaps": []
+  },
+  "created_at": 1778957050
+}

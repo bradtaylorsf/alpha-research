@@ -39,6 +39,7 @@ dependencies = [
     "pywhispercpp>=1.2",
     "mlx-whisper>=0.4; platform_machine=='arm64' and sys_platform=='darwin'",
     "yt-dlp>=2024.4",
+    "mcp>=1.27",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +49,10 @@ dev = [
     "pytest-mock>=3.12",
     "ruff>=0.4",
     "mypy>=1.10",
+]
+http = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 ui = []
 web = []
@@ -66,6 +71,7 @@ dev = [
 
 [project.scripts]
 research = "research_agent.cli:app"
+research-mcp = "research_agent.mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

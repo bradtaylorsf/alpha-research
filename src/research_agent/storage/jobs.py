@@ -36,6 +36,7 @@ from typing import Any
 from research_agent.storage import db
 
 DEFAULT_JOBS_ROOT = Path("jobs")
+JOB_SCHEMA_VERSION = 1
 RESUME_REPLAN_FILE = "RESUME_REPLAN.json"
 INBOX_REPLAN_FILE = "INBOX_REPLAN.json"
 
@@ -208,6 +209,7 @@ class Job:
         status = "pending"
 
         job_meta = {
+            "schema_version": JOB_SCHEMA_VERSION,
             "id": job_id,
             "goal": goal,
             "domain": domain,
@@ -594,6 +596,7 @@ def list_jobs(
 __all__ = [
     "DEFAULT_JOBS_ROOT",
     "INBOX_REPLAN_FILE",
+    "JOB_SCHEMA_VERSION",
     "KILL_ESCALATION_SECONDS",
     "KILL_POLL_INTERVAL_SECONDS",
     "Job",

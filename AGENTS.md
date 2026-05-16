@@ -46,6 +46,7 @@ Repo for an **autonomous overnight investigative research agent** that runs on a
 
 ## Code Style
 - **Read the implementation guide before designing anything new.** `research-agent-implementation-guide.md` locks the v1 decisions: Pydantic AI, SQLite queue, per-job folders, Typer CLI, model tiers, and source/sidecar contracts.
+- **Per-job contract changes require a schema bump.** When a stable file or field in `docs/JOB_FOLDER_CONTRACT.md` changes incompatibly, bump `job.json` `schema_version` in the same diff.
 - **Per-job folder is self-contained.** A job lives under `jobs/<job-id>/` with `job.json`, `intake.json`, `goal.md`, `plan/`, `findings/`, `sources/`, `synthesis/`, `critique/`, `artifacts/`, `coverage.json`, `inbox/processed/`, `report.md`, `report.history/`, `archive/`, `events.jsonl`, `daemon.pid`, `daemon.{out,err}.log`, transient `INBOX_REPLAN.json`/`RESUME_REPLAN.json`, and optional `STOP`.
 - **Job starts are resumable/reusable.** `research start` soft-resets an existing goal-slug job by archiving prior `report.md` under `archive/`; `--fresh-reset` opts out and requires a clean folder.
 - **Job IDs are deterministic and safe.** They use UTC `YYYY-MM-DD-<slug>` from the goal, with slug validation in `storage/jobs.py`; do not bypass that constructor.
