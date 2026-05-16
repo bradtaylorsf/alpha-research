@@ -49,6 +49,8 @@ This README is the entry point. It walks an operator from "fresh laptop" to
   stable `jobs/<job-id>/` exchange contract and read-only Python readers.
 - [`docs/MCP.md`](docs/MCP.md) — stdio `research-mcp` configuration and
   tool contract for MCP-aware consumers.
+- [`docs/HTTP_API.md`](docs/HTTP_API.md) — optional FastAPI lifecycle wrapper
+  for non-Python, non-MCP consumers.
 - [`AGENTS.md`](AGENTS.md) — repo map, tech stack, and conventions for
   AI coding agents (and humans) working in this codebase.
 - [`CLAUDE.md`](CLAUDE.md) — how the
