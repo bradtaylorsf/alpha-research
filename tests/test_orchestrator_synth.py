@@ -507,6 +507,34 @@ def test_synthesize_fragments_nonbudget_failure_keeps_prior_fragment(
     assert failed
 
 
+def test_synthesize_fragments_second_pass_without_new_findings_is_noop(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+) -> None:
+    """Cost scales with delta: an unchanged section is not re-synthesized."""
+    sid = _seed_source(job, "https://example.com/timeline", "timeline body")
+    write_finding(job, "Timeline claim", 0.9, [sid], target_fragments=["timeline"])
+    router = _StubRouter(content="## Timeline\n\n- Timeline claim [1].\n")
+
+    first = asyncio.run(synth_module.synthesize_fragments(job, plan, router=router))
+    assert [call[0] for call in router.calls] == ["frontier"]
+    assert latest_fragment(job, "timeline")["version"] == 1
+
+    # No new evidence landed — the second pass must select nothing and
+    # leave the prior fragment version untouched (no extra LLM calls).
+    second = asyncio.run(synth_module.synthesize_fragments(job, plan, router=router))
+
+    assert [call[0] for call in router.calls] == ["frontier"]
+    assert second.model == "fragment_synthesis_noop"
+    assert latest_fragment(job, "timeline")["version"] == 1
+    fragment_updates = [
+        e for e in _read_event_rows(db_path, job.id) if e["kind"] == "fragment_update"
+    ]
+    assert len(fragment_updates) == 1
+    assert first.model == "anthropic/claude-opus-4-7"
+
+
 def test_synthesize_fragment_mode_env_branches_from_legacy(
     job: Job,
     plan: Plan,

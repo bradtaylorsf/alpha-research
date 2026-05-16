@@ -1690,7 +1690,15 @@ def _load_fragment_findings(job: Job) -> list[dict[str, Any]]:
 
 
 def _select_stale_fragments(job: Job, plan: Plan) -> tuple[str, ...]:
-    """Select dependency-closed stale fragments from persisted finding tags."""
+    """Select dependency-closed stale fragments from persisted finding tags.
+
+    A directly-tagged section is stale only when its current set of tagged
+    finding IDs differs from the ``source_finding_ids`` recorded on its
+    latest persisted fragment (or it has no fragment yet). This keeps
+    synthesis cost scaling with *changed* sections instead of re-running
+    every tagged section on every pass. Dependency closures of genuinely
+    stale sections are still pulled so dependent context stays consistent.
+    """
 
     from research_agent.orchestrator.fragments import (
         dependency_closure,
@@ -1700,13 +1708,23 @@ def _select_stale_fragments(job: Job, plan: Plan) -> tuple[str, ...]:
 
     _ = plan
     valid = fragment_ids()
-    stale: set[str] = set()
+    tagged: dict[str, set[int]] = {}
     for finding in _load_fragment_findings(job):
+        finding_id = int(finding["id"])
         for target in finding.get("target_fragments") or []:
             if target not in valid:
                 continue
-            stale.add(target)
-            stale.update(dependency_closure(target))
+            tagged.setdefault(target, set()).add(finding_id)
+
+    stale: set[str] = set()
+    for section_id, finding_ids in tagged.items():
+        prior = latest_fragment(job, section_id)
+        if prior is not None:
+            prior_ids = {int(i) for i in prior.get("source_finding_ids") or []}
+            if finding_ids == prior_ids:
+                continue
+        stale.add(section_id)
+        stale.update(dependency_closure(section_id))
     return synthesis_order(stale)
 
 
