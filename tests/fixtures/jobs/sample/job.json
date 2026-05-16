@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "2026-05-16-investigate-widget-co-financials",
+  "goal": "Investigate Widget Co financials",
+  "domain": "corporate",
+  "status": "completed",
+  "created_at": 1778956800,
+  "last_activity_at": 1778957100,
+  "completion_reason": "goal_complete",
+  "intake": {
+    "goal": "Investigate Widget Co financials",
+    "domain": "corporate",
+    "time_cap_hours": 1,
+    "budget_cap_usd": 0,
+    "disk_cap_gb": 1,
+    "translate_non_english": false,
+    "fragments": false,
+    "inbox": false
+  }
+}

@@ -45,6 +45,10 @@ This README is the entry point. It walks an operator from "fresh laptop" to
 - [`research-agent-implementation-guide.md`](research-agent-implementation-guide.md)
   — the locked-in v1 architecture (Pydantic AI, SQLite, per-job folder,
   Typer CLI, model tiers).
+- [`docs/JOB_FOLDER_CONTRACT.md`](docs/JOB_FOLDER_CONTRACT.md) — the
+  stable `jobs/<job-id>/` exchange contract and read-only Python readers.
+- [`docs/MCP.md`](docs/MCP.md) — stdio `research-mcp` configuration and
+  tool contract for MCP-aware consumers.
 - [`AGENTS.md`](AGENTS.md) — repo map, tech stack, and conventions for
   AI coding agents (and humans) working in this codebase.
 - [`CLAUDE.md`](CLAUDE.md) — how the
@@ -405,7 +409,9 @@ For long unattended runs, see [macOS hygiene](#macos-hygiene) below.
 ### Per-job folder (`jobs/<job-id>/`)
 
 Every job is a self-contained folder. The cross-job DB only mirrors
-metadata for fast queries — the folder is the source of truth.
+metadata for fast queries — the folder is the source of truth. The
+field-level contract is documented in
+[`docs/JOB_FOLDER_CONTRACT.md`](docs/JOB_FOLDER_CONTRACT.md).
 
 ```
 jobs/<job-id>/

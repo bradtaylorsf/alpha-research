@@ -1,0 +1,17 @@
+{
+  "id": 1,
+  "claim": "Widget Co reported audited revenue growth in its sample filing.",
+  "confidence": 0.82,
+  "source_ids": [
+    1
+  ],
+  "contradicts": null,
+  "tags": [
+    "finance"
+  ],
+  "target_fragments": [
+    "timeline"
+  ],
+  "md_path": "findings/000001.md",
+  "created_at": 1778956900
+}

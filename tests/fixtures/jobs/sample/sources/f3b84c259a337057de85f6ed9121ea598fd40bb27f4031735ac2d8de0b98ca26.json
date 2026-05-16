@@ -1,0 +1,14 @@
+{
+  "sha256": "f3b84c259a337057de85f6ed9121ea598fd40bb27f4031735ac2d8de0b98ca26",
+  "url": "https://example.com/widget-co-filing",
+  "title": "Widget Co Sample Filing",
+  "fetched_at": 1778956860,
+  "archive_url": "https://web.archive.org/example/widget-co-filing",
+  "kind": "web",
+  "md_path": "sources/f3b84c259a337057de85f6ed9121ea598fd40bb27f4031735ac2d8de0b98ca26.md",
+  "metadata": {
+    "lang": "en",
+    "pub_date": "2026-05-16",
+    "archive_url": "https://web.archive.org/example/widget-co-filing"
+  }
+}

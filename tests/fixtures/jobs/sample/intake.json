@@ -1,0 +1,10 @@
+{
+  "goal": "Investigate Widget Co financials",
+  "domain": "corporate",
+  "time_cap_hours": 1,
+  "budget_cap_usd": 0,
+  "disk_cap_gb": 1,
+  "translate_non_english": false,
+  "fragments": false,
+  "inbox": false
+}

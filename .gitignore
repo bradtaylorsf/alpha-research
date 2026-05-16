@@ -95,6 +95,10 @@ logs/
 *.log
 *.jsonl
 
+# Canonical per-job contract fixtures are intentionally checked in.
+!tests/fixtures/jobs/
+!tests/fixtures/jobs/**
+
 # Sessions / scratch state
 sessions/
 .cache/
