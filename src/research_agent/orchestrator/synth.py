@@ -43,11 +43,14 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict
 from pydantic_ai import Agent
 
+from research_agent import config
 from research_agent.llm.budgets import BudgetExceeded
 from research_agent.observability.events import emit
-from research_agent.prompts.loader import load_prompt
+from research_agent.prompts.loader import load_prompt, load_prompt_meta
 from research_agent.storage import db
 from research_agent.storage.markdown import (
+    latest_fragment,
+    write_fragment,
     write_report,
     write_synthesis,
     write_synthesis_failed,
@@ -62,6 +65,7 @@ logger = logging.getLogger(__name__)
 
 TOP_N_FINDINGS = 50
 FINAL_TOP_N = 200
+DEFAULT_FRAGMENT_TAGS: tuple[str, ...] = ("open-questions",)
 
 _FOLLOWUP_RECIPES: str | None = None
 _FOLLOWUP_RECIPES_WARN_LOGGED = False
@@ -140,12 +144,88 @@ class SynthesisOutput(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _fragment_aliases() -> dict[str, str]:
+    from research_agent.orchestrator.fragments import all_fragments
+
+    aliases: dict[str, str] = {}
+    for fragment in all_fragments():
+        aliases[fragment.id] = fragment.id
+        normalized_title = _normalize_fragment_label(fragment.title)
+        aliases[normalized_title] = fragment.id
+    return aliases
+
+
+def _normalize_fragment_label(value: str) -> str:
+    text = value.strip().lower().replace("_", "-")
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return text
+
+
+def normalize_fragment_tags(raw: Any, *, job: Job | None = None) -> list[str]:
+    """Validate model-provided fragment tags against the canonical registry.
+
+    Empty, malformed, or fully invalid model output falls back to a conservative
+    fragment so new evidence still reaches fragment synthesis. Legacy storage
+    callers can preserve ``NULL`` by not calling this helper.
+    """
+
+    from research_agent.orchestrator.fragments import fragment_ids
+
+    valid = fragment_ids()
+    aliases = _fragment_aliases()
+    if raw is None:
+        raw_items: list[Any] = []
+    elif isinstance(raw, str):
+        raw_items = [raw]
+    elif isinstance(raw, list):
+        raw_items = list(raw)
+    else:
+        raw_items = []
+
+    normalized: list[str] = []
+    unknown: list[str] = []
+    invalid_count = 0
+    for item in raw_items:
+        if not isinstance(item, str) or not item.strip():
+            invalid_count += 1
+            continue
+        candidate = _normalize_fragment_label(item)
+        fragment_id = aliases.get(candidate)
+        if fragment_id is None and candidate in valid:
+            fragment_id = candidate
+        if fragment_id is None:
+            unknown.append(candidate[:80] or "<empty>")
+            continue
+        if fragment_id not in normalized:
+            normalized.append(fragment_id)
+
+    used_fallback = False
+    if not normalized:
+        normalized = list(DEFAULT_FRAGMENT_TAGS)
+        used_fallback = True
+
+    if job is not None and (unknown or invalid_count or used_fallback):
+        emit(
+            job,
+            "WARN",
+            "synth",
+            "finding_fragment_classification_miss",
+            {
+                "raw_count": len(raw_items),
+                "unknown_fragment_ids": sorted(set(unknown)),
+                "invalid_count": invalid_count,
+                "fallback_fragment_ids": normalized if used_fallback else [],
+            },
+        )
+    return normalized
+
+
 def _load_top_findings(job: Job, n: int) -> list[dict[str, Any]]:
     conn = db.connect(job.db_path)
     try:
         rows = conn.execute(
             """
-            SELECT id, claim, confidence, source_ids, tags
+            SELECT id, claim, confidence, source_ids, tags, target_fragments
             FROM findings
             WHERE job_id = ?
             ORDER BY confidence DESC, id ASC
@@ -160,6 +240,7 @@ def _load_top_findings(job: Job, n: int) -> list[dict[str, Any]]:
     for row in rows:
         source_ids_raw = row["source_ids"]
         tags_raw = row["tags"]
+        target_fragments_raw = row["target_fragments"]
         finding_id = int(row["id"])
         original_claim = row["claim"]
         translated_claim = _load_finding_translation(job, finding_id)
@@ -169,6 +250,9 @@ def _load_top_findings(job: Job, n: int) -> list[dict[str, Any]]:
             "confidence": float(row["confidence"]),
             "source_ids": json.loads(source_ids_raw) if source_ids_raw else [],
             "tags": json.loads(tags_raw) if tags_raw else [],
+            "target_fragments": (
+                json.loads(target_fragments_raw) if target_fragments_raw else []
+            ),
         }
         if translated_claim is not None:
             item["original_claim"] = original_claim
@@ -1556,6 +1640,333 @@ def _emit_fallback_tier_used(
     )
 
 
+def _env_flag_enabled(name: str) -> bool:
+    value = config.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def fragment_synth_enabled() -> bool:
+    """Return True when section-fragment synthesis is explicitly enabled."""
+
+    return _env_flag_enabled("RESEARCH_FRAGMENT_SYNTH")
+
+
+def _load_fragment_findings(job: Job) -> list[dict[str, Any]]:
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, claim, confidence, source_ids, tags, target_fragments
+            FROM findings
+            WHERE job_id = ?
+            ORDER BY id ASC
+            """,
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        finding_id = int(row["id"])
+        translated_claim = _load_finding_translation(job, finding_id)
+        item = {
+            "id": finding_id,
+            "claim": translated_claim or row["claim"],
+            "confidence": float(row["confidence"]),
+            "source_ids": json.loads(row["source_ids"]) if row["source_ids"] else [],
+            "tags": json.loads(row["tags"]) if row["tags"] else [],
+            "target_fragments": (
+                json.loads(row["target_fragments"]) if row["target_fragments"] else []
+            ),
+        }
+        if translated_claim is not None:
+            item["original_claim"] = row["claim"]
+            item["translated"] = True
+        out.append(item)
+    return out
+
+
+def _select_stale_fragments(job: Job, plan: Plan) -> tuple[str, ...]:
+    """Select dependency-closed stale fragments from persisted finding tags.
+
+    A directly-tagged section is stale only when its current set of tagged
+    finding IDs differs from the ``source_finding_ids`` recorded on its
+    latest persisted fragment (or it has no fragment yet). This keeps
+    synthesis cost scaling with *changed* sections instead of re-running
+    every tagged section on every pass. Dependency closures of genuinely
+    stale sections are still pulled so dependent context stays consistent.
+    """
+
+    from research_agent.orchestrator.fragments import (
+        dependency_closure,
+        fragment_ids,
+        synthesis_order,
+    )
+
+    _ = plan
+    valid = fragment_ids()
+    tagged: dict[str, set[int]] = {}
+    for finding in _load_fragment_findings(job):
+        finding_id = int(finding["id"])
+        for target in finding.get("target_fragments") or []:
+            if target not in valid:
+                continue
+            tagged.setdefault(target, set()).add(finding_id)
+
+    stale: set[str] = set()
+    for section_id, finding_ids in tagged.items():
+        prior = latest_fragment(job, section_id)
+        if prior is not None:
+            prior_ids = {int(i) for i in prior.get("source_finding_ids") or []}
+            if finding_ids == prior_ids:
+                continue
+        stale.add(section_id)
+        stale.update(dependency_closure(section_id))
+    return synthesis_order(stale)
+
+
+def _latest_synthesis_version(job: Job) -> int | None:
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            "SELECT MAX(version) AS version FROM syntheses WHERE job_id = ?",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or row["version"] is None:
+        return None
+    return int(row["version"])
+
+
+def _build_fragment_context(
+    job: Job,
+    section_id: str,
+    plan: Plan,
+    *,
+    findings: list[dict[str, Any]] | None = None,
+    final: bool = False,
+) -> tuple[str, list[dict[str, Any]], dict[int, dict[str, Any]]]:
+    """Build a section-bounded JSON context for one fragment synthesis call."""
+
+    from research_agent.orchestrator.fragments import dependency_closure, get_fragment
+
+    fragment = get_fragment(section_id)
+    all_findings = findings if findings is not None else _load_fragment_findings(job)
+    relevant_findings = [
+        finding
+        for finding in all_findings
+        if section_id in set(finding.get("target_fragments") or [])
+    ]
+    sources = _load_sources_for(job, relevant_findings)
+    prior = latest_fragment(job, section_id)
+
+    dependency_fragments: dict[str, dict[str, Any]] = {}
+    for dependency_id in dependency_closure(section_id):
+        dep = latest_fragment(job, dependency_id)
+        if dep is None:
+            continue
+        dependency_fragments[dependency_id] = {
+            "section_id": dependency_id,
+            "version": dep["version"],
+            "content": dep["content"],
+            "created_at": dep["created_at"],
+        }
+
+    payload = {
+        "goal": job.goal,
+        "final": final,
+        "section": {
+            "id": fragment.id,
+            "title": fragment.title,
+            "prompt_hint": fragment.prompt_hint,
+            "resource_hint": fragment.resource_hint,
+        },
+        "plan": {
+            "version": plan.version,
+            "objective": plan.objective,
+            "scope_class": str(plan.scope_class) if plan.scope_class else None,
+            "subgoals": [
+                {
+                    "id": sg.id,
+                    "description": sg.description,
+                    "done": sg.done,
+                    "gap_reason": sg.gap_reason,
+                    "gap_status": sg.gap_status,
+                }
+                for sg in plan.subgoals
+            ],
+        },
+        "prior_fragment": (
+            {
+                "version": prior["version"],
+                "content": prior["content"],
+                "created_at": prior["created_at"],
+            }
+            if prior is not None
+            else None
+        ),
+        "dependency_fragments": dependency_fragments,
+        "findings": relevant_findings,
+        "sources": {str(k): v for k, v in sources.items()},
+    }
+    return json.dumps(payload, sort_keys=True, default=str), relevant_findings, sources
+
+
+async def _run_fragment_llm(
+    job: Job,
+    router: Router,
+    *,
+    tier: str,
+    context: str,
+) -> str:
+    rendered = load_prompt("fragment_synthesizer", job=job, goal=job.goal)
+    agent = Agent(router.model_for(tier), output_type=str, system_prompt=rendered)
+    result = await router.call(tier, agent, context)
+    output = result.output
+    if not isinstance(output, str):
+        output = str(output)
+    return output
+
+
+async def _run_fragment_synth(
+    job: Job,
+    plan: Plan,
+    *,
+    router: Router,
+    final: bool = False,
+) -> SynthesisOutput:
+    stale_sections = _select_stale_fragments(job, plan)
+    prompt_meta = load_prompt_meta("fragment_synthesizer", job=job)
+    tier = prompt_meta.model_tier
+    model_name = _model_name_for(router, tier)
+    all_findings = _load_fragment_findings(job)
+    synthesis_version = _latest_synthesis_version(job)
+
+    updated: list[dict[str, Any]] = []
+    total_cost = 0.0
+    saw_cost = False
+
+    for section_id in stale_sections:
+        context, relevant_findings, sources = _build_fragment_context(
+            job,
+            section_id,
+            plan,
+            findings=all_findings,
+            final=final,
+        )
+        finding_ids = [int(f["id"]) for f in relevant_findings]
+        try:
+            content = await _run_fragment_llm(job, router, tier=tier, context=context)
+        except BudgetExceeded as exc:
+            emit(
+                job,
+                "WARN",
+                "synth",
+                "warning",
+                {
+                    "stage": f"fragment:{section_id}",
+                    "tier": tier,
+                    "model": model_name,
+                    "budget_capped": True,
+                    "error": str(exc),
+                },
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001
+            _emit_synthesis_llm_failed(
+                job,
+                router,
+                tier=tier,
+                exc=exc,
+                attempt_count=1,
+            )
+            continue
+
+        if not content.strip():
+            emit(
+                job,
+                "WARN",
+                "synth",
+                "warning",
+                {
+                    "stage": f"fragment:{section_id}",
+                    "tier": tier,
+                    "model": model_name,
+                    "error": "empty_fragment_output",
+                },
+            )
+            continue
+
+        cost = getattr(router.budget, "last_cost", None)
+        cost_val: float | None = float(cost) if isinstance(cost, (int, float)) else None
+        if cost_val is not None:
+            total_cost += cost_val
+            saw_cost = True
+        version = write_fragment(
+            job,
+            section_id,
+            content,
+            source_finding_ids=finding_ids,
+            cited_source_ids=sorted(sources.keys()),
+            synthesis_version=synthesis_version,
+            model=model_name,
+            tier=tier,
+            status="ok",
+        )
+        emit(
+            job,
+            "INFO",
+            "synth",
+            "fragment_update",
+            {
+                "section_id": section_id,
+                "version": version,
+                "finding_ids": finding_ids,
+                "tier": tier,
+                "model": model_name,
+                "cost_usd": cost_val,
+            },
+        )
+        updated.append(
+            {
+                "section_id": section_id,
+                "version": version,
+                "finding_ids": finding_ids,
+            }
+        )
+
+    summary = {
+        "mode": "fragments",
+        "stale_sections": list(stale_sections),
+        "updated_sections": updated,
+        "final": final,
+    }
+    return SynthesisOutput(
+        version=max((int(item["version"]) for item in updated), default=0),
+        content=json.dumps(summary, sort_keys=True),
+        model=model_name if updated else "fragment_synthesis_noop",
+        cost_usd=total_cost if saw_cost else None,
+        report_path=str(job.root / "fragments"),
+        truncated=False,
+    )
+
+
+async def synthesize_fragments(
+    job: Job,
+    plan: Plan,
+    *,
+    router: Router,
+    final: bool = False,
+) -> SynthesisOutput:
+    """Run section-fragment synthesis without assembling ``report.md``."""
+
+    return await _run_fragment_synth(job, plan, router=router, final=final)
+
+
 async def _do_synthesis(
     job: Job,
     plan: Plan,
@@ -2112,6 +2523,8 @@ async def synthesize(job: Job, plan: Plan, *, router: Router) -> SynthesisOutput
     critique (if any). Persists a new synthesis version, rotates the prior
     ``report.md`` into ``report.history/`` and writes the fresh content.
     """
+    if fragment_synth_enabled():
+        return await synthesize_fragments(job, plan, router=router, final=False)
     return await _do_synthesis(
         job,
         plan,
@@ -2128,6 +2541,8 @@ async def final_synthesis(job: Job, plan: Plan, *, router: Router) -> SynthesisO
     report can draw on the full investigation. The same budget fallback
     ladder applies (frontier → frontier_speed → stub).
     """
+    if fragment_synth_enabled():
+        return await synthesize_fragments(job, plan, router=router, final=True)
     return await _do_synthesis(
         job,
         plan,

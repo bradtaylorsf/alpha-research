@@ -18,6 +18,7 @@ EXPECTED_TABLES = {
     "sources",
     "job_sources",
     "syntheses",
+    "fragments",
     "checkpoints",
     "events",
     "llm_calls",
@@ -28,6 +29,7 @@ EXPECTED_TABLES = {
 EXPECTED_INDEXES = {
     "idx_tasks_status_job",
     "idx_findings_job",
+    "idx_fragments_job_section",
     "idx_checkpoints_job_ts",
     "idx_events_job_ts",
 }
@@ -166,6 +168,26 @@ def test_insert_and_query_each_table(db_path: Path) -> None:
             (job_id, 1, "synthesis-v1.md", "gpt-test", now),
         )
 
+        # fragments
+        conn.execute(
+            """
+            INSERT INTO fragments (
+                job_id, section_id, version, md_path, json_path,
+                source_finding_ids, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                "executive-summary",
+                1,
+                "fragments/executive-summary/0001.md",
+                "fragments/executive-summary/0001.json",
+                "[]",
+                "ok",
+                now,
+            ),
+        )
+
         # checkpoints
         conn.execute(
             """
@@ -203,6 +225,7 @@ def test_insert_and_query_each_table(db_path: Path) -> None:
         assert _scalar(conn, "SELECT count(*) FROM sources") == 1
         assert _scalar(conn, "SELECT count(*) FROM job_sources") == 1
         assert _scalar(conn, "SELECT count(*) FROM syntheses") == 1
+        assert _scalar(conn, "SELECT count(*) FROM fragments") == 1
         assert _scalar(conn, "SELECT count(*) FROM checkpoints") == 1
         assert _scalar(conn, "SELECT count(*) FROM events") == 1
         assert _scalar(conn, "SELECT count(*) FROM llm_calls") == 1

@@ -10,7 +10,10 @@ import pytest
 from research_agent.storage import db
 from research_agent.storage.jobs import Job
 from research_agent.storage.markdown import (
+    latest_fragment,
+    latest_fragments,
     write_finding,
+    write_fragment,
     write_plan,
     write_report,
     write_synthesis,
@@ -122,6 +125,61 @@ def test_write_finding_with_contradicts(job: Job) -> None:
     )
     sidecar = json.loads((job.root / "findings" / f"{second:06d}.json").read_text())
     assert sidecar["contradicts"] == [first]
+
+
+def test_write_finding_persists_target_fragments(job: Job) -> None:
+    fid = write_finding(
+        job,
+        claim="Timeline claim.",
+        confidence=0.8,
+        source_ids=[1],
+        target_fragments=["Timeline", "connections"],
+    )
+
+    md_text = (job.root / "findings" / f"{fid:06d}.md").read_text()
+    sidecar = json.loads((job.root / "findings" / f"{fid:06d}.json").read_text())
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            "SELECT target_fragments FROM findings WHERE id = ?",
+            (fid,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert "**Fragments:** timeline, connections" in md_text
+    assert sidecar["target_fragments"] == ["timeline", "connections"]
+    assert json.loads(row["target_fragments"]) == ["timeline", "connections"]
+
+
+def test_write_finding_unknown_fragments_fall_back(job: Job) -> None:
+    fid = write_finding(
+        job,
+        claim="Unclassified claim.",
+        confidence=0.8,
+        source_ids=[1],
+        target_fragments=["not-a-section"],
+    )
+
+    sidecar = json.loads((job.root / "findings" / f"{fid:06d}.json").read_text())
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            "SELECT target_fragments FROM findings WHERE id = ?",
+            (fid,),
+        ).fetchone()
+        event = conn.execute(
+            "SELECT level, kind, payload_json FROM events WHERE job_id = ?"
+            " AND kind = 'finding_fragment_classification_miss'",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert sidecar["target_fragments"] == ["open-questions"]
+    assert json.loads(row["target_fragments"]) == ["open-questions"]
+    assert event["level"] == "WARN"
+    assert "not-a-section" in event["payload_json"]
 
 
 @pytest.mark.parametrize("bad_conf", [-0.1, 1.5, 2.0, -1.0])
@@ -262,6 +320,144 @@ def test_write_synthesis_rejects_empty(job: Job) -> None:
         write_synthesis(job, content="", model="opus-4")
     with pytest.raises(ValueError):
         write_synthesis(job, content="content", model="")
+
+
+# ---------------------------------------------------------------------------
+# write_fragment / latest_fragment
+# ---------------------------------------------------------------------------
+
+
+def test_write_fragment_versions_increment_per_section(job: Job) -> None:
+    v1 = write_fragment(
+        job,
+        "executive-summary",
+        "first summary",
+        source_finding_ids=[1],
+    )
+    timeline_v1 = write_fragment(
+        job,
+        "timeline",
+        "first timeline",
+        source_finding_ids=[2],
+    )
+    v2 = write_fragment(
+        job,
+        "executive-summary",
+        "second summary",
+        source_finding_ids=[3],
+    )
+
+    assert v1 == 1
+    assert timeline_v1 == 1
+    assert v2 == 2
+    assert (job.root / "fragments/executive-summary/0001.md").read_text() == (
+        "first summary\n"
+    )
+    assert (job.root / "fragments/executive-summary/0002.md").read_text() == (
+        "second summary\n"
+    )
+    assert (job.root / "fragments/timeline/0001.md").read_text() == "first timeline\n"
+
+
+def test_write_fragment_sidecar_records_metadata(job: Job) -> None:
+    version = write_fragment(
+        job,
+        "connections",
+        "connections body",
+        source_finding_ids=[10, 11],
+        cited_source_ids=[3, 4],
+        synthesis_version=2,
+        model="configured-model",
+        tier="frontier",
+        confidence=0.7,
+        status="ok",
+    )
+
+    sidecar = json.loads((job.root / "fragments/connections/0001.json").read_text())
+    assert version == 1
+    assert sidecar == {
+        "job_id": job.id,
+        "section_id": "connections",
+        "title": "Connections",
+        "version": 1,
+        "md_path": "fragments/connections/0001.md",
+        "json_path": "fragments/connections/0001.json",
+        "synthesis_version": 2,
+        "source_finding_ids": [10, 11],
+        "cited_source_ids": [3, 4],
+        "model": "configured-model",
+        "tier": "frontier",
+        "confidence": 0.7,
+        "status": "ok",
+        "created_at": sidecar["created_at"],
+    }
+
+
+def test_write_fragment_inserts_sqlite_row(job: Job) -> None:
+    write_fragment(
+        job,
+        "open-questions",
+        "open questions body",
+        source_finding_ids=[5],
+        cited_source_ids=[8],
+        model="configured-model",
+        tier="general",
+        status="draft",
+    )
+
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT section_id, version, md_path, json_path, source_finding_ids,
+                   cited_source_ids, model, tier, status
+            FROM fragments
+            WHERE job_id = ?
+            """,
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row["section_id"] == "open-questions"
+    assert row["version"] == 1
+    assert row["md_path"] == "fragments/open-questions/0001.md"
+    assert row["json_path"] == "fragments/open-questions/0001.json"
+    assert json.loads(row["source_finding_ids"]) == [5]
+    assert json.loads(row["cited_source_ids"]) == [8]
+    assert row["model"] == "configured-model"
+    assert row["tier"] == "general"
+    assert row["status"] == "draft"
+
+
+def test_latest_fragment_and_latest_fragments_load_content(job: Job) -> None:
+    write_fragment(job, "executive-summary", "older", source_finding_ids=[1])
+    write_fragment(job, "executive-summary", "newer", source_finding_ids=[2])
+    write_fragment(job, "timeline", "timeline body", source_finding_ids=[3])
+
+    latest = latest_fragment(job, "executive-summary")
+    all_latest = latest_fragments(job)
+
+    assert latest is not None
+    assert latest["version"] == 2
+    assert latest["content"] == "newer\n"
+    assert latest["source_finding_ids"] == [2]
+    assert set(all_latest) == {"executive-summary", "timeline"}
+    assert all_latest["timeline"]["content"] == "timeline body\n"
+
+
+def test_write_fragment_does_not_clobber_prior_versions_or_leave_tmp(job: Job) -> None:
+    write_fragment(job, "paid-resources", "first", source_finding_ids=[])
+    write_fragment(job, "paid-resources", "second", source_finding_ids=[])
+
+    assert (job.root / "fragments/paid-resources/0001.md").read_text() == "first\n"
+    assert (job.root / "fragments/paid-resources/0002.md").read_text() == "second\n"
+    assert list((job.root / "fragments").rglob("*.tmp")) == []
+
+
+def test_write_fragment_rejects_unknown_section(job: Job) -> None:
+    with pytest.raises(ValueError, match="unknown fragment"):
+        write_fragment(job, "unknown-section", "body", source_finding_ids=[])
 
 
 # ---------------------------------------------------------------------------

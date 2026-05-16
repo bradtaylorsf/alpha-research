@@ -21,6 +21,7 @@ from research_agent.orchestrator.loop import (
     _load_source_text,
     _run_extract_findings,
     _update_candidate_artifact_from_result,
+    _write_findings_batch,
     default_handlers,
     run_loop,
 )
@@ -122,6 +123,41 @@ def _read_events_by_kind(db_path: Path, job_id: str, kind: str) -> list[dict[str
         item["payload"] = json.loads(item.pop("payload_json"))
         out.append(item)
     return out
+
+
+def test_write_findings_batch_persists_target_fragments(
+    job: Job,
+    db_path: Path,
+) -> None:
+    written, mirrors, skipped = _write_findings_batch(
+        job,
+        source_id=123,
+        items=[
+            {
+                "claim": "A relationship claim belongs in Connections.",
+                "confidence": 0.8,
+                "quote": "relationship claim",
+                "tags": ["network"],
+                "fragments": ["connections"],
+            }
+        ],
+        findings_limit=5,
+    )
+
+    assert skipped == 0
+    assert len(written) == 1
+    assert mirrors[0]["target_fragments"] == ["connections"]
+
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT target_fragments FROM findings WHERE id = ?",
+            (written[0],),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert json.loads(row["target_fragments"]) == ["connections"]
 
 
 def _read_checkpoint_kinds(db_path: Path, job_id: str) -> list[str]:
@@ -745,6 +781,72 @@ def test_default_handlers_covers_every_task_kind() -> None:
         expected.add(f"{prefix}_search")
         expected.add(f"{prefix}_fetch")
     assert set(handlers.keys()) == expected
+
+
+@pytest.mark.asyncio
+async def test_synthesize_handler_routes_to_legacy_when_fragment_flag_unset(
+    job: Job,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_agent.orchestrator.synth as synth_mod
+
+    monkeypatch.delenv("RESEARCH_FRAGMENT_SYNTH", raising=False)
+    calls: list[str] = []
+
+    class _Output:
+        def model_dump(self) -> dict[str, str]:
+            return {"mode": "legacy"}
+
+    async def _legacy(*args: Any, **kwargs: Any) -> _Output:
+        calls.append("legacy")
+        return _Output()
+
+    async def _fragment(*args: Any, **kwargs: Any) -> _Output:
+        calls.append("fragment")
+        return _Output()
+
+    monkeypatch.setattr(synth_mod, "synthesize", _legacy)
+    monkeypatch.setattr(synth_mod, "synthesize_fragments", _fragment)
+
+    handler = default_handlers(router=object())["synthesize"]
+    result = await handler(job, {"payload": {}})
+
+    assert result == {"mode": "legacy"}
+    assert calls == ["legacy"]
+
+
+@pytest.mark.asyncio
+async def test_synthesize_handler_routes_to_fragments_when_flag_set(
+    job: Job,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import research_agent.orchestrator.synth as synth_mod
+
+    monkeypatch.setenv("RESEARCH_FRAGMENT_SYNTH", "1")
+    calls: list[tuple[str, bool]] = []
+
+    class _Output:
+        def model_dump(self) -> dict[str, str]:
+            return {"mode": "fragments"}
+
+    async def _legacy(*args: Any, **kwargs: Any) -> _Output:
+        calls.append(("legacy", False))
+        return _Output()
+
+    async def _fragment(*args: Any, **kwargs: Any) -> _Output:
+        calls.append(("fragment", bool(kwargs.get("final"))))
+        return _Output()
+
+    monkeypatch.setattr(synth_mod, "synthesize", _legacy)
+    monkeypatch.setattr(synth_mod, "synthesize_fragments", _fragment)
+
+    handler = default_handlers(router=object())["synthesize"]
+    result = await handler(job, {"payload": {"final": True}})
+
+    assert result == {"mode": "fragments"}
+    assert calls == [("fragment", True)]
 
 
 @pytest.mark.asyncio

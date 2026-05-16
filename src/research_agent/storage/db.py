@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS findings (
     contradicts TEXT,
     embedding BLOB,
     tags TEXT,
+    target_fragments TEXT,
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_findings_job ON findings(job_id);
@@ -117,6 +118,27 @@ CREATE TABLE IF NOT EXISTS syntheses (
     created_at INTEGER NOT NULL,
     UNIQUE(job_id, version)
 );
+
+-- Section-level synthesis fragments
+CREATE TABLE IF NOT EXISTS fragments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES jobs(id),
+    section_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    md_path TEXT NOT NULL,
+    json_path TEXT NOT NULL,
+    synthesis_version INTEGER,
+    source_finding_ids TEXT NOT NULL,
+    cited_source_ids TEXT,
+    model TEXT,
+    tier TEXT,
+    confidence REAL,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(job_id, section_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_fragments_job_section
+    ON fragments(job_id, section_id);
 
 -- Critique passes (paired with syntheses; uses a different model tier)
 CREATE TABLE IF NOT EXISTS critiques (
@@ -337,6 +359,16 @@ def _migrate_jobs_completion_reason(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE jobs ADD COLUMN completion_reason TEXT")
 
 
+def _migrate_findings_target_fragments(conn: sqlite3.Connection) -> None:
+    """Add nullable ``findings.target_fragments`` to legacy DBs (issue #325)."""
+    cols = conn.execute("PRAGMA table_info(findings)").fetchall()
+    if not cols:
+        return
+    if any(c["name"] == "target_fragments" for c in cols):
+        return
+    conn.execute("ALTER TABLE findings ADD COLUMN target_fragments TEXT")
+
+
 def _migrate_hypotheses_table(conn: sqlite3.Connection) -> None:
     """Create the hypotheses ledger for DBs that predate issue #261."""
     conn.executescript(
@@ -391,6 +423,33 @@ def _migrate_coverage_units_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_fragments_table(conn: sqlite3.Connection) -> None:
+    """Create the section-fragment ledger for DBs that predate issue #324."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS fragments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL REFERENCES jobs(id),
+            section_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            md_path TEXT NOT NULL,
+            json_path TEXT NOT NULL,
+            synthesis_version INTEGER,
+            source_finding_ids TEXT NOT NULL,
+            cited_source_ids TEXT,
+            model TEXT,
+            tier TEXT,
+            confidence REAL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE(job_id, section_id, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fragments_job_section
+            ON fragments(job_id, section_id);
+        """
+    )
+
+
 def migrate(
     conn: sqlite3.Connection | None = None,
     *,
@@ -408,6 +467,8 @@ def migrate(
         _migrate_sources_md_path_nullable(conn)
         _migrate_sources_parent_source_id(conn)
         _migrate_jobs_completion_reason(conn)
+        _migrate_findings_target_fragments(conn)
         _migrate_hypotheses_table(conn)
         _migrate_coverage_units_table(conn)
+        _migrate_fragments_table(conn)
     return conn
