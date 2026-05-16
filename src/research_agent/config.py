@@ -32,7 +32,10 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
     EnvKey(
         name="BRAVE_SEARCH_API_KEY",
         required=False,
-        description="Brave Search API key. When set, web_search 'auto' picks Brave over DDG-Playwright.",
+        description=(
+            "Brave Search API key. When set, web_search 'auto' picks Brave"
+            " over DDG-Playwright."
+        ),
     ),
     EnvKey(
         name="RESEARCH_USER_AGENT",
@@ -93,6 +96,14 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
             "Set to '0' to suppress the foreground Rich progress bar that the daemon"
             " writes to stdout when run interactively. The spawned-daemon path is"
             " unaffected (its stdout is a log file, so the bar stays dormant)."
+        ),
+    ),
+    EnvKey(
+        name="RESEARCH_FRAGMENT_SYNTH",
+        required=False,
+        description=(
+            "Set to '1' to enable experimental section-fragment synthesis."
+            " When unset, legacy whole-report synthesis remains the default."
         ),
     ),
     EnvKey(

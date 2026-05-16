@@ -562,27 +562,39 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         return await _run_cornerstone_query(job, task, router=router)
 
     async def _synthesize(job: Job, task: dict[str, Any]) -> dict[str, Any] | None:
-        from research_agent.orchestrator.synth import final_synthesis, synthesize
+        from research_agent.orchestrator.synth import (
+            final_synthesis,
+            fragment_synth_enabled,
+            synthesize,
+            synthesize_fragments,
+        )
 
         plan = _load_latest_plan(job)
         if plan is None:
             raise FatalError("synthesize: no plan persisted for job")
         payload = task.get("payload") or {}
-        if payload.get("final"):
+        final = bool(payload.get("final"))
+        if fragment_synth_enabled():
+            output = await synthesize_fragments(job, plan, router=router, final=final)
+        elif final:
             output = await final_synthesis(job, plan, router=router)
         else:
             output = await synthesize(job, plan, router=router)
         return output.model_dump()
 
     async def _critique(job: Job, task: dict[str, Any]) -> dict[str, Any] | None:
-        from research_agent.orchestrator.critique import critique
+        from research_agent.orchestrator.critique import critique, critique_fragments
         from research_agent.orchestrator.plan import cloud_replan
+        from research_agent.orchestrator.synth import fragment_synth_enabled
 
         plan = _load_latest_plan(job)
         if plan is None:
             raise FatalError("critique: no plan persisted for job")
-        latest_synth = _load_latest_synthesis_md(job)
-        result = await critique(job, plan, latest_synth, router=router)
+        if fragment_synth_enabled():
+            result = await critique_fragments(job, plan, router=router)
+        else:
+            latest_synth = _load_latest_synthesis_md(job)
+            result = await critique(job, plan, latest_synth, router=router)
         if result.should_replan:
             critique_md = _load_critique_md(job, result.md_path)
             new_plan = await cloud_replan(job, plan, critique_md, router=router)
@@ -770,7 +782,7 @@ def _load_all_findings(job: Job) -> list[dict[str, Any]]:
     conn = db.connect(job.db_path)
     try:
         rows = conn.execute(
-            "SELECT id, claim, confidence, source_ids, tags FROM findings"
+            "SELECT id, claim, confidence, source_ids, tags, target_fragments FROM findings"
             " WHERE job_id = ? ORDER BY id ASC",
             (job.id,),
         ).fetchall()
@@ -787,6 +799,12 @@ def _load_all_findings(job: Job) -> list[dict[str, Any]]:
             tags = _json.loads(row["tags"]) if row["tags"] else None
         except (TypeError, ValueError):
             tags = None
+        try:
+            target_fragments = (
+                _json.loads(row["target_fragments"]) if row["target_fragments"] else []
+            )
+        except (TypeError, ValueError):
+            target_fragments = []
         out.append(
             {
                 "id": int(row["id"]),
@@ -794,6 +812,7 @@ def _load_all_findings(job: Job) -> list[dict[str, Any]]:
                 "confidence": float(row["confidence"]),
                 "source_ids": source_ids,
                 "tags": tags,
+                "target_fragments": target_fragments,
             }
         )
     return out
@@ -3111,6 +3130,7 @@ def _write_findings_batch(
     section breadcrumb is preserved on the persisted row — downstream
     ``tactical_replan`` reads tags to build per-proposal sub-questions.
     """
+    from research_agent.orchestrator.synth import normalize_fragment_tags
     from research_agent.storage.markdown import write_finding
 
     written: list[int] = []
@@ -3138,6 +3158,7 @@ def _write_findings_batch(
         if extra_tags:
             tags_list = [*extra_tags, *tags_list]
         tags_final = tags_list or None
+        target_fragments = normalize_fragment_tags(item.get("fragments") or [], job=job)
         quote_raw = item.get("quote")
         quote_str = quote_raw.strip() if isinstance(quote_raw, str) else ""
         try:
@@ -3147,6 +3168,7 @@ def _write_findings_batch(
                 confidence=conf,
                 source_ids=[source_id],
                 tags=tags_final,
+                target_fragments=target_fragments,
             )
             written.append(fid)
             written_findings.append(
@@ -3155,6 +3177,7 @@ def _write_findings_batch(
                     "claim": claim_raw.strip(),
                     "confidence": conf,
                     "quote": quote_str,
+                    "target_fragments": target_fragments,
                 }
             )
         except (ValueError, TypeError):

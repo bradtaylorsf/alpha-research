@@ -263,6 +263,7 @@ that list, so there is no drift.
 | `RESEARCH_PDF_VLM_ESCALATION` | no | Set to `1` to enable Opus 4.7 vision escalation for PDFs that fail every cheaper layer. Off by default — costs real money; emits a `pdf_vlm_escalation` WARN event when fired. |
 | `RESEARCH_OCR_VLM_ESCALATION` | no | Set to `1` to enable Opus 4.7 vision escalation for image OCR when Tesseract and the local VLM both fail. Off by default — costs real money; emits an `ocr_vlm_escalation` WARN event when fired. |
 | `RESEARCH_DAEMON_PROGRESS` | no | Set to `0` to suppress the foreground Rich progress bar the daemon writes to stdout when run interactively. |
+| `RESEARCH_FRAGMENT_SYNTH` | no | Set to `1` to enable experimental section-fragment synthesis. Unset keeps the legacy whole-report synthesizer. |
 | `COURTLISTENER_API_TOKEN` | no | CourtListener API token (free w/ signup) — required by `tools/courtlistener.py`. Authenticated tier is 5,000 req/hr; anonymous traffic is throttled to the point of unusability. |
 | `DATA_GOV_API_KEY` | no | api.data.gov key (free w/ signup at <https://api.data.gov/signup/>) — used by `tools/fec.py`, `tools/congress.py`, and `tools/smithsonian.py`. FEC/Congress/Smithsonian fall back to `DEMO_KEY` for low-volume smoke when unset. |
 | `LDA_API_KEY` | no | Senate Lobbying Disclosure Act API key (free, optional, register at <https://lda.senate.gov/api/register/>) — used by `tools/lda.py`. Anonymous works for low-volume; authenticated raises rate limits. Sent via `Authorization: Token <key>`. |
@@ -415,6 +416,7 @@ jobs/<job-id>/
 ├── findings/             # findings/NNNNNN.md (zero-padded, monotonic)
 ├── sources/              # symlinks/copies of canonical source markdown
 ├── synthesis/            # synthesis/NNNN.md (versioned)
+├── fragments/            # fragments/<section>/NNNN.md (versioned)
 ├── critique/             # critique/NNNN.md (versioned)
 ├── artifacts/            # structured outputs such as CSV tables
 ├── coverage.json         # enumeration coverage ledger, when required
@@ -459,7 +461,7 @@ Lockfiles (`uv.lock`) are committed.
 ```bash
 research start --skip-intake --goal "<goal>" \
     [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes] \
-    [--disk-cap-gb 10] [--translate-non-english] [--inbox]
+    [--disk-cap-gb 10] [--translate-non-english] [--fragments] [--inbox]
 
 research list                      # newest first; Rich on a TTY, JSON otherwise
 research list --json
@@ -533,6 +535,11 @@ original finding remains unchanged. Plan YAML can also opt in per task
 with `payload.translate_non_english: true`. See
 [`docs/CONFIG.md`](docs/CONFIG.md) for the per-job knob and budget
 behavior.
+
+`--fragments` enables experimental section-fragment synthesis for a job by
+setting `RESEARCH_FRAGMENT_SYNTH=1` for the spawned daemon and recording
+`"fragments": true` in `intake.json`. Leaving it unset keeps the legacy
+whole-report synthesis path.
 
 `research search` defaults to a hybrid pass: FTS5 on `findings_fts` /
 `sources_fts` plus semantic cosine over `embeddings` blobs, deduped and

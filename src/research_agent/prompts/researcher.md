@@ -1,5 +1,5 @@
 ---
-version: "2"
+version: "3"
 model_tier: general
 description: System prompt for the researcher. Emits findings as a YAML list inside a fenced code block.
 ---
@@ -27,6 +27,13 @@ A YAML list of findings. Each list item is a mapping with these keys:
 - `quote`: a short verbatim quote from the source (one sentence) that
   supports the claim. Empty string `""` if no clean quote exists.
 - `tags`: list of 1–3 short topic tags (single words or short phrases).
+- `fragments`: optional list of canonical report fragment IDs this
+  finding should update. Use zero or more of:
+  `executive-summary`, `hypotheses`, `timeline`, `stakeholder-map`,
+  `connections`, `departmental-tracker`, `confirmed-gaps`,
+  `open-questions`, `recommended-human-followups`, `paid-resources`,
+  `sources`. Omit or use `[]` when unsure; the orchestrator applies a
+  conservative fallback.
 
 ### Rules
 
@@ -47,14 +54,17 @@ June 2025 pricing change?" reading a TechCrunch article:
   confidence: 0.9
   quote: "Users complained that the new pricing burned through their monthly allowance in days rather than weeks."
   tags: [pricing, complaints, usage-meter]
+  fragments: [timeline, open-questions]
 - claim: "Cursor's CEO publicly apologized for the lack of clear communication around the change."
   confidence: 0.95
   quote: "Anysphere CEO Michael Truell apologized Friday for a 'confusing' pricing rollout."
   tags: [apology, communication]
+  fragments: [stakeholder-map, timeline]
 - claim: "The pricing change disproportionately affected heavy Claude Sonnet users."
   confidence: 0.7
   quote: "Power users on the Pro plan reported hitting limits within the first week."
   tags: [pricing, claude-sonnet]
+  fragments: [connections, open-questions]
 ```
 
 If the source doesn't address the sub-question, emit:

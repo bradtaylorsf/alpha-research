@@ -158,7 +158,15 @@ def test_create_writes_full_folder_layout(
     assert job.domain == "corporate"
 
     # All required subdirs exist.
-    for sub in ("plan", "findings", "sources", "synthesis", "critique", "report.history"):
+    for sub in (
+        "plan",
+        "findings",
+        "sources",
+        "synthesis",
+        "fragments",
+        "critique",
+        "report.history",
+    ):
         assert (job.root / sub).is_dir(), sub
 
     # Sidecar files.
@@ -525,6 +533,11 @@ def test_archive_and_soft_reset_wipes_subfolders_and_db(
     (job.root / "findings" / "000001.md").write_text("x", encoding="utf-8")
     (job.root / "plan" / "0001.md").write_text("x", encoding="utf-8")
     (job.root / "synthesis" / "0001.md").write_text("x", encoding="utf-8")
+    (job.root / "fragments" / "executive-summary").mkdir(parents=True)
+    (job.root / "fragments" / "executive-summary" / "0001.md").write_text(
+        "x",
+        encoding="utf-8",
+    )
     (job.root / "report.md").write_text("body", encoding="utf-8")
     (job.root / "events.jsonl").write_text('{"kind": "x"}\n', encoding="utf-8")
 
@@ -547,6 +560,24 @@ def test_archive_and_soft_reset_wipes_subfolders_and_db(
                 " VALUES (?, ?, ?, ?, ?)",
                 (job.id, now, "INFO", "drain_replan", "{}"),
             )
+            conn.execute(
+                """
+                INSERT INTO fragments (
+                    job_id, section_id, version, md_path, json_path,
+                    source_finding_ids, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.id,
+                    "executive-summary",
+                    1,
+                    "fragments/executive-summary/0001.md",
+                    "fragments/executive-summary/0001.json",
+                    "[]",
+                    "ok",
+                    now,
+                ),
+            )
     finally:
         conn.close()
 
@@ -559,6 +590,8 @@ def test_archive_and_soft_reset_wipes_subfolders_and_db(
     assert list((job.root / "plan").glob("*.md")) == []
     assert (job.root / "synthesis").is_dir()
     assert list((job.root / "synthesis").glob("*.md")) == []
+    assert (job.root / "fragments").is_dir()
+    assert list((job.root / "fragments").rglob("*.md")) == []
 
     # events.jsonl reset to empty.
     assert (job.root / "events.jsonl").read_text(encoding="utf-8") == ""
@@ -574,6 +607,9 @@ def test_archive_and_soft_reset_wipes_subfolders_and_db(
         event_count = conn.execute(
             "SELECT COUNT(*) AS c FROM events WHERE job_id = ?", (job.id,)
         ).fetchone()["c"]
+        fragment_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM fragments WHERE job_id = ?", (job.id,)
+        ).fetchone()["c"]
         job_row = conn.execute(
             "SELECT goal, status FROM jobs WHERE id = ?", (job.id,)
         ).fetchone()
@@ -583,6 +619,7 @@ def test_archive_and_soft_reset_wipes_subfolders_and_db(
     assert finding_count == 0
     assert plan_count == 0
     assert event_count == 0
+    assert fragment_count == 0
     # jobs row is re-inserted, in 'pending' status.
     assert job_row is not None
     assert job_row["goal"] == sample_intake["goal"]

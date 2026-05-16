@@ -12,6 +12,15 @@ from research_agent.orchestrator.critique import (
     critique,
 )
 from research_agent.orchestrator.errors import FatalError, RetriableError
+from research_agent.orchestrator.fragments import (
+    FRAGMENT_REGISTRY,
+    FragmentSpec,
+    all_fragments,
+    dependency_closure,
+    fragment_ids,
+    get_fragment,
+    synthesis_order,
+)
 from research_agent.orchestrator.loop import (
     HEURISTIC_CHECK_EVERY_N,
     MAX_TASKS_PER_JOB,
@@ -37,16 +46,20 @@ from research_agent.orchestrator.synth import (
     TOP_N_FINDINGS,
     SynthesisOutput,
     final_synthesis,
+    fragment_synth_enabled,
     synthesize,
+    synthesize_fragments,
 )
 
 __all__ = [
     "CHECKPOINT_KINDS",
     "FINAL_TOP_N",
+    "FRAGMENT_REGISTRY",
     "HEURISTIC_CHECK_EVERY_N",
     "CritiqueOutput",
     "Gap",
     "Handler",
+    "FragmentSpec",
     "MAX_PLAN_VERSIONS",
     "MAX_TASKS_PER_JOB",
     "Plan",
@@ -61,14 +74,21 @@ __all__ = [
     "TaskSpec",
     "FatalError",
     "RetriableError",
+    "all_fragments",
     "checkpoint",
     "cloud_replan",
     "critique",
     "default_handlers",
+    "dependency_closure",
     "final_synthesis",
+    "fragment_ids",
+    "fragment_synth_enabled",
+    "get_fragment",
     "initial_plan",
     "restore",
     "run_loop",
+    "synthesis_order",
     "synthesize",
+    "synthesize_fragments",
     "tactical_replan",
 ]

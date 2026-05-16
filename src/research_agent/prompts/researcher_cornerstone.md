@@ -1,5 +1,5 @@
 ---
-version: "1"
+version: "2"
 model_tier: general
 description: Structured-index extraction for cornerstone documents — uncapped, organized by section/heading.
 ---
@@ -52,6 +52,13 @@ Each item in `findings` is a mapping with these keys:
   or page reference. The orchestrator's tactical replan converts
   these tags into per-proposal sub-questions, so accuracy here drives
   the rest of the investigation.
+- `fragments`: optional list of canonical report fragment IDs this
+  finding should update. Use zero or more of:
+  `executive-summary`, `hypotheses`, `timeline`, `stakeholder-map`,
+  `connections`, `departmental-tracker`, `confirmed-gaps`,
+  `open-questions`, `recommended-human-followups`, `paid-resources`,
+  `sources`. Omit or use `[]` when unsure; the orchestrator applies a
+  conservative fallback.
 
 ### Rules — cornerstone mode
 
@@ -83,22 +90,27 @@ Leadership make, organized by department?" reading the document:
   confidence: 0.95
   quote: "Schedule F should be reinstated and expanded to cover all confidential and policy-determining positions."
   tags: [schedule-f, executive-office, ch.1]
+  fragments: [timeline, departmental-tracker]
 - claim: "The Mandate recommends abolishing the Department of Education and devolving its functions to the states."
   confidence: 0.95
   quote: "The Department of Education should be eliminated."
   tags: [education, abolition, ch.11]
+  fragments: [departmental-tracker, open-questions]
 - claim: "The Mandate calls for moving the FBI's headquarters and reducing its domestic-intelligence footprint."
   confidence: 0.9
   quote: "The FBI's domestic-intelligence operations should be wound down and its headquarters relocated."
   tags: [doj, fbi, ch.17]
+  fragments: [stakeholder-map, departmental-tracker]
 - claim: "The Mandate recommends withdrawing the United States from the Paris climate agreement."
   confidence: 0.95
   quote: "The next administration should withdraw the United States from the Paris Agreement."
   tags: [state, climate, ch.5]
+  fragments: [timeline, departmental-tracker]
 - claim: "The Mandate proposes that the EPA halt enforcement of greenhouse-gas regulations promulgated under the Clean Air Act."
   confidence: 0.9
   quote: "EPA should cease all enforcement actions premised on greenhouse-gas endangerment findings."
   tags: [epa, climate, ch.13]
+  fragments: [departmental-tracker, confirmed-gaps]
 ```
 
 ### Mapped form (with follow-up questions)
@@ -109,6 +121,7 @@ findings:
     confidence: 0.95
     quote: "Schedule F should be reinstated and expanded to cover all confidential and policy-determining positions."
     tags: [schedule-f, executive-office, ch.1]
+    fragments: [timeline, departmental-tracker]
 follow_up_questions:
   - "Has any agency issued draft regulations implementing Schedule F since January 2025?"
   - "Which courts have heard challenges to the Schedule F reinstatement?"

@@ -82,6 +82,7 @@ def test_run_intake_happy_path(mocker):
         "output_orientation",
         "aggressiveness",
         "corpus_path",
+        "fragments",
         "followup_qa",
     }
     assert result["goal"] == "ABC Corp"
@@ -92,6 +93,7 @@ def test_run_intake_happy_path(mocker):
     assert result["output_orientation"] == "internal brief"
     assert result["aggressiveness"] == "balanced"
     assert result["corpus_path"] is None
+    assert result["fragments"] is False
     assert result["followup_qa"] == []
 
 

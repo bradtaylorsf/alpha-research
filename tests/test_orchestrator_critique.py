@@ -19,12 +19,20 @@ from research_agent.orchestrator.critique import (
     Gap,
     PaidOpportunity,
     critique,
+    critique_fragments,
 )
 from research_agent.orchestrator.plan import Plan, Subgoal, TaskSpec
 from research_agent.prompts import loader as prompts_loader
 from research_agent.storage import db
 from research_agent.storage.jobs import Job
-from research_agent.storage.markdown import write_finding, write_plan, write_synthesis
+from research_agent.storage.markdown import (
+    latest_fragment_critique,
+    write_finding,
+    write_fragment,
+    write_fragment_critique,
+    write_plan,
+    write_synthesis,
+)
 from research_agent.storage.sources import write_source
 
 # `from research_agent.orchestrator import critique` would resolve to the
@@ -185,6 +193,21 @@ def _read_critique_rows(db_path: Path, job_id: str) -> list[dict[str, Any]]:
         rows = conn.execute(
             "SELECT version, md_path, model, cost_usd, should_replan, payload_json"
             " FROM critiques WHERE job_id = ? ORDER BY version ASC",
+            (job_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def _read_fragment_critique_rows(db_path: Path, job_id: str) -> list[dict[str, Any]]:
+    conn = db.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT section_id, fragment_version, version, md_path, json_path,"
+            " model, cost_usd, status, confidence, should_replan, payload_json"
+            " FROM fragment_critiques WHERE job_id = ?"
+            " ORDER BY section_id ASC, version ASC",
             (job_id,),
         ).fetchall()
     finally:
@@ -393,6 +416,208 @@ def test_critique_top_n_findings_passed_to_model(job: Job, db_path: Path, plan: 
     assert payload["goal"] == job.goal
 
 
+def test_critique_fragments_uses_bounded_section_context(
+    job: Job,
+    plan: Plan,
+) -> None:
+    sid_a = _seed_source(job, "https://example.com/connections", "connections source")
+    sid_b = _seed_source(job, "https://example.com/timeline", "timeline source")
+    fid = write_finding(
+        job,
+        "Connection claim",
+        0.9,
+        [sid_a],
+        target_fragments=["connections"],
+    )
+    write_finding(job, "Timeline claim", 0.9, [sid_b], target_fragments=["timeline"])
+    write_fragment(
+        job,
+        "stakeholder-map",
+        "## Stakeholder Map\n\nPrior stakeholders.",
+        source_finding_ids=[],
+        confidence=0.9,
+    )
+    write_fragment(
+        job,
+        "connections",
+        "## Connections\n\n- Connection claim.",
+        source_finding_ids=[fid],
+        confidence=0.9,
+    )
+    router = _StubRouter(output=CritiqueOutput())
+
+    asyncio.run(critique_fragments(job, plan, router=router))
+
+    payloads = [json.loads(call[1][0]) for call in router.calls]
+    connections_payload = next(p for p in payloads if p["section"]["id"] == "connections")
+    assert connections_payload["mode"] == "fragment_critique"
+    assert connections_payload["fragment"]["section_id"] == "connections"
+    assert connections_payload["fragment"]["content"].startswith("## Connections")
+    assert [finding["id"] for finding in connections_payload["findings"]] == [fid]
+    assert list(connections_payload["sources"].keys()) == [str(sid_a)]
+    assert "stakeholder-map" in connections_payload["dependency_fragments"]
+    assert "synthesis" not in connections_payload
+
+
+def test_critique_fragments_persists_sidecars_db_and_aggregate(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+) -> None:
+    sid = _seed_source(job, "https://example.com/timeline", "timeline source")
+    fid = write_finding(
+        job,
+        "Timeline claim",
+        0.9,
+        [sid],
+        target_fragments=["timeline"],
+    )
+    write_fragment(
+        job,
+        "timeline",
+        "## Timeline\n\n- Timeline claim.",
+        source_finding_ids=[fid],
+        confidence=0.9,
+    )
+    output = CritiqueOutput(
+        gaps=[Gap(description="timeline lacks date", severity="warn")],
+        unsupported_claims=["Timeline claim missing pinpoint source"],
+        suggested_subgoals=[],
+        confidence_concerns=[],
+        should_replan=False,
+    )
+    router = _StubRouter(output=output)
+
+    out = asyncio.run(critique_fragments(job, plan, router=router))
+
+    assert out.model == "fragment_critique_aggregate"
+    assert out.version == 1
+    assert out.md_path == "critique/0001.md"
+    assert out.cost_usd == pytest.approx(router.budget.last_cost)
+    rows = _read_fragment_critique_rows(db_path, job.id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["section_id"] == "timeline"
+    assert row["fragment_version"] == 1
+    assert row["md_path"] == "critique/fragments/timeline/0001.md"
+    assert row["json_path"] == "critique/fragments/timeline/0001.json"
+    assert row["status"] == "issues"
+    assert row["confidence"] == pytest.approx(0.7)
+    assert row["should_replan"] == 0
+    payload = json.loads(row["payload_json"])
+    assert payload["gaps"][0]["description"] == "timeline lacks date"
+
+    md = (job.root / "critique/fragments/timeline/0001.md").read_text(encoding="utf-8")
+    assert "Fragment Critique: timeline" in md
+    sidecar = json.loads(
+        (job.root / "critique/fragments/timeline/0001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert sidecar["status"] == "issues"
+    assert sidecar["confidence"] == pytest.approx(0.7)
+    assert latest_fragment_critique(job, "timeline")["fragment_version"] == 1
+    aggregate = _read_critique_rows(db_path, job.id)
+    assert aggregate[0]["model"] == "fragment_critique_aggregate"
+
+
+def test_critique_fragments_skips_unchanged_high_confidence_fragment(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+) -> None:
+    write_fragment(
+        job,
+        "timeline",
+        "## Timeline\n\n- Stable.",
+        source_finding_ids=[],
+        confidence=0.95,
+    )
+    write_fragment_critique(
+        job,
+        "timeline",
+        1,
+        payload=CritiqueOutput().model_dump(),
+        content="# Fragment Critique\n\nLooks good.",
+        model="moonshotai/kimi-k2",
+        status="ok",
+        confidence=0.95,
+        should_replan=False,
+    )
+    router = _StubRouter()
+
+    out = asyncio.run(critique_fragments(job, plan, router=router))
+
+    assert out.model == "fragment_critique_noop"
+    assert router.calls == []
+    rows = _read_fragment_critique_rows(db_path, job.id)
+    assert len(rows) == 1
+    events = _read_event_rows(db_path, job.id)
+    skipped = [e for e in events if e["kind"] == "fragment_critique_skipped"]
+    assert skipped
+    payload = json.loads(skipped[-1]["payload_json"])
+    assert payload["section_id"] == "timeline"
+    assert payload["reason"] == "unchanged_high_confidence"
+
+
+def test_critique_fragments_rechecks_low_confidence_fragment(
+    job: Job,
+    plan: Plan,
+) -> None:
+    write_fragment(
+        job,
+        "timeline",
+        "## Timeline\n\n- Low confidence.",
+        source_finding_ids=[],
+        confidence=0.4,
+    )
+    write_fragment_critique(
+        job,
+        "timeline",
+        1,
+        payload=CritiqueOutput().model_dump(),
+        content="# Fragment Critique\n\nPrior pass.",
+        model="moonshotai/kimi-k2",
+        status="ok",
+        confidence=0.95,
+        should_replan=False,
+    )
+    router = _StubRouter(output=CritiqueOutput())
+
+    asyncio.run(critique_fragments(job, plan, router=router))
+
+    assert len(router.calls) == 1
+
+
+def test_critique_fragments_budget_exceeded_continues_without_row(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+) -> None:
+    write_fragment(
+        job,
+        "timeline",
+        "## Timeline\n\n- Needs critique.",
+        source_finding_ids=[],
+    )
+    router = _StubRouter(
+        side_effect={
+            "frontier_alt": [BudgetExceeded(job.id, spent=10.0, cap=5.0)],
+        }
+    )
+
+    out = asyncio.run(critique_fragments(job, plan, router=router))
+
+    assert out.should_replan is False
+    assert out.model == "fragment_critique_noop"
+    assert _read_fragment_critique_rows(db_path, job.id) == []
+    events = _read_event_rows(db_path, job.id)
+    warning_payloads = [
+        json.loads(e["payload_json"]) for e in events if e["kind"] == "warning"
+    ]
+    assert any(p.get("stage") == "fragment:timeline" for p in warning_payloads)
+
+
 # ---------------------------------------------------------------------------
 # Loop integration test
 # ---------------------------------------------------------------------------
@@ -497,6 +722,84 @@ async def test_loop_critique_handler_triggers_cloud_replan(
     payload = json.loads(triggered[0]["payload_json"])
     assert payload["from_version"] == plan.version
     assert payload["critique_version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_loop_critique_handler_uses_fragment_critique_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+) -> None:
+    captured: dict[str, Any] = {}
+    new_plan = plan.model_copy(update={"version": plan.version + 1})
+
+    async def fake_fragment_critique(
+        job_arg: Job,
+        plan_arg: Plan,
+        *,
+        router: Any,
+        tier: str = "frontier_alt",
+    ) -> CritiqueOutput:
+        captured["fragment_called"] = True
+        captured["plan_version_in"] = plan_arg.version
+        from research_agent.storage.markdown import write_critique as _write_critique
+
+        payload = {
+            "gaps": [{"description": "fragment gap", "severity": "block", "area": None}],
+            "unsupported_claims": [],
+            "suggested_subgoals": ["new"],
+            "confidence_concerns": [],
+            "should_replan": True,
+        }
+        version = _write_critique(
+            job_arg,
+            payload=payload,
+            content="# Fragment Critique Summary\n\nNeeds a replan.\n",
+            model="fragment_critique_aggregate",
+            should_replan=True,
+        )
+        return CritiqueOutput(
+            gaps=[Gap(description="fragment gap", severity="block")],
+            unsupported_claims=[],
+            suggested_subgoals=["new"],
+            confidence_concerns=[],
+            should_replan=True,
+            version=version,
+            model="fragment_critique_aggregate",
+            md_path=f"critique/{version:04d}.md",
+        )
+
+    async def fake_cloud_replan(
+        job_arg: Job,
+        plan_arg: Plan,
+        critique_md: str,
+        *,
+        router: Any,
+    ) -> Plan:
+        captured["replan_called"] = True
+        captured["critique_md"] = critique_md
+        return new_plan
+
+    from research_agent.orchestrator import plan as plan_module
+    from research_agent.orchestrator import synth as synth_module
+
+    monkeypatch.setattr(synth_module, "fragment_synth_enabled", lambda: True)
+    monkeypatch.setattr(critique_module, "critique_fragments", fake_fragment_critique)
+    monkeypatch.setattr(plan_module, "cloud_replan", fake_cloud_replan)
+
+    handlers = loop_module.default_handlers(router=object())
+    result = await handlers["critique"](
+        job, {"id": -1, "kind": "critique", "payload": {}, "plan_version": plan.version}
+    )
+
+    assert captured["fragment_called"] is True
+    assert captured["replan_called"] is True
+    assert "Needs a replan" in captured["critique_md"]
+    assert result is not None
+    assert result["should_replan"] is True
+    events = _read_event_rows(db_path, job.id)
+    assert [e for e in events if e["kind"] == "replan_triggered"]
 
 
 # ---------------------------------------------------------------------------
