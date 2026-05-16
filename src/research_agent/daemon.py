@@ -77,7 +77,12 @@ def _atomic_write_text(path: Path, data: str) -> None:
     os.replace(tmp, path)
 
 
-def spawn_daemon(job_id: str, *, jobs_root: Path | str = DEFAULT_JOBS_ROOT) -> int:
+def spawn_daemon(
+    job_id: str,
+    *,
+    jobs_root: Path | str = DEFAULT_JOBS_ROOT,
+    env: dict[str, str] | None = None,
+) -> int:
     """Fork off the daemon for ``job_id``; return the child PID.
 
     Per §5.1: a plain :func:`subprocess.Popen` with ``start_new_session=True``
@@ -102,6 +107,7 @@ def spawn_daemon(job_id: str, *, jobs_root: Path | str = DEFAULT_JOBS_ROOT) -> i
     # Append-mode: re-launching the daemon must not clobber prior log lines.
     # The subprocess dups these fds into its own stdout/stderr; the parent's
     # copies are closed when the with-block exits.
+    child_env = None if env is None else {**os.environ, **env}
     with open(out_log, "ab") as out_fh, open(err_log, "ab") as err_fh:
         proc = subprocess.Popen(
             [sys.executable, "-m", "research_agent.daemon", job_id],
@@ -111,6 +117,7 @@ def spawn_daemon(job_id: str, *, jobs_root: Path | str = DEFAULT_JOBS_ROOT) -> i
             start_new_session=True,
             close_fds=True,
             cwd=Path.cwd(),
+            env=child_env,
         )
 
     _atomic_write_text(job_root / "daemon.pid", f"{proc.pid}\n")

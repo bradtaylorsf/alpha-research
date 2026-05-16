@@ -32,6 +32,7 @@ If #1 and #2 are no and #3 is yes — the change is out of scope.
 | Orchestrator `task_kind`/dispatch handler edits on a connector PR | Remove unless the issue asks for orchestrator wiring. |
 | Critique-model field additions on a non-critique PR | Remove. |
 | Plan/synth prompt rewrites on a non-prompt PR | Remove. |
+| Broad contract docs, public API wrappers, or service-surface changes on a narrow MCP/HTTP issue | Split unless the issue explicitly names that contract surface. |
 
 ## When in-scope work reveals a needed change elsewhere
 

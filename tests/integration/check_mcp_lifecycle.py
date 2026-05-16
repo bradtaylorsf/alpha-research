@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import sys
 
 import anyio
@@ -23,14 +22,10 @@ EXPECTED = {
 
 
 async def _main() -> None:
-    executable = shutil.which("research-mcp")
-    if executable:
-        params = StdioServerParameters(command=executable)
-    else:
-        params = StdioServerParameters(
-            command=sys.executable,
-            args=["-m", "research_agent.mcp.server"],
-        )
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "research_agent.mcp.server"],
+    )
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()

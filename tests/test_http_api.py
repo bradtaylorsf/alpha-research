@@ -10,6 +10,7 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from research_agent import daemon as daemon_mod  # noqa: E402
 from research_agent.errors import InvalidGoal, JobAlreadyRunning  # noqa: E402
 from research_agent.http import server  # noqa: E402
 from research_agent.storage import db  # noqa: E402
@@ -31,8 +32,8 @@ def test_http_lifecycle_routes_delegate_to_programmatic_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     jobs_root = tmp_path / "jobs"
-    monkeypatch.setattr(server.public_api.daemon, "spawn_daemon", lambda _job_id, **_kw: 4242)
-    monkeypatch.setattr(server.public_api.daemon, "is_daemon_alive", lambda *_a, **_kw: False)
+    monkeypatch.setattr(daemon_mod, "spawn_daemon", lambda _job_id, **_kw: 4242)
+    monkeypatch.setattr(daemon_mod, "is_daemon_alive", lambda *_a, **_kw: False)
     client = TestClient(server.create_app(jobs_root=jobs_root, db_path=db_path))
 
     started = client.post(

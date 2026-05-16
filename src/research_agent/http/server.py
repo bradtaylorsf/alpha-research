@@ -186,7 +186,7 @@ def get_report(job_id: str, context: ContextDep) -> public_api.ReportResult:
     response_model=list[public_api.FindingResult],
 )
 def get_findings(job_id: str, context: ContextDep) -> list[public_api.FindingResult]:
-    return public_api.get_findings(job_id, jobs_root=context.jobs_root)
+    return public_api.get_findings(job_id, jobs_root=context.jobs_root, db_path=context.db_path)
 
 
 @router.post(

@@ -16,6 +16,7 @@ When reviewing code changes (PR review, post-implementation review).
 - [ ] All acceptance criteria met
 - [ ] No scope creep (unnecessary changes)
 - [ ] Edge cases handled
+- [ ] Public entry points stay lightweight: `import research_agent`, MCP server import, and HTTP wrapper import do not eagerly load daemon/LLM/orchestrator stacks unless needed
 
 ### 2. Code Quality
 - [ ] Follows project conventions (check CLAUDE.md)
@@ -28,6 +29,7 @@ When reviewing code changes (PR review, post-implementation review).
 - [ ] No SQL injection (use parameterized queries)
 - [ ] No XSS (sanitize user input)
 - [ ] No command injection (validate shell args)
+- [ ] Public job/file identifiers are validated before fallback folder scanning, and sidecar paths cannot traverse outside the job folder
 - [ ] Auth/authz checks in place
 - [ ] No secrets in code
 
@@ -41,6 +43,7 @@ When reviewing code changes (PR review, post-implementation review).
 - [ ] No N+1 queries
 - [ ] No unnecessary re-renders
 - [ ] Large lists paginated
+- [ ] Source/citation lookups use stable IDs rather than filename or ordering assumptions
 
 ## Action on Findings
 

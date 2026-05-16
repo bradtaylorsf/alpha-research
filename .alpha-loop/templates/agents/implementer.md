@@ -41,6 +41,7 @@ This repo is Python 3.12 + uv + pytest + Playwright. Not TypeScript. Not pnpm. T
   ```
   If it fails on main with the same error, it is pre-existing and unrelated to your diff — note it in the commit/PR body, do not burn retries trying to fix it. (Issue #117 cost two retry cycles on `test_cli.py::test_start_skip_intake_*` failures that already existed on main; #156 similar.)
 - **For new connectors / tools, ensure `setup_command` installs the CLI globally.** The verifier shells out as `/bin/sh -c "research _smoke-tool ..."`, not `uv run research ...` — so `uv tool install -e .` is required, not just `uv pip install -e .`.
+- **Public service surfaces must pass a lightweight-import audit.** For changes to `research_agent.__init__`, `research_agent.api`, `research_agent.mcp`, or `research_agent.http`, verify that simple imports do not eagerly load daemon, LLM, or orchestrator stacks. Prefer lazy imports for start/resume-only dependencies.
 - **Validate Playwright selectors against live DOM for every distinct page type.** A connector with working `search()` selectors and reused but unverified `fetch()` profile selectors will silently return `?` placeholders (#101 CA SoS, #95 BBB rollup). Live-verify each page type, not just the entry page.
 - **Verify URL constants against the actual upstream schema.** Test fixtures that mirror the parser's expected shape can hide URL/schema mismatches that would index zero entries in production (#116 SDN advanced XML pointing at relational `<DistinctParty>` schema while parser expected flat `<sdnEntry>`). Cross-check the URL's documented schema against what the parser consumes.
 - **Trusted-host validation must use exact match or proper suffix** (`netloc == host or netloc.endswith("." + host)`). Substring `"host.com" in netloc` is spoofable.
@@ -62,6 +63,7 @@ Before your final commit, answer each question explicitly. If any answer is "no"
 5. **CLI surface:** For every new verb / subcommand in `cli.py`, did I update `README.md`?
 6. **Pre-existing failures:** If tests are failing, did I confirm they fail on `origin/main` before retrying? If yes, did I note them rather than burn retries?
 7. **Selector coverage:** For Playwright connectors, did I live-verify selectors for every distinct page type (search, profile, detail), not just the entry page?
+8. **Lightweight imports:** For public API/MCP/HTTP changes, did I verify import side effects and avoid process-global state mutation for per-request settings?
 
 ## Code Style
 
