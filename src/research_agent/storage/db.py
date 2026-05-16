@@ -140,6 +140,27 @@ CREATE TABLE IF NOT EXISTS fragments (
 CREATE INDEX IF NOT EXISTS idx_fragments_job_section
     ON fragments(job_id, section_id);
 
+-- Section-level critique passes
+CREATE TABLE IF NOT EXISTS fragment_critiques (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES jobs(id),
+    section_id TEXT NOT NULL,
+    fragment_version INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    md_path TEXT NOT NULL,
+    json_path TEXT NOT NULL,
+    model TEXT NOT NULL,
+    cost_usd REAL,
+    status TEXT NOT NULL,
+    confidence REAL,
+    should_replan INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(job_id, section_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_fragment_critiques_job_section
+    ON fragment_critiques(job_id, section_id);
+
 -- Critique passes (paired with syntheses; uses a different model tier)
 CREATE TABLE IF NOT EXISTS critiques (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -450,6 +471,33 @@ def _migrate_fragments_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_fragment_critiques_table(conn: sqlite3.Connection) -> None:
+    """Create the section-fragment critique ledger for DBs before issue #328."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS fragment_critiques (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL REFERENCES jobs(id),
+            section_id TEXT NOT NULL,
+            fragment_version INTEGER NOT NULL,
+            version INTEGER NOT NULL,
+            md_path TEXT NOT NULL,
+            json_path TEXT NOT NULL,
+            model TEXT NOT NULL,
+            cost_usd REAL,
+            status TEXT NOT NULL,
+            confidence REAL,
+            should_replan INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE(job_id, section_id, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fragment_critiques_job_section
+            ON fragment_critiques(job_id, section_id);
+        """
+    )
+
+
 def migrate(
     conn: sqlite3.Connection | None = None,
     *,
@@ -471,4 +519,5 @@ def migrate(
         _migrate_hypotheses_table(conn)
         _migrate_coverage_units_table(conn)
         _migrate_fragments_table(conn)
+        _migrate_fragment_critiques_table(conn)
     return conn

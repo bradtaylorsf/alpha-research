@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import time
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -14,21 +15,26 @@ from typer.testing import CliRunner
 from research_agent import __version__, cli, config
 from research_agent.storage import artifacts, db, hypotheses
 from research_agent.storage.jobs import RESUME_REPLAN_FILE, Job
+from research_agent.storage.markdown import assemble_report, write_fragment, write_report
 from research_agent.ui import render
 
 
 @pytest.fixture(autouse=True)
 def _reset_env_loader(monkeypatch):
     """Force env discovery to start clean for each invocation."""
-    for key in (
+    env_keys = (
         "OPENROUTER_API_KEY",
         "RESEARCH_USER_AGENT",
         "RESEARCH_HEADFUL",
+        "RESEARCH_FRAGMENT_SYNTH",
         "LMSTUDIO_BASE_URL",
-    ):
-        monkeypatch.delenv(key, raising=False)
+    )
+    for key in env_keys:
+        os.environ.pop(key, None)
     config.reset_for_tests()
     yield
+    for key in env_keys:
+        os.environ.pop(key, None)
     config.reset_for_tests()
 
 
@@ -260,6 +266,37 @@ def test_start_translate_non_english_flag_is_persisted(
     assert intake_data["translate_non_english"] is True
 
 
+def test_start_fragments_flag_sets_env_and_intake(
+    isolated_jobs_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, str | None] = {}
+
+    def _fake_spawn(_job_id: str) -> int:
+        captured["fragment_env"] = os.environ.get("RESEARCH_FRAGMENT_SYNTH")
+        return 12345
+
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", _fake_spawn)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        [
+            "start",
+            "--skip-intake",
+            "--goal",
+            "Fragment rollout target",
+            "--fragments",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert captured["fragment_env"] == "1"
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    job_root = isolated_jobs_repo / "jobs" / f"{today}-fragment-rollout-target"
+    intake_data = json.loads((job_root / "intake.json").read_text(encoding="utf-8"))
+    assert intake_data["fragments"] is True
+
+
 def test_start_inbox_flag_is_persisted(isolated_jobs_repo: Path, monkeypatch) -> None:
     monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 12345)
 
@@ -349,10 +386,11 @@ def test_start_runs_intake_when_not_skipped(isolated_jobs_repo: Path, monkeypatc
 
     captured: dict[str, object] = {}
 
-    def _fake_run_intake(*, corpus=None, budget_usd=None, time_cap=None):
+    def _fake_run_intake(*, corpus=None, budget_usd=None, time_cap=None, fragments=False):
         captured["corpus"] = corpus
         captured["budget_usd"] = budget_usd
         captured["time_cap"] = time_cap
+        captured["fragments"] = fragments
         return canned
 
     monkeypatch.setattr(cli.intake, "run_intake", _fake_run_intake)
@@ -385,6 +423,7 @@ def test_start_runs_intake_when_not_skipped(isolated_jobs_repo: Path, monkeypatc
     # CLI flags must be forwarded to the intake helper as defaults.
     assert captured["budget_usd"] == 25.0
     assert captured["time_cap"] == 12
+    assert captured["fragments"] is False
 
 
 def test_start_skip_intake_requires_goal(isolated_jobs_repo: Path):
@@ -655,6 +694,24 @@ def test_view_report_default_when_no_flag(isolated_jobs_repo: Path):
     result = runner.invoke(cli.app, ["view", job.id], env={"EDITOR": ""})
     assert result.exit_code == 0, result.stdout
     assert "default-report-body" in result.stdout
+
+
+def test_view_report_reads_assembled_fragment_report(isolated_jobs_repo: Path):
+    job = _make_synthetic_job(isolated_jobs_repo)
+    write_fragment(
+        job,
+        "executive-summary",
+        "## Executive Summary\n\n- Assembled fragment.",
+        source_finding_ids=[],
+    )
+    write_report(job, assemble_report(job))
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["view", job.id], env={"EDITOR": ""})
+
+    assert result.exit_code == 0, result.stdout
+    assert "## Executive Summary" in result.stdout
+    assert "Assembled fragment" in result.stdout
 
 
 def test_view_report_missing_fails_clearly(isolated_jobs_repo: Path):
@@ -1825,6 +1882,86 @@ def test_compare_two_job_ids_emits_delta_table(isolated_jobs_repo: Path):
     assert "EPA" in out
 
 
+def test_compare_fragment_jobs_emits_fragment_delta_table(isolated_jobs_repo: Path):
+    job_a = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="alpha fragments",
+        today=date(2026, 5, 1),
+        report_text="## Timeline\n\nold\n",
+    )
+    job_b = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="beta fragments",
+        today=date(2026, 5, 2),
+        report_text="## Timeline\n\nnew\n",
+    )
+    write_fragment(job_a, "timeline", "## Timeline\n\nold", source_finding_ids=[])
+    write_fragment(
+        job_a,
+        "stakeholder-map",
+        "## Stakeholder Map\n\nremoved",
+        source_finding_ids=[],
+    )
+    write_fragment(job_b, "timeline", "## Timeline\n\nnew", source_finding_ids=[])
+    write_fragment(
+        job_b,
+        "open-questions",
+        "## Open Questions\n\nadded",
+        source_finding_ids=[],
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["compare", job_a.id, job_b.id])
+
+    assert result.exit_code == 0, result.stdout
+    assert "Fragment delta" in result.stdout
+    assert "timeline" in result.stdout
+    assert "stakeholder-map" in result.stdout
+    assert "open-questions" in result.stdout
+
+
+def test_compare_fragment_json_includes_stable_delta(isolated_jobs_repo: Path):
+    job_a = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="alpha fragment json",
+        today=date(2026, 5, 1),
+        report_text="## Timeline\n\nold\n",
+    )
+    job_b = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="beta fragment json",
+        today=date(2026, 5, 2),
+        report_text="## Timeline\n\nnew\n",
+    )
+    write_fragment(job_a, "timeline", "## Timeline\n\nold", source_finding_ids=[])
+    write_fragment(
+        job_a,
+        "stakeholder-map",
+        "## Stakeholder Map\n\nremoved",
+        source_finding_ids=[],
+    )
+    write_fragment(job_b, "timeline", "## Timeline\n\nnew", source_finding_ids=[])
+    write_fragment(
+        job_b,
+        "open-questions",
+        "## Open Questions\n\nadded",
+        source_finding_ids=[],
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["compare", job_a.id, job_b.id, "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    fragments = payload["deltas"]["fragments"]
+    assert set(fragments) == {"timeline", "stakeholder-map", "open-questions"}
+    assert fragments["timeline"]["status"] == "changed"
+    assert fragments["timeline"]["a_version"] == 1
+    assert fragments["timeline"]["b_version"] == 1
+    assert fragments["stakeholder-map"]["status"] == "removed"
+    assert fragments["open-questions"]["status"] == "added"
+
+
 def test_compare_paths_to_archived_reports(isolated_jobs_repo: Path, tmp_path: Path):
     """Bare filesystem paths work even when the originating job rows are gone."""
     a_path = tmp_path / "report-a.md"
@@ -1851,6 +1988,7 @@ def test_compare_paths_to_archived_reports(isolated_jobs_repo: Path, tmp_path: P
     assert payload["a"]["sources"] == 1
     assert payload["b"]["sources"] == 2
     assert "EPA" in payload["deltas"]["departments_added"]
+    assert "fragments" not in payload["deltas"]
 
 
 def test_compare_json_emits_parseable_payload(isolated_jobs_repo: Path):
@@ -1883,6 +2021,35 @@ def test_compare_json_emits_parseable_payload(isolated_jobs_repo: Path):
     }
     assert expected_keys <= payload["a"].keys()
     assert expected_keys <= payload["b"].keys()
+    assert "fragments" not in payload["deltas"]
+
+
+def test_compare_archived_report_path_omits_fragment_delta(isolated_jobs_repo: Path):
+    job_a = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="alpha archived fragments",
+        today=date(2026, 5, 1),
+        report_text="## Timeline\n\nold\n",
+    )
+    job_b = _seed_compare_job(
+        isolated_jobs_repo,
+        goal="beta archived fragments",
+        today=date(2026, 5, 2),
+        report_text="## Timeline\n\nnew\n",
+    )
+    write_fragment(job_a, "timeline", "## Timeline\n\nold", source_finding_ids=[])
+    write_fragment(job_b, "timeline", "## Timeline\n\nnew", source_finding_ids=[])
+    archive_dir = job_a.root / "archive"
+    archive_dir.mkdir(exist_ok=True)
+    archived = archive_dir / "report-20260501T000000Z.md"
+    archived.write_text((job_a.root / "report.md").read_text(encoding="utf-8"))
+
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["compare", str(archived), job_b.id, "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert "fragments" not in payload["deltas"]
 
 
 def test_compare_side_by_side_invokes_pager(isolated_jobs_repo: Path, monkeypatch):

@@ -14,8 +14,10 @@ writes go through the atomic ``*.tmp`` + :func:`os.replace` pattern from
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +29,12 @@ from research_agent.storage.jobs import Job, _atomic_write_json, _atomic_write_t
 
 def _now_epoch() -> int:
     return int(time.time())
+
+
+_CITATION_RE = re.compile(r"\[(\d+(?:,\s*\d+)*)\]")
+_SOURCES_HEADING_RE = re.compile(r"^##\s+Sources\s*$", re.MULTILINE)
+_NUMBERED_LINE_RE = re.compile(r"^(\d+)\.\s", re.MULTILINE)
+_EMPTY_ASSEMBLED_REPORT = "# Report\n\n_No report fragments are available yet._\n"
 
 
 def _validate_confidence(value: Any) -> float:
@@ -229,6 +237,18 @@ def _next_fragment_version(conn: Any, job_id: str, section_id: str) -> int:
         """
         SELECT COALESCE(MAX(version), 0) + 1 AS next
         FROM fragments
+        WHERE job_id = ? AND section_id = ?
+        """,
+        (job_id, section_id),
+    ).fetchone()
+    return int(row["next"])
+
+
+def _next_fragment_critique_version(conn: Any, job_id: str, section_id: str) -> int:
+    row = conn.execute(
+        """
+        SELECT COALESCE(MAX(version), 0) + 1 AS next
+        FROM fragment_critiques
         WHERE job_id = ? AND section_id = ?
         """,
         (job_id, section_id),
@@ -487,6 +507,129 @@ def latest_fragments(job: Job) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _format_source_line(source_id: int, source: dict[str, Any]) -> str:
+    url = source.get("url") or "(no url)"
+    title = source.get("title") or "(untitled)"
+    fetched_at = source.get("fetched_at")
+    if fetched_at is None:
+        date_str = "unknown"
+    else:
+        date_str = datetime.fromtimestamp(int(fetched_at), tz=UTC).strftime("%Y-%m-%d")
+    return f'{source_id}. {url} — "{title}" (retrieved {date_str})'
+
+
+def reconcile_report_sources(
+    md: str,
+    sources_by_id: dict[int, dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Append inline-cited source IDs missing from the bottom Sources section.
+
+    The returned metadata mirrors the existing synthesis event payload shape
+    without emitting events, which keeps this helper deterministic and usable
+    from pure storage assembly code.
+    """
+
+    headings = list(_SOURCES_HEADING_RE.finditer(md))
+    if headings:
+        last = headings[-1]
+        body_text = md[: last.start()]
+        sources_text = md[last.start() :]
+    else:
+        body_text = md
+        sources_text = ""
+
+    cited_in_body: list[int] = []
+    seen: set[int] = set()
+    for match in _CITATION_RE.finditer(body_text):
+        for token in match.group(1).split(","):
+            try:
+                sid = int(token.strip())
+            except ValueError:
+                continue
+            if sid not in seen:
+                seen.add(sid)
+                cited_in_body.append(sid)
+
+    enumerated: set[int] = set()
+    for match in _NUMBERED_LINE_RE.finditer(sources_text):
+        try:
+            enumerated.add(int(match.group(1)))
+        except ValueError:
+            continue
+
+    missing = [sid for sid in cited_in_body if sid not in enumerated]
+    added: list[int] = []
+    unresolved: list[int] = []
+    new_lines: list[str] = []
+    for sid in missing:
+        source = sources_by_id.get(sid)
+        if source is None:
+            unresolved.append(sid)
+            continue
+        added.append(sid)
+        new_lines.append(_format_source_line(sid, source))
+
+    metadata = {
+        "added": added,
+        "unresolved": unresolved,
+        "already_listed": len(enumerated),
+        "cited_total": len(cited_in_body),
+    }
+    if not new_lines:
+        return md, metadata
+
+    suffix = "\n".join(new_lines) + "\n"
+    if md.endswith("\n"):
+        return md + suffix, metadata
+    return md + "\n" + suffix, metadata
+
+
+def assemble_report(
+    job: Job,
+    *,
+    sources_by_id: dict[int, dict[str, Any]] | None = None,
+) -> str:
+    """Assemble the latest report fragments in canonical registry order.
+
+    Missing registered sections are skipped without a marker so partially
+    synthesized jobs can still produce a stable public ``report.md``. If no
+    fragments exist yet, a fixed placeholder is returned. When ``sources_by_id``
+    is supplied, inline citations missing from the bottom Sources section are
+    reconciled deterministically using those source rows.
+    """
+    from research_agent.orchestrator.fragments import all_fragments
+
+    fragments = latest_fragments(job)
+    parts: list[str] = []
+    for fragment in all_fragments():
+        item = fragments.get(fragment.id)
+        if item is None:
+            continue
+        content = str(item.get("content") or "").strip()
+        if content:
+            parts.append(content)
+
+    assembled = "\n\n".join(parts).rstrip() + "\n" if parts else _EMPTY_ASSEMBLED_REPORT
+    if sources_by_id is None:
+        return assembled
+    reconciled, _metadata = reconcile_report_sources(assembled, sources_by_id)
+    return reconciled
+
+
+def fragment_digests(job: Job) -> dict[str, dict[str, Any]]:
+    """Return latest fragment version/content hashes in registry order."""
+
+    fragments = latest_fragments(job)
+    out: dict[str, dict[str, Any]] = {}
+    for section_id, item in fragments.items():
+        content = str(item.get("content") or "")
+        out[section_id] = {
+            "version": int(item["version"]),
+            "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        }
+    return out
+
+
 def _render_failed_synthesis_md(
     *,
     version: int,
@@ -635,6 +778,136 @@ def write_critique(
     return version
 
 
+def write_fragment_critique(
+    job: Job,
+    section_id: str,
+    fragment_version: int,
+    *,
+    payload: dict[str, Any],
+    content: str,
+    model: str,
+    cost_usd: float | None = None,
+    status: str = "ok",
+    confidence: float | None = None,
+    should_replan: bool = False,
+) -> int:
+    """Write the next critique version for one persisted report fragment."""
+    _fragment_spec(section_id)
+    if (
+        isinstance(fragment_version, bool)
+        or not isinstance(fragment_version, int)
+        or fragment_version < 1
+    ):
+        raise ValueError(
+            "fragment_version must be a positive int; "
+            f"got {fragment_version!r}"
+        )
+    if not isinstance(payload, dict):
+        raise ValueError(f"payload must be a dict; got {type(payload).__name__}")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("content must be a non-empty string")
+    for field_name, value in (("model", model), ("status", status)):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field_name} must be a non-empty string")
+    if cost_usd is not None and (
+        isinstance(cost_usd, bool) or not isinstance(cost_usd, (int, float))
+    ):
+        raise ValueError(f"cost_usd must be a number or None; got {cost_usd!r}")
+    if confidence is not None:
+        confidence = _validate_confidence(confidence)
+
+    now = _now_epoch()
+    cost = float(cost_usd) if cost_usd is not None else None
+    payload_json = json.dumps(payload, sort_keys=True, default=str)
+
+    conn = db.connect(job.db_path)
+    try:
+        with conn:
+            version = _next_fragment_critique_version(conn, job.id, section_id)
+            md_rel = f"critique/fragments/{section_id}/{version:04d}.md"
+            json_rel = f"critique/fragments/{section_id}/{version:04d}.json"
+            sidecar = {
+                "job_id": job.id,
+                "section_id": section_id,
+                "fragment_version": fragment_version,
+                "version": version,
+                "md_path": md_rel,
+                "json_path": json_rel,
+                "model": model,
+                "cost_usd": cost,
+                "status": status,
+                "confidence": confidence,
+                "should_replan": bool(should_replan),
+                "payload": payload,
+                "created_at": now,
+            }
+
+            md_body = content if content.endswith("\n") else content + "\n"
+            _atomic_write_text(job.root / md_rel, md_body)
+            _atomic_write_json(job.root / json_rel, sidecar)
+
+            conn.execute(
+                """
+                INSERT INTO fragment_critiques (
+                    job_id, section_id, fragment_version, version, md_path, json_path,
+                    model, cost_usd, status, confidence, should_replan,
+                    payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.id,
+                    section_id,
+                    fragment_version,
+                    version,
+                    md_rel,
+                    json_rel,
+                    model,
+                    cost,
+                    status,
+                    confidence,
+                    1 if should_replan else 0,
+                    payload_json,
+                    now,
+                ),
+            )
+    finally:
+        conn.close()
+
+    return version
+
+
+def latest_fragment_critique(job: Job, section_id: str) -> dict[str, Any] | None:
+    """Load the latest persisted critique for one report fragment."""
+    _fragment_spec(section_id)
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT id, job_id, section_id, fragment_version, version, md_path,
+                   json_path, model, cost_usd, status, confidence, should_replan,
+                   payload_json, created_at
+            FROM fragment_critiques
+            WHERE job_id = ? AND section_id = ?
+            ORDER BY version DESC
+            LIMIT 1
+            """,
+            (job.id, section_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+
+    md_path = job.root / row["md_path"]
+    if not md_path.exists():
+        return None
+    item = dict(row)
+    item["should_replan"] = bool(item["should_replan"])
+    item["payload"] = json.loads(item["payload_json"]) if item["payload_json"] else {}
+    item["content"] = md_path.read_text(encoding="utf-8")
+    return item
+
+
 def _rotate_report_to(history_dir: Path, report_path: Path, *, prefix: str = "") -> Path | None:
     """Rotate ``report_path`` into ``history_dir`` as ``<prefix><stamp>[-N].md``.
 
@@ -672,9 +945,14 @@ def write_report(job: Job, content: str) -> Path:
 
 
 __all__ = [
+    "assemble_report",
+    "fragment_digests",
     "latest_fragment",
+    "latest_fragment_critique",
     "latest_fragments",
+    "reconcile_report_sources",
     "write_fragment",
+    "write_fragment_critique",
     "write_critique",
     "write_finding",
     "write_finding_translation",

@@ -160,7 +160,7 @@ def _collect_followups(answers_so_far: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _render_summary(intake: dict[str, Any]) -> Panel:
-    """Render the 5-line confirmation summary before spawning the daemon."""
+    """Render the confirmation summary before spawning the daemon."""
     time_cap = intake.get("time_cap")
     budget = intake.get("budget_usd")
     time_str = f"{time_cap}h" if isinstance(time_cap, int) else "open-ended"
@@ -169,6 +169,7 @@ def _render_summary(intake: dict[str, Any]) -> Panel:
         f"Goal: {intake['goal']}",
         f"Domain: {intake['domain']}",
         f"Caps: time={time_str}, budget={budget_str}",
+        f"Synthesis: {'fragments' if intake.get('fragments') else 'legacy'}",
         f"Output: {intake['output_orientation']} ({intake['aggressiveness']})",
         f"Follow-ups answered: {len(intake.get('followup_qa', []))}",
     ]
@@ -179,6 +180,7 @@ def run_intake(
     corpus: str | None = None,
     budget_usd: float | None = None,
     time_cap: int | None = None,
+    fragments: bool = False,
 ) -> dict[str, Any]:
     """Run the interactive intake flow and return a populated intake dict.
 
@@ -187,9 +189,9 @@ def run_intake(
     ``time_cap`` / ``budget_usd`` / ``corpus`` defaults; the user can still
     override any of them inside the flow.
 
-    Returns a dict with exactly nine keys: ``goal``, ``goal_one_sentence``,
+    Returns a dict with stable intake keys: ``goal``, ``goal_one_sentence``,
     ``domain``, ``time_cap``, ``budget_usd``, ``output_orientation``,
-    ``aggressiveness``, ``corpus_path``, ``followup_qa``.
+    ``aggressiveness``, ``corpus_path``, ``fragments``, ``followup_qa``.
     """
     console = Console()
 
@@ -270,6 +272,7 @@ def run_intake(
             "output_orientation": output_orientation,
             "aggressiveness": aggressiveness,
             "corpus_path": corpus_path,
+            "fragments": bool(fragments),
             "followup_qa": followup_qa,
         }
 

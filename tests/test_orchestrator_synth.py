@@ -26,6 +26,7 @@ from research_agent.prompts import loader as prompts_loader
 from research_agent.storage import artifacts, coverage, db, hypotheses
 from research_agent.storage.jobs import Job
 from research_agent.storage.markdown import (
+    assemble_report,
     latest_fragment,
     write_finding,
     write_fragment,
@@ -118,6 +119,7 @@ class _StubRouter:
 def _patch_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace pydantic_ai.Agent inside synth with a stub for every test."""
     _StubAgent.instances = []
+    monkeypatch.delenv("RESEARCH_FRAGMENT_SYNTH", raising=False)
     monkeypatch.setattr(synth_module, "Agent", _StubAgent)
 
 
@@ -426,6 +428,62 @@ def test_build_fragment_context_includes_dependency_fragments(job: Job, plan: Pl
     assert "Prior stakeholders" in payload["dependency_fragments"]["stakeholder-map"]["content"]
 
 
+def test_assemble_report_uses_registry_order(job: Job) -> None:
+    write_fragment(job, "timeline", "## Timeline\n\n- Later section.", source_finding_ids=[])
+    write_fragment(
+        job,
+        "executive-summary",
+        "## Executive Summary\n\n- First section.",
+        source_finding_ids=[],
+    )
+
+    assembled = assemble_report(job)
+
+    assert assembled == (
+        "## Executive Summary\n\n- First section.\n\n"
+        "## Timeline\n\n- Later section.\n"
+    )
+
+
+def test_assemble_report_skips_missing_sections(job: Job) -> None:
+    write_fragment(job, "timeline", "## Timeline\n\n- Only section.", source_finding_ids=[])
+
+    assembled = assemble_report(job)
+
+    assert "## Timeline" in assembled
+    assert "Working Hypotheses" not in assembled
+    assert "Stakeholder Map" not in assembled
+
+
+def test_assemble_report_empty_placeholder(job: Job) -> None:
+    assert assemble_report(job) == "# Report\n\n_No report fragments are available yet._\n"
+
+
+def test_assemble_report_can_reconcile_bottom_sources(job: Job) -> None:
+    sid = _seed_source(job, "https://example.com/source", "source body")
+    write_fragment(
+        job,
+        "executive-summary",
+        f"## Executive Summary\n\n- Cited claim [{sid}].",
+        source_finding_ids=[],
+    )
+    write_fragment(job, "sources", "## Sources\n", source_finding_ids=[])
+
+    assembled = assemble_report(
+        job,
+        sources_by_id={
+            sid: {
+                "url": "https://example.com/source",
+                "title": "Example source",
+                "fetched_at": 0,
+            }
+        },
+    )
+
+    assert f"{sid}. https://example.com/source" in assembled
+    assert assembled.endswith('(retrieved 1970-01-01)\n')
+
+
 def test_synthesize_fragments_writes_updates_and_events(
     job: Job,
     db_path: Path,
@@ -437,7 +495,7 @@ def test_synthesize_fragments_writes_updates_and_events(
 
     out = asyncio.run(synth_module.synthesize_fragments(job, plan, router=router))
 
-    assert out.model == "anthropic/claude-opus-4-7"
+    assert out.model == "fragment_assembly"
     assert [call[0] for call in router.calls] == ["frontier"]
     assert _StubAgent.instances[-1].system_prompt is not None
     assert "section-fragment synthesizer" in _StubAgent.instances[-1].system_prompt
@@ -446,6 +504,15 @@ def test_synthesize_fragments_writes_updates_and_events(
     assert fragment["content"] == "## Timeline\n\n- Timeline claim [1].\n"
     assert fragment["source_finding_ids"] == [fid]
     assert fragment["cited_source_ids"] == [sid]
+    report = job.root / "report.md"
+    assert report.exists()
+    assert out.report_path == str(report)
+    assert report.read_text(encoding="utf-8") == assemble_report(job)
+    rows = _read_synthesis_rows(db_path, job.id)
+    assert rows[0]["model"] == "fragment_assembly"
+    assert (job.root / rows[0]["md_path"]).read_text(encoding="utf-8") == report.read_text(
+        encoding="utf-8"
+    )
 
     events = _read_event_rows(db_path, job.id)
     event = next(e for e in events if e["kind"] == "fragment_update")
@@ -456,6 +523,26 @@ def test_synthesize_fragments_writes_updates_and_events(
     assert payload["tier"] == "frontier"
     assert payload["model"] == "anthropic/claude-opus-4-7"
     assert payload["cost_usd"] == pytest.approx(router.budget.last_cost)
+    written = next(e for e in events if e["kind"] == "synthesis_written")
+    written_payload = json.loads(written["payload_json"])
+    assert written_payload["mode"] == "fragments"
+    assert written_payload["fragment_versions"] == {"timeline": 1}
+
+
+def test_synthesize_fragments_rotates_prior_report(
+    job: Job,
+    plan: Plan,
+) -> None:
+    (job.root / "report.md").write_text("# Prior\n\nold body\n", encoding="utf-8")
+    write_finding(job, "Timeline claim", 0.9, [1], target_fragments=["timeline"])
+    router = _StubRouter(content="## Timeline\n\n- New section.\n")
+
+    asyncio.run(synth_module.synthesize_fragments(job, plan, router=router))
+
+    history = list((job.root / "report.history").glob("*.md"))
+    assert len(history) == 1
+    assert history[0].read_text(encoding="utf-8") == "# Prior\n\nold body\n"
+    assert (job.root / "report.md").read_text(encoding="utf-8") == assemble_report(job)
 
 
 def test_synthesize_fragments_budget_failure_keeps_prior_fragment(
@@ -473,11 +560,12 @@ def test_synthesize_fragments_budget_failure_keeps_prior_fragment(
 
     out = asyncio.run(synth_module.synthesize_fragments(job, plan, router=router))
 
-    assert out.model == "fragment_synthesis_noop"
+    assert out.model == "fragment_assembly"
     fragment = latest_fragment(job, "timeline")
     assert fragment is not None
     assert fragment["version"] == 1
     assert fragment["content"] == "## Timeline\n\nPrior.\n"
+    assert (job.root / "report.md").read_text(encoding="utf-8") == assemble_report(job)
     rows = _read_event_rows(db_path, job.id)
     assert not any(e["kind"] == "fragment_update" for e in rows)
     warning_payloads = [
@@ -526,17 +614,20 @@ def test_synthesize_fragments_second_pass_without_new_findings_is_noop(
     second = asyncio.run(synth_module.synthesize_fragments(job, plan, router=router))
 
     assert [call[0] for call in router.calls] == ["frontier"]
-    assert second.model == "fragment_synthesis_noop"
+    assert second.model == "fragment_assembly"
     assert latest_fragment(job, "timeline")["version"] == 1
+    assert (job.root / "report.md").read_text(encoding="utf-8") == second.content
+    assert second.content == assemble_report(job)
     fragment_updates = [
         e for e in _read_event_rows(db_path, job.id) if e["kind"] == "fragment_update"
     ]
     assert len(fragment_updates) == 1
-    assert first.model == "anthropic/claude-opus-4-7"
+    assert first.model == "fragment_assembly"
 
 
 def test_synthesize_fragment_mode_env_branches_from_legacy(
     job: Job,
+    db_path: Path,
     plan: Plan,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -546,9 +637,32 @@ def test_synthesize_fragment_mode_env_branches_from_legacy(
 
     out = asyncio.run(synthesize(job, plan, router=router))
 
-    assert out.report_path == str(job.root / "fragments")
+    assert out.report_path == str(job.root / "report.md")
     assert latest_fragment(job, "timeline") is not None
-    assert not (job.root / "report.md").exists()
+    assert (job.root / "report.md").read_text(encoding="utf-8") == assemble_report(job)
+    events = _read_event_rows(db_path, job.id)
+    mode_event = next(e for e in events if e["kind"] == "synthesis_mode")
+    payload = json.loads(mode_event["payload_json"])
+    assert payload["mode"] == "fragments"
+    assert payload["entrypoint"] == "synthesize_fragments"
+
+
+def test_synthesize_emits_legacy_mode_event(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RESEARCH_FRAGMENT_SYNTH", raising=False)
+    _seed_findings(job, [0.9])
+    router = _StubRouter()
+
+    asyncio.run(synthesize(job, plan, router=router))
+
+    events = _read_event_rows(db_path, job.id)
+    mode_event = next(e for e in events if e["kind"] == "synthesis_mode")
+    payload = json.loads(mode_event["payload_json"])
+    assert payload == {"mode": "legacy", "entrypoint": "synthesize", "final": False}
 
 
 def test_synthesize_budget_exceeded_falls_back_to_frontier_speed(

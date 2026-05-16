@@ -36,7 +36,6 @@ import re
 import sqlite3
 import traceback
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from importlib.resources import files
 from typing import TYPE_CHECKING, Any
 
@@ -49,7 +48,10 @@ from research_agent.observability.events import emit
 from research_agent.prompts.loader import load_prompt, load_prompt_meta
 from research_agent.storage import db
 from research_agent.storage.markdown import (
+    assemble_report,
     latest_fragment,
+    latest_fragments,
+    reconcile_report_sources,
     write_fragment,
     write_report,
     write_synthesis,
@@ -1428,21 +1430,7 @@ def _apply_subgoal_status(
     _plan_mod.update_subgoal_done(job, status_map)
 
 
-_CITATION_RE = re.compile(r"\[(\d+(?:,\s*\d+)*)\]")
 _SOURCES_HEADING_RE = re.compile(r"^##\s+Sources\s*$", re.MULTILINE)
-_NUMBERED_LINE_RE = re.compile(r"^(\d+)\.\s", re.MULTILINE)
-
-
-def _format_source_line(sid: int, src: dict[str, Any]) -> str:
-    """Render the canonical synthesizer Sources-section line shape (issue #207)."""
-    url = src.get("url") or "(no url)"
-    title = src.get("title") or "(untitled)"
-    fetched_at = src.get("fetched_at")
-    if fetched_at is None:
-        date_str = "unknown"
-    else:
-        date_str = datetime.fromtimestamp(int(fetched_at), tz=UTC).strftime("%Y-%m-%d")
-    return f'{sid}. {url} — "{title}" (retrieved {date_str})'
 
 
 def _reconcile_sources(
@@ -1463,69 +1451,12 @@ def _reconcile_sources(
     appended (``added``) and any IDs we couldn't resolve against
     ``sources_by_id`` (``unresolved``).
     """
-    headings = list(_SOURCES_HEADING_RE.finditer(md))
-    if headings:
-        last = headings[-1]
-        body_text = md[: last.start()]
-        sources_text = md[last.start() :]
-    else:
-        body_text = md
-        sources_text = ""
-
-    cited_in_body: list[int] = []
-    seen: set[int] = set()
-    for match in _CITATION_RE.finditer(body_text):
-        for token in match.group(1).split(","):
-            try:
-                sid = int(token.strip())
-            except ValueError:
-                continue
-            if sid not in seen:
-                seen.add(sid)
-                cited_in_body.append(sid)
-
-    enumerated: set[int] = set()
-    for match in _NUMBERED_LINE_RE.finditer(sources_text):
-        try:
-            enumerated.add(int(match.group(1)))
-        except ValueError:
-            continue
-
-    missing = [sid for sid in cited_in_body if sid not in enumerated]
-    if not missing:
+    reconciled, metadata = reconcile_report_sources(md, sources_by_id)
+    if not metadata["added"] and not metadata["unresolved"]:
         return md
 
-    added: list[int] = []
-    unresolved: list[int] = []
-    new_lines: list[str] = []
-    for sid in missing:
-        src = sources_by_id.get(sid)
-        if src is None:
-            unresolved.append(sid)
-            continue
-        added.append(sid)
-        new_lines.append(_format_source_line(sid, src))
-
-    emit(
-        job,
-        "INFO",
-        "synth",
-        "source_list_reconciled",
-        {
-            "added": added,
-            "unresolved": unresolved,
-            "already_listed": len(enumerated),
-            "cited_total": len(cited_in_body),
-        },
-    )
-
-    if not new_lines:
-        return md
-
-    suffix = "\n".join(new_lines) + "\n"
-    if md.endswith("\n"):
-        return md + suffix
-    return md + "\n" + suffix
+    emit(job, "INFO", "synth", "source_list_reconciled", metadata)
+    return reconciled
 
 
 async def _run_synth(
@@ -1651,6 +1582,20 @@ def fragment_synth_enabled() -> bool:
     """Return True when section-fragment synthesis is explicitly enabled."""
 
     return _env_flag_enabled("RESEARCH_FRAGMENT_SYNTH")
+
+
+def _emit_synthesis_mode(job: Job, *, mode: str, entrypoint: str, final: bool) -> None:
+    emit(
+        job,
+        "INFO",
+        "synth",
+        "synthesis_mode",
+        {
+            "mode": mode,
+            "entrypoint": entrypoint,
+            "final": final,
+        },
+    )
 
 
 def _load_fragment_findings(job: Job) -> list[dict[str, Any]]:
@@ -1939,18 +1884,46 @@ async def _run_fragment_synth(
             }
         )
 
-    summary = {
-        "mode": "fragments",
-        "stale_sections": list(stale_sections),
-        "updated_sections": updated,
-        "final": final,
+    assembled = assemble_report(job)
+    if _SOURCES_HEADING_RE.search(assembled):
+        assembled = _reconcile_sources(job, assembled, _load_sources_for(job, all_findings))
+    cost_usd = total_cost if saw_cost else None
+    version = write_synthesis(
+        job,
+        assembled,
+        model="fragment_assembly",
+        cost_usd=cost_usd,
+    )
+    synth_md = (job.root / f"synthesis/{version:04d}.md").read_text(encoding="utf-8")
+    report_path = write_report(job, synth_md)
+    fragment_versions = {
+        section_id: int(item["version"]) for section_id, item in latest_fragments(job).items()
     }
+    emit(
+        job,
+        "INFO",
+        "synth",
+        "synthesis_written",
+        {
+            "version": version,
+            "tier": tier,
+            "truncated": False,
+            "report_path": str(report_path),
+            "mode": "fragments",
+            "fragment_model": model_name,
+            "fragment_versions": fragment_versions,
+            "stale_sections": list(stale_sections),
+            "updated_sections": updated,
+            "final": final,
+        },
+    )
+
     return SynthesisOutput(
-        version=max((int(item["version"]) for item in updated), default=0),
-        content=json.dumps(summary, sort_keys=True),
-        model=model_name if updated else "fragment_synthesis_noop",
-        cost_usd=total_cost if saw_cost else None,
-        report_path=str(job.root / "fragments"),
+        version=version,
+        content=synth_md,
+        model="fragment_assembly",
+        cost_usd=cost_usd,
+        report_path=str(report_path),
         truncated=False,
     )
 
@@ -1962,8 +1935,9 @@ async def synthesize_fragments(
     router: Router,
     final: bool = False,
 ) -> SynthesisOutput:
-    """Run section-fragment synthesis without assembling ``report.md``."""
+    """Run section-fragment synthesis and deterministically assemble ``report.md``."""
 
+    _emit_synthesis_mode(job, mode="fragments", entrypoint="synthesize_fragments", final=final)
     return await _run_fragment_synth(job, plan, router=router, final=final)
 
 
@@ -2525,6 +2499,7 @@ async def synthesize(job: Job, plan: Plan, *, router: Router) -> SynthesisOutput
     """
     if fragment_synth_enabled():
         return await synthesize_fragments(job, plan, router=router, final=False)
+    _emit_synthesis_mode(job, mode="legacy", entrypoint="synthesize", final=False)
     return await _do_synthesis(
         job,
         plan,
@@ -2543,6 +2518,7 @@ async def final_synthesis(job: Job, plan: Plan, *, router: Router) -> SynthesisO
     """
     if fragment_synth_enabled():
         return await synthesize_fragments(job, plan, router=router, final=True)
+    _emit_synthesis_mode(job, mode="legacy", entrypoint="final_synthesis", final=True)
     return await _do_synthesis(
         job,
         plan,
@@ -2566,6 +2542,15 @@ async def final_synthesis_after_cap(
     blows the precheck (truly $0 left), :func:`_write_template_stub_output`
     renders a report from on-disk findings without making any LLM call.
     """
+    if fragment_synth_enabled():
+        return await synthesize_fragments(job, plan, router=router, final=True)
+    _emit_synthesis_mode(
+        job,
+        mode="legacy",
+        entrypoint="final_synthesis_after_cap",
+        final=True,
+    )
+
     findings = _load_top_findings(job, FINAL_TOP_N)
     sources = _load_sources_for(job, findings)
     prior = _load_prior_synthesis(job)

@@ -85,19 +85,26 @@ def check_env_keys() -> list[CheckResult]:
         # for runtime fallback, not for "is this configured" reporting.
         raw = os.environ.get(key.name)
         name = f"env:{key.name}"
+        suffix = (
+            " (controls section-fragment synthesis)"
+            if key.name == "RESEARCH_FRAGMENT_SYNTH"
+            else ""
+        )
         if raw:
             results.append(
                 CheckResult(
                     name,
                     "ok",
                     required=key.required,
-                    detail=f"present ({mask_secret(raw)})",
+                    detail=f"present ({mask_secret(raw)}){suffix}",
                 )
             )
         elif key.required:
             results.append(CheckResult(name, "fail", required=True, detail="missing (required)"))
         else:
-            results.append(CheckResult(name, "skip", required=False, detail="missing (optional)"))
+            results.append(
+                CheckResult(name, "skip", required=False, detail=f"missing (optional){suffix}")
+            )
     return results
 
 
