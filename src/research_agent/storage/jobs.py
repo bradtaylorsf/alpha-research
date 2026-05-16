@@ -3,8 +3,8 @@
 Implements the load-bearing convention from §4 of the implementation guide:
 every job is a self-contained folder under ``jobs/<job-id>/`` with a fixed
 sidecar layout (``job.json``, ``intake.json``, ``goal.md``, the ``plan/``,
-``findings/``, ``sources/``, ``synthesis/``, ``critique/``, ``report.history/``
-subfolders, and an append-only ``events.jsonl``). Transient control files
+``findings/``, ``sources/``, ``synthesis/``, ``fragments/``, ``critique/``,
+``report.history/`` subfolders, and an append-only ``events.jsonl``). Transient control files
 live next to those sidecars: ``STOP`` requests graceful shutdown and
 ``RESUME_REPLAN.json`` asks the daemon to run one tactical replan before
 resuming the queue. The cross-job ``jobs`` table in
@@ -49,6 +49,7 @@ _SUBDIRS = (
     "findings",
     "sources",
     "synthesis",
+    "fragments",
     "critique",
     "report.history",
     "archive",
@@ -58,7 +59,15 @@ _SUBDIRS = (
 )
 # Subdirs that get wiped on a soft reset; ``archive`` is preserved on purpose
 # so prior reports stay around for ``research compare``.
-_RESETTABLE_SUBDIRS = ("plan", "findings", "sources", "synthesis", "critique", "report.history")
+_RESETTABLE_SUBDIRS = (
+    "plan",
+    "findings",
+    "sources",
+    "synthesis",
+    "fragments",
+    "critique",
+    "report.history",
+)
 _JOB_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,59}$")
 _SLUG_FORBIDDEN = ("/", "\\", "..")
 
@@ -410,6 +419,7 @@ class Job:
                     "tasks",
                     "critiques",
                     "findings",
+                    "fragments",
                     "events",
                     "hypotheses",
                     "checkpoints",
