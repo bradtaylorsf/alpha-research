@@ -445,6 +445,32 @@ def test_assemble_report_uses_registry_order(job: Job) -> None:
     )
 
 
+def test_assemble_report_uses_dependency_safe_synthesis_order(
+    job: Job,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_agent.orchestrator import fragments as fragments_module
+
+    write_fragment(
+        job,
+        "executive-summary",
+        "## Executive Summary\n\n- Summary.",
+        source_finding_ids=[],
+    )
+    write_fragment(job, "timeline", "## Timeline\n\n- Timeline.", source_finding_ids=[])
+
+    monkeypatch.setattr(
+        fragments_module,
+        "synthesis_order",
+        lambda _subset=None: ("timeline", "executive-summary"),
+    )
+
+    assert assemble_report(job) == (
+        "## Timeline\n\n- Timeline.\n\n"
+        "## Executive Summary\n\n- Summary.\n"
+    )
+
+
 def test_assemble_report_skips_missing_sections(job: Job) -> None:
     write_fragment(job, "timeline", "## Timeline\n\n- Only section.", source_finding_ids=[])
 

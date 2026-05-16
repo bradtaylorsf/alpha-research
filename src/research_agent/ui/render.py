@@ -438,9 +438,9 @@ def _fragment_delta_rows(summary_a: Any, summary_b: Any) -> tuple[list[dict[str,
     if not fragments_a or not fragments_b:
         return [], False
 
-    from research_agent.orchestrator.fragments import all_fragments
+    from research_agent.orchestrator.fragments import synthesis_order
 
-    canonical_ids = [fragment.id for fragment in all_fragments()]
+    canonical_ids = list(synthesis_order())
     unknown_ids = sorted((set(fragments_a) | set(fragments_b)) - set(canonical_ids))
     rows: list[dict[str, Any]] = []
     for section_id in [*canonical_ids, *unknown_ids]:

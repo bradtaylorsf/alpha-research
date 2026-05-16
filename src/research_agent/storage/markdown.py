@@ -597,12 +597,12 @@ def assemble_report(
     is supplied, inline citations missing from the bottom Sources section are
     reconciled deterministically using those source rows.
     """
-    from research_agent.orchestrator.fragments import all_fragments
+    from research_agent.orchestrator.fragments import synthesis_order
 
     fragments = latest_fragments(job)
     parts: list[str] = []
-    for fragment in all_fragments():
-        item = fragments.get(fragment.id)
+    for section_id in synthesis_order():
+        item = fragments.get(section_id)
         if item is None:
             continue
         content = str(item.get("content") or "").strip()
@@ -621,7 +621,10 @@ def fragment_digests(job: Job) -> dict[str, dict[str, Any]]:
 
     fragments = latest_fragments(job)
     out: dict[str, dict[str, Any]] = {}
-    for section_id, item in fragments.items():
+    from research_agent.orchestrator.fragments import synthesis_order
+
+    for section_id in synthesis_order(fragments):
+        item = fragments[section_id]
         content = str(item.get("content") or "")
         out[section_id] = {
             "version": int(item["version"]),
