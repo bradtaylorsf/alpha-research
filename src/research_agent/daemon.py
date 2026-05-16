@@ -940,6 +940,18 @@ async def run_daemon(
         logger.error("daemon: cannot load job %r: %s", job_id, exc)
         return 1
 
+    # ``research start --fragments`` records ``intake.fragments`` and exports
+    # RESEARCH_FRAGMENT_SYNTH for the freshly spawned daemon. ``research
+    # resume`` (and any other restart path) spawns the daemon from a clean
+    # shell that no longer carries that env var, so without this the resumed
+    # daemon would silently revert a fragment job to legacy whole-report
+    # synthesis. Persisted intake is the source of truth on restart; only
+    # set (never clear) so an operator-wide opt-in still works.
+    if (job.intake or {}).get("fragments") and not os.environ.get(
+        "RESEARCH_FRAGMENT_SYNTH"
+    ):
+        os.environ["RESEARCH_FRAGMENT_SYNTH"] = "1"
+
     _sweep_orphan_artifacts(job)
 
     try:

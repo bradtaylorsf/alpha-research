@@ -790,6 +790,95 @@ async def test_run_daemon_fragment_resume_reassembles_latest_fragments(
 
 
 @pytest.mark.asyncio
+async def test_run_daemon_resume_honors_persisted_fragments_intake_without_env(
+    jobs_root_for_run: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume from a clean shell must keep fragment mode (regression).
+
+    ``research resume`` spawns the daemon from a shell that no longer carries
+    RESEARCH_FRAGMENT_SYNTH. The persisted ``intake.fragments`` flag is the
+    source of truth on restart, so the daemon must reassemble from fragments
+    rather than silently reverting to legacy whole-report synthesis.
+    """
+    monkeypatch.setenv("RESEARCH_DAEMON_SKIP_HEALTH_CHECKS", "1")
+    monkeypatch.delenv("RESEARCH_FRAGMENT_SYNTH", raising=False)
+    job = Job.create(
+        {"goal": "Investigate Widget Co", "budget_cap_usd": None, "fragments": True},
+        jobs_root=jobs_root_for_run,
+        db_path=db_path,
+    )
+    write_plan(
+        job,
+        Plan(
+            version=1,
+            objective="Investigate the target",
+            subgoals=[Subgoal(id=1, description="Gather", done=False)],
+            task_template=[TaskSpec(kind="web_search")],
+            expected_iterations=3,
+        ).model_dump(),
+    )
+    write_fragment(
+        job,
+        "timeline",
+        "## Timeline\n\n- Persisted before restart.",
+        source_finding_ids=[],
+    )
+
+    class _Router:
+        tiers = {"frontier": {"provider": "openrouter", "model": "fragment-model"}}
+        budget = None
+
+    async def _run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        write_plan(
+            job,
+            {
+                "version": 2,
+                "objective": "Investigation complete",
+                "subgoals": [{"id": 1, "description": "Gather", "done": True}],
+                "task_template": [],
+                "expected_iterations": 3,
+            },
+        )
+        return {"tasks_done": 0, "stopped": False, "completed": True, "cap_hit": False}
+
+    monkeypatch.setattr(daemon, "_build_router", lambda _job: _Router())
+    monkeypatch.setattr("research_agent.orchestrator.loop.run_loop", _run_loop)
+
+    try:
+        # ``run_daemon`` mutates ``os.environ`` directly (mirroring the
+        # spawned-daemon contract); monkeypatch will not revert that, so the
+        # finally below prevents leakage into sibling daemon tests.
+        exit_code = await daemon.run_daemon(
+            job.id,
+            jobs_root=job.root.parent,
+            db_path=job.db_path,
+        )
+
+        assert exit_code == 0
+        assert os.environ.get("RESEARCH_FRAGMENT_SYNTH") == "1"
+        conn = db.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT model FROM syntheses WHERE job_id = ? ORDER BY version DESC LIMIT 1",
+                (job.id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["model"] == "fragment_assembly"
+        events = [
+            json.loads(line)
+            for line in (job.root / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        mode_events = [event for event in events if event["kind"] == "synthesis_mode"]
+        assert mode_events[-1]["payload"]["mode"] == "fragments"
+    finally:
+        os.environ.pop("RESEARCH_FRAGMENT_SYNTH", None)
+
+
+@pytest.mark.asyncio
 async def test_run_daemon_classifies_goal_complete_when_final_synthesis_closes_subgoals(
     seeded_job: Job, monkeypatch: pytest.MonkeyPatch
 ) -> None:
