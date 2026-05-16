@@ -56,6 +56,9 @@ def test_registered_connector_appears_without_server_edit(fake_kind: None) -> No
     assert "fake_search" in by_name
     assert by_name["fake_search"].description == "Fake connector"
     assert by_name["fake_search"].inputSchema["properties"]["query"]["type"] == "string"
+    results_schema = by_name["fake_search"].outputSchema["properties"]["results"]
+    assert results_schema["type"] == "array"
+    assert results_schema["items"]["$ref"] == "#/$defs/SearchResult"
 
 
 @pytest.mark.asyncio

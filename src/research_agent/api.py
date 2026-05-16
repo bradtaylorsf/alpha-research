@@ -76,6 +76,38 @@ class JobStatus(BaseModel):
     last_event_summary: str | None = None
 
 
+class JobStatusDetail(JobStatus):
+    model_config = ConfigDict(extra="forbid")
+
+    goal: str
+    domain: str | None = None
+    created_at: int
+    completion_reason: str | None = None
+    plan_version: int = 0
+    task_counts: dict[str, int] = Field(default_factory=dict)
+    budget_cap: float | None = None
+    time_cap_hours: float | None = None
+    started_at: int | None = None
+    eta_seconds: float | None = None
+    current_task: dict[str, Any] | None = None
+    recent_events: list[dict[str, Any]] = Field(default_factory=list)
+
+    @property
+    def id(self) -> str:
+        """Compatibility accessor for Rich renderers that accept a Job-like object."""
+
+        return self.job_id
+
+    @property
+    def intake(self) -> dict[str, Any]:
+        """Minimal intake shape used by status rendering fallbacks."""
+
+        return {
+            "budget_cap_usd": self.budget_cap,
+            "time_cap_hours": self.time_cap_hours,
+        }
+
+
 class ReportResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -438,6 +470,29 @@ def get_job_status(
         ``status = get_job_status("2026-05-16-investigate-widget-co")``
     """
 
+    detail = get_job_status_detail(job_id, jobs_root=jobs_root, db_path=db_path)
+    return JobStatus(
+        job_id=detail.job_id,
+        status=detail.status,
+        spent_usd=detail.spent_usd,
+        time_elapsed=detail.time_elapsed,
+        current_iteration=detail.current_iteration,
+        last_event_summary=detail.last_event_summary,
+    )
+
+
+def get_job_status_detail(
+    job_id: str,
+    *,
+    jobs_root: Path | str = DEFAULT_JOBS_ROOT,
+    db_path: Path | str = db.DEFAULT_DB_PATH,
+) -> JobStatusDetail:
+    """Return detailed status data for CLI or embedding UIs.
+
+    Example:
+        ``detail = get_job_status_detail("2026-05-16-investigate-widget-co")``
+    """
+
     try:
         job = _load_job(job_id, jobs_root=jobs_root, db_path=db_path)
         data = render.load_status_data(job, db_path=Path(db_path))
@@ -448,21 +503,37 @@ def get_job_status(
         summary = None
         if last_event:
             summary = f"{last_event.get('level')} {last_event.get('kind')}"
-        return JobStatus(
+        return JobStatusDetail(
             job_id=job.id,
             status=job.status,
+            goal=job.goal,
+            domain=job.domain,
+            created_at=job.created_at,
+            completion_reason=data.get("completion_reason") or job.completion_reason,
             spent_usd=float(data.get("cost") or 0.0),
             time_elapsed=elapsed,
             current_iteration=int(data.get("plan_version") or 0),
             last_event_summary=summary,
+            plan_version=int(data.get("plan_version") or 0),
+            task_counts=dict(data.get("task_counts") or {}),
+            budget_cap=data.get("budget_cap"),
+            time_cap_hours=data.get("time_cap_hours"),
+            started_at=started_at,
+            eta_seconds=data.get("eta_seconds"),
+            current_task=data.get("current_task"),
+            recent_events=list(data.get("recent_events") or []),
         )
     except JobNotFound:
         root = _job_root(job_id, jobs_root)
         meta = read_job(root)
         elapsed = int(time.time()) - int(meta.created_at)
-        return JobStatus(
+        return JobStatusDetail(
             job_id=meta.id,
             status=meta.status,
+            goal=meta.goal,
+            domain=meta.domain,
+            created_at=meta.created_at,
+            completion_reason=meta.completion_reason,
             spent_usd=0.0,
             time_elapsed=elapsed,
             current_iteration=0,
@@ -786,6 +857,7 @@ __all__ = [
     "ExportResult",
     "FindingResult",
     "JobStatus",
+    "JobStatusDetail",
     "JobSummary",
     "ReportResult",
     "ResumeJobResult",
@@ -795,6 +867,7 @@ __all__ = [
     "export_job",
     "get_findings",
     "get_job_status",
+    "get_job_status_detail",
     "get_report",
     "list_jobs",
     "resume_job",

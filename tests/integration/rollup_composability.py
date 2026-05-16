@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,9 @@ import anyio
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SAMPLE_JOB_ID = "2026-05-16-investigate-widget-co-financials"
-FIXTURE_JOB_ROOT = Path("tests/fixtures/jobs/sample")
+FIXTURE_JOB_ROOT = REPO_ROOT / "tests" / "fixtures" / "jobs" / "sample"
 LIFECYCLE_TOOLS = {
     "start_research_job",
     "get_job_status",
@@ -43,10 +45,14 @@ def _structured(result: Any) -> dict[str, Any]:
     return data
 
 
-async def _spawn_session(workdir: Path, *, fake_connector: bool) -> ClientSession:
+@asynccontextmanager
+async def _spawn_session(workdir: Path, *, fake_connector: bool):
     env = dict(os.environ)
     if fake_connector:
         env["MUCKWIRE_MCP_TEST_FAKE_CONNECTOR"] = "1"
+    else:
+        env["RESEARCH_MODELS_CONFIG"] = "config/models.smoke.yaml"
+        env["RESEARCH_DAEMON_SKIP_HEALTH_CHECKS"] = "1"
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "research_agent.mcp.server"],
@@ -77,7 +83,7 @@ async def _run_fixture_rollup(workdir: Path) -> None:
     shutil.copytree(FIXTURE_JOB_ROOT, jobs_dir / "sample")
     export_path = workdir / "exports" / "fixture.md"
 
-    async for session in _spawn_session(workdir, fake_connector=True):
+    async with _spawn_session(workdir, fake_connector=True) as session:
         names = await _assert_tools(session, expect_fake=True)
         assert len(names) >= len(LIFECYCLE_TOOLS) + 1
 
@@ -118,9 +124,9 @@ async def _run_fixture_rollup(workdir: Path) -> None:
 
 
 async def _run_live_rollup(workdir: Path) -> None:
-    async for session in _spawn_session(workdir, fake_connector=False):
+    async with _spawn_session(workdir, fake_connector=False) as session:
         names = await _assert_tools(session, expect_fake=False)
-        assert "web_search" in names, "live rollup expects free web_search connector"
+        assert "loc_search" in names, "live rollup expects free registered loc_search connector"
 
         started = _structured(
             await session.call_tool(
@@ -129,6 +135,7 @@ async def _run_live_rollup(workdir: Path) -> None:
                     "goal": "A 100-word brief on the WPA Federal Writers Project",
                     "budget_usd": 0.10,
                     "time_cap": 1,
+                    "max_tasks": 4,
                 },
             )
         )
@@ -146,9 +153,9 @@ async def _run_live_rollup(workdir: Path) -> None:
         report = _structured(await session.call_tool("get_report", {"job_id": job_id}))
         assert len(str(report.get("report_md") or "").strip()) > 100
 
-        web_rows = _structured(
+        connector_rows = _structured(
             await session.call_tool(
-                "web_search",
+                "loc_search",
                 {
                     "query": "WPA Federal Writers Project",
                     "sub_question": "WPA Federal Writers Project",
@@ -156,7 +163,7 @@ async def _run_live_rollup(workdir: Path) -> None:
                 },
             )
         ).get("results")
-        assert isinstance(web_rows, list) and web_rows, "web_search returned no rows"
+        assert isinstance(connector_rows, list) and connector_rows, "loc_search returned no rows"
 
         export_path = workdir / "exports" / f"{job_id}.md"
         exported = _structured(
@@ -169,14 +176,80 @@ async def _run_live_rollup(workdir: Path) -> None:
         assert export_path.read_text(encoding="utf-8").strip()
 
 
-async def _main(live: bool) -> None:
-    with tempfile.TemporaryDirectory(prefix="muckwire-composability-") as raw:
-        workdir = Path(raw)
-        (workdir / "data").mkdir()
-        if live:
-            await _run_live_rollup(workdir)
-        else:
-            await _run_fixture_rollup(workdir)
+def _prepare_workdir(workdir: Path) -> None:
+    from research_agent import config
+
+    config.load_env(REPO_ROOT)
+    (workdir / "data").mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / "config", workdir / "config")
+    (workdir / "config" / "models.smoke.yaml").write_text(
+        """\
+tiers:
+  fast:
+    provider: openrouter
+    model: anthropic/claude-haiku-4-5
+    timeout_s: 60
+  general:
+    provider: openrouter
+    model: anthropic/claude-haiku-4-5
+    timeout_s: 60
+  reasoner:
+    provider: openrouter
+    model: anthropic/claude-haiku-4-5
+    timeout_s: 60
+  vision:
+    provider: openrouter
+    model: anthropic/claude-haiku-4-5
+    timeout_s: 60
+  embeddings:
+    provider: lmstudio
+    model: qwen3-embedding-4b
+    timeout_s: 60
+  frontier:
+    provider: openrouter
+    model: anthropic/claude-haiku-4-5
+    timeout_s: 60
+  frontier_alt:
+    provider: openrouter
+    model: anthropic/claude-haiku-4-5
+    timeout_s: 60
+  frontier_speed:
+    provider: openrouter
+    model: anthropic/claude-haiku-4-5
+    timeout_s: 60
+pricing:
+  fast:
+    input_usd_per_mtok: 1.00
+    output_usd_per_mtok: 5.00
+  general:
+    input_usd_per_mtok: 1.00
+    output_usd_per_mtok: 5.00
+  reasoner:
+    input_usd_per_mtok: 1.00
+    output_usd_per_mtok: 5.00
+  vision:
+    input_usd_per_mtok: 1.00
+    output_usd_per_mtok: 5.00
+  frontier:
+    input_usd_per_mtok: 1.00
+    output_usd_per_mtok: 5.00
+  frontier_alt:
+    input_usd_per_mtok: 1.00
+    output_usd_per_mtok: 5.00
+  frontier_speed:
+    input_usd_per_mtok: 1.00
+    output_usd_per_mtok: 5.00
+""",
+        encoding="utf-8",
+    )
+
+
+async def _main(workdir: Path, live: bool) -> None:
+    _prepare_workdir(workdir)
+    if live:
+        await _run_live_rollup(workdir)
+    else:
+        await _run_fixture_rollup(workdir)
 
 
 def main() -> None:
@@ -187,7 +260,17 @@ def main() -> None:
         help="Run a real daemon-backed MCP job instead of the deterministic fixture rollup.",
     )
     args = parser.parse_args()
-    anyio.run(_main, args.live)
+    keep = os.environ.get("MUCKWIRE_KEEP_SMOKE_WORKDIR") == "1"
+    workdir = Path(tempfile.mkdtemp(prefix="muckwire-composability-"))
+    ok = False
+    try:
+        anyio.run(_main, workdir, args.live)
+        ok = True
+    finally:
+        if ok and not keep:
+            shutil.rmtree(workdir)
+        else:
+            print(f"SMOKE_WORKDIR={workdir}", file=sys.stderr)
 
 
 if __name__ == "__main__":

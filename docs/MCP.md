@@ -85,3 +85,8 @@ context, so they do not use `BudgetTracker` and do not enforce a per-job
 budget. Cost-bearing connector tools refuse to dispatch unless their required
 credential is configured; the MCP consumer is responsible for any additional
 budget gate at the agent layer.
+
+Connector tool output is structured as an MCP object with a `results` field;
+`results` is serialized as `list[SearchResult]` from `research_agent.tools.models`.
+The object wrapper is intentional because the Python MCP SDK only validates
+object-valued `structuredContent`.

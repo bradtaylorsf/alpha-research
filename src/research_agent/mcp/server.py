@@ -39,6 +39,7 @@ class StartResearchJobInput(BaseModel):
     goal: str
     budget_usd: float | None = None
     time_cap: int | None = None
+    max_tasks: int | None = None
     local: bool = False
     fresh_reset: bool = False
 
@@ -120,7 +121,7 @@ class ExportOutput(BaseModel):
 
 
 class SearchResultsOutput(BaseModel):
-    results: list[dict[str, Any]] = Field(default_factory=list)
+    results: list[SearchResult] = Field(default_factory=list)
 
 
 class ToolSpec(BaseModel):
@@ -296,10 +297,7 @@ async def _call_connector_tool(name: str, arguments: dict[str, Any]) -> dict[str
         data.pop("sub_question", None)
         kwargs = _filter_search_kwargs(entry.search_fn, data)
         raw_results = await entry.search_fn(query, **kwargs)
-        results = [
-            SearchResult.model_validate(item).model_dump(mode="json")
-            for item in (raw_results or [])
-        ]
+        results = [SearchResult.model_validate(item) for item in (raw_results or [])]
         _emit_mcp_event(name, ok=True)
         return _dump_model(SearchResultsOutput(results=results))
     except ValidationError as exc:

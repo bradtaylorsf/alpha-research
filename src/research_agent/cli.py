@@ -281,20 +281,13 @@ def start_command(
         }
 
     if local:
-        # Spawned daemon inherits parent env; setting these here propagates
-        # to the child without a daemon-side flag.
         local_cfg = Path("config/models.local.yaml")
         if not local_cfg.exists():
             typer.echo(f"--local requires {local_cfg} (not found)", err=True)
             raise typer.Exit(code=2)
-        os.environ["RESEARCH_MODELS_CONFIG"] = str(local_cfg)
-        os.environ["RESEARCH_DAEMON_SKIP_HEALTH_CHECKS"] = "1"
         intake_data["local"] = True
 
     if fragments:
-        # Spawned daemon inherits parent env; this mirrors --local's control
-        # surface and keeps RESEARCH_FRAGMENT_SYNTH as the runtime source of truth.
-        os.environ["RESEARCH_FRAGMENT_SYNTH"] = "1"
         intake_data["fragments"] = True
 
     goal_text = str(intake_data.get("goal") or "").strip()
@@ -306,7 +299,11 @@ def start_command(
             corpus=corpus,
             disk_cap_gb=disk_cap_gb,
             max_tasks=max_tasks,
+            local=local,
+            translate_non_english=translate_non_english,
+            fragments=fragments,
             fresh_reset=fresh_reset,
+            inbox=inbox,
             intake=intake_data,
             input_csv=input_csv,
             artifact_name=artifact_name,
@@ -445,23 +442,26 @@ def status_command(
     watch: bool = typer.Option(False, "--watch", help="Refresh every 2 seconds."),
 ) -> None:
     """Show a detailed Rich panel for a single job."""
-    job = _load_job_or_exit(job_id)
     console = Console()
 
     def _panel():
-        data = render.load_status_data(job)
+        try:
+            data = public_api.get_job_status_detail(job_id)
+        except JobNotFound as e:
+            typer.echo(f"job not found: {job_id} ({e})", err=True)
+            raise typer.Exit(code=1) from e
         return render.render_status_panel(
-            job,
-            plan_version=data["plan_version"],
-            task_counts=data["task_counts"],
-            cost=data["cost"],
-            recent_events=data["recent_events"],
-            budget_cap=data["budget_cap"],
-            time_cap_hours=data["time_cap_hours"],
-            started_at=data["started_at"],
-            eta_seconds=data["eta_seconds"],
-            current_task=data["current_task"],
-            completion_reason=data["completion_reason"],
+            data,  # Job-like public status model.
+            plan_version=data.plan_version,
+            task_counts=data.task_counts,
+            cost=data.spent_usd,
+            recent_events=data.recent_events,
+            budget_cap=data.budget_cap,
+            time_cap_hours=data.time_cap_hours,
+            started_at=data.started_at,
+            eta_seconds=data.eta_seconds,
+            current_task=data.current_task,
+            completion_reason=data.completion_reason,
         )
 
     if not watch:
@@ -904,33 +904,23 @@ def export_command(
         typer.echo("exactly one of --zip, --md-bundle, or --csv must be set", err=True)
         raise typer.Exit(code=2)
 
-    job = _load_job_or_exit(job_id)
-    if csv_artifact:
-        default_name = f"{job.id}-{csv_artifact}.csv"
-    else:
-        suffix = ".zip" if zip_ else ".md"
-        default_name = f"{job.id}{suffix}"
-
-    if out is None:
-        out_path = Path.cwd() / default_name
-    elif out.exists() and out.is_dir():
-        out_path = out / default_name
-    else:
-        out_path = out
-
     try:
         result = public_api.export_job(
             job_id,
             zip=zip_,
             md_bundle=md_bundle,
             csv_artifact=csv_artifact,
-            out=out_path,
+            out=out,
             include_history=include_history,
         )
     except FileNotFoundError as exc:
+        job = _load_job_or_exit(job_id)
         available = [item["name"] for item in list_artifacts(job)]
         suffix = f" Available artifacts: {', '.join(available)}." if available else ""
         typer.echo(f"{exc}.{suffix}", err=True)
+        raise typer.Exit(code=1) from exc
+    except JobNotFound as exc:
+        typer.echo(f"job not found: {job_id} ({exc})", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(result.path)
 

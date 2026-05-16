@@ -17,7 +17,7 @@ async def _main() -> None:
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "research_agent.mcp.server"],
-        env={**os.environ, "MUCKWIRE_MCP_TEST_FAKE_CONNECTOR": "1"},
+        env=dict(os.environ),
     )
 
     async with stdio_client(params) as (read, write):
@@ -27,17 +27,22 @@ async def _main() -> None:
             names = {tool.name for tool in tools.tools}
             missing = {entry.name for entry in iter_kinds()} - names
             assert not missing, f"missing connector tools: {sorted(missing)}"
-            assert "fake_search" in names
+            assert "loc_search" in names
 
             result = await session.call_tool(
-                "fake_search",
-                {"query": "fixture", "sub_question": "fixture", "max_results": 1},
+                "loc_search",
+                {
+                    "query": "WPA Federal Writers Project",
+                    "sub_question": "WPA Federal Writers Project",
+                    "max_results": 1,
+                },
             )
             assert result.structuredContent is not None
             rows = result.structuredContent.get("results")
             assert isinstance(rows, list) and rows
             assert {"url", "title", "snippet", "source_kind"} <= set(rows[0])
-            print("OK mcp tool-level", len(names), "tools")
+            assert "Writers" in rows[0]["title"] or "Writers" in rows[0]["snippet"]
+            print("OK mcp tool-level loc_search", len(names), "tools")
 
 
 if __name__ == "__main__":

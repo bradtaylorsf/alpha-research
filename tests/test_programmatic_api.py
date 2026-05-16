@@ -12,6 +12,7 @@ from research_agent import (
     export_job,
     get_findings,
     get_job_status,
+    get_job_status_detail,
     get_report,
     list_jobs,
     resume_job,
@@ -39,6 +40,7 @@ def db_path(tmp_path: Path) -> Path:
 
 def test_read_entry_points_work_against_fixture_job(tmp_path: Path) -> None:
     status = get_job_status(SAMPLE_JOB_ID, jobs_root=FIXTURE_JOBS_ROOT)
+    status_detail = get_job_status_detail(SAMPLE_JOB_ID, jobs_root=FIXTURE_JOBS_ROOT)
     jobs = list_jobs(jobs_root=FIXTURE_JOBS_ROOT)
     report = get_report(SAMPLE_JOB_ID, jobs_root=FIXTURE_JOBS_ROOT)
     findings = get_findings(SAMPLE_JOB_ID, jobs_root=FIXTURE_JOBS_ROOT)
@@ -55,6 +57,8 @@ def test_read_entry_points_work_against_fixture_job(tmp_path: Path) -> None:
     )
 
     assert status.status == "completed"
+    assert status_detail.goal == "Investigate Widget Co financials"
+    assert status_detail.id == SAMPLE_JOB_ID
     assert any(job.job_id == SAMPLE_JOB_ID for job in jobs)
     assert report.report_md.startswith("# Report")
     assert report.sources
