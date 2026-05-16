@@ -432,6 +432,41 @@ def _delta_cell(a: int, b: int) -> str:
     return "±0"
 
 
+def _fragment_delta_rows(summary_a: Any, summary_b: Any) -> tuple[list[dict[str, Any]], bool]:
+    fragments_a = dict(getattr(summary_a, "fragments", {}) or {})
+    fragments_b = dict(getattr(summary_b, "fragments", {}) or {})
+    if not fragments_a or not fragments_b:
+        return [], False
+
+    from research_agent.orchestrator.fragments import all_fragments
+
+    canonical_ids = [fragment.id for fragment in all_fragments()]
+    unknown_ids = sorted((set(fragments_a) | set(fragments_b)) - set(canonical_ids))
+    rows: list[dict[str, Any]] = []
+    for section_id in [*canonical_ids, *unknown_ids]:
+        a_item = fragments_a.get(section_id)
+        b_item = fragments_b.get(section_id)
+        if a_item is None and b_item is None:
+            continue
+        if a_item is None:
+            status = "added"
+        elif b_item is None:
+            status = "removed"
+        elif a_item.get("content_hash") != b_item.get("content_hash"):
+            status = "changed"
+        else:
+            status = "unchanged"
+        rows.append(
+            {
+                "section_id": section_id,
+                "status": status,
+                "a_version": a_item.get("version") if a_item else None,
+                "b_version": b_item.get("version") if b_item else None,
+            }
+        )
+    return rows, True
+
+
 def render_comparison_summary(summary_a: Any, summary_b: Any) -> Group:
     """Render a Rich group for ``research compare`` covering counts + deltas.
 
@@ -489,15 +524,44 @@ def render_comparison_summary(summary_a: Any, summary_b: Any) -> Group:
     else:
         host_lines.append("  (no change)")
 
+    groups: list[Any] = [table]
+    fragment_rows, has_fragments = _fragment_delta_rows(summary_a, summary_b)
+    if has_fragments:
+        fragment_table = Table(title="Fragment delta", show_lines=False)
+        fragment_table.add_column("section")
+        fragment_table.add_column(getattr(summary_a, "label", "a"), justify="right")
+        fragment_table.add_column(getattr(summary_b, "label", "b"), justify="right")
+        fragment_table.add_column("status")
+        changed_rows = [row for row in fragment_rows if row["status"] != "unchanged"]
+        if changed_rows:
+            for row in changed_rows:
+                status = row["status"]
+                if status == "added":
+                    rendered_status = "[green]+ added[/green]"
+                elif status == "removed":
+                    rendered_status = "[red]- removed[/red]"
+                else:
+                    rendered_status = "[yellow]changed[/yellow]"
+                fragment_table.add_row(
+                    str(row["section_id"]),
+                    "—" if row["a_version"] is None else str(row["a_version"]),
+                    "—" if row["b_version"] is None else str(row["b_version"]),
+                    rendered_status,
+                )
+        else:
+            fragment_table.add_row("(all fragments)", "—", "—", "no change")
+        groups.append(fragment_table)
+
     body = "\n".join(dept_lines + host_lines)
-    return Group(table, body)
+    groups.append(body)
+    return Group(*groups)
 
 
 def comparison_summary_to_json(summary_a: Any, summary_b: Any) -> str:
     """Serialize two ``ComparisonSummary`` instances + deltas as JSON."""
 
     def _as_dict(s: Any) -> dict[str, Any]:
-        return {
+        payload = {
             "label": getattr(s, "label", None),
             "tasks_done": int(getattr(s, "tasks_done", 0) or 0),
             "findings": int(getattr(s, "findings", 0) or 0),
@@ -509,6 +573,10 @@ def comparison_summary_to_json(summary_a: Any, summary_b: Any) -> str:
             "source_hosts": dict(getattr(s, "source_hosts", {}) or {}),
             "top_cited": [list(t) for t in (getattr(s, "top_cited", []) or [])],
         }
+        fragments = getattr(s, "fragments", {}) or {}
+        if fragments:
+            payload["fragments"] = fragments
+        return payload
 
     a = _as_dict(summary_a)
     b = _as_dict(summary_b)
@@ -522,6 +590,17 @@ def comparison_summary_to_json(summary_a: Any, summary_b: Any) -> str:
         "departments_added": sorted(set(b["departments"]) - set(a["departments"])),
         "departments_removed": sorted(set(a["departments"]) - set(b["departments"])),
     }
+    fragment_rows, has_fragments = _fragment_delta_rows(summary_a, summary_b)
+    if has_fragments:
+        deltas["fragments"] = {
+            row["section_id"]: {
+                "status": row["status"],
+                "a_version": row["a_version"],
+                "b_version": row["b_version"],
+            }
+            for row in fragment_rows
+            if row["status"] != "unchanged"
+        }
     return json.dumps({"a": a, "b": b, "deltas": deltas}, indent=2, sort_keys=True, default=str)
 
 

@@ -33,7 +33,7 @@ from research_agent import daemon
 from research_agent.orchestrator.plan import Plan, Subgoal, TaskSpec
 from research_agent.storage import db
 from research_agent.storage.jobs import RESUME_REPLAN_FILE, Job
-from research_agent.storage.markdown import write_plan
+from research_agent.storage.markdown import assemble_report, write_fragment, write_plan
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -725,6 +725,68 @@ async def test_run_daemon_without_resume_replan_skips_tactical_replan(
 
     assert exit_code == 0
     assert calls["replan"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_fragment_resume_reassembles_latest_fragments(
+    seeded_job: Job,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RESEARCH_DAEMON_SKIP_HEALTH_CHECKS", "1")
+    monkeypatch.setenv("RESEARCH_FRAGMENT_SYNTH", "1")
+    write_fragment(
+        seeded_job,
+        "timeline",
+        "## Timeline\n\n- Persisted before restart.",
+        source_finding_ids=[],
+    )
+
+    class _Router:
+        tiers = {"frontier": {"provider": "openrouter", "model": "fragment-model"}}
+        budget = None
+
+    async def _run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        plan_dump = {
+            "version": 2,
+            "objective": "Investigation complete",
+            "subgoals": [{"id": 1, "description": "Gather", "done": True}],
+            "task_template": [],
+            "expected_iterations": 3,
+        }
+        write_plan(job, plan_dump)
+        return {"tasks_done": 0, "stopped": False, "completed": True, "cap_hit": False}
+
+    monkeypatch.setattr(daemon, "_build_router", lambda _job: _Router())
+    monkeypatch.setattr("research_agent.orchestrator.loop.run_loop", _run_loop)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+
+    assert exit_code == 0
+    assert (seeded_job.root / "report.md").read_text(encoding="utf-8") == assemble_report(
+        seeded_job
+    )
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT model FROM syntheses WHERE job_id = ? ORDER BY version DESC LIMIT 1",
+            (seeded_job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["model"] == "fragment_assembly"
+
+    events = [
+        json.loads(line)
+        for line in (seeded_job.root / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    mode_events = [event for event in events if event["kind"] == "synthesis_mode"]
+    assert mode_events[-1]["payload"]["mode"] == "fragments"
 
 
 @pytest.mark.asyncio

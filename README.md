@@ -461,7 +461,7 @@ Lockfiles (`uv.lock`) are committed.
 ```bash
 research start --skip-intake --goal "<goal>" \
     [--budget-usd 5.0] [--time-cap 24] [--corpus path/to/notes] \
-    [--disk-cap-gb 10] [--translate-non-english] [--inbox]
+    [--disk-cap-gb 10] [--translate-non-english] [--fragments] [--inbox]
 
 research list                      # newest first; Rich on a TTY, JSON otherwise
 research list --json
@@ -535,6 +535,11 @@ original finding remains unchanged. Plan YAML can also opt in per task
 with `payload.translate_non_english: true`. See
 [`docs/CONFIG.md`](docs/CONFIG.md) for the per-job knob and budget
 behavior.
+
+`--fragments` enables experimental section-fragment synthesis for a job by
+setting `RESEARCH_FRAGMENT_SYNTH=1` for the spawned daemon and recording
+`"fragments": true` in `intake.json`. Leaving it unset keeps the legacy
+whole-report synthesis path.
 
 `research search` defaults to a hybrid pass: FTS5 on `findings_fts` /
 `sources_fts` plus semantic cosine over `embeddings` blobs, deduped and

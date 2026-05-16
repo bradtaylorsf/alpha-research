@@ -583,14 +583,18 @@ def default_handlers(router: Any) -> dict[str, Handler]:
         return output.model_dump()
 
     async def _critique(job: Job, task: dict[str, Any]) -> dict[str, Any] | None:
-        from research_agent.orchestrator.critique import critique
+        from research_agent.orchestrator.critique import critique, critique_fragments
         from research_agent.orchestrator.plan import cloud_replan
+        from research_agent.orchestrator.synth import fragment_synth_enabled
 
         plan = _load_latest_plan(job)
         if plan is None:
             raise FatalError("critique: no plan persisted for job")
-        latest_synth = _load_latest_synthesis_md(job)
-        result = await critique(job, plan, latest_synth, router=router)
+        if fragment_synth_enabled():
+            result = await critique_fragments(job, plan, router=router)
+        else:
+            latest_synth = _load_latest_synthesis_md(job)
+            result = await critique(job, plan, latest_synth, router=router)
         if result.should_replan:
             critique_md = _load_critique_md(job, result.md_path)
             new_plan = await cloud_replan(job, plan, critique_md, router=router)

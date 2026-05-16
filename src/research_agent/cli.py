@@ -165,6 +165,12 @@ def start_command(
         help="Translate non-English extracted findings into English mirrors using"
         " the frontier_speed tier. Off by default.",
     ),
+    fragments: bool = typer.Option(
+        False,
+        "--fragments",
+        help="Enable experimental section-fragment synthesis for this job."
+        " Unset keeps the legacy whole-report synthesizer.",
+    ),
     fresh_reset: bool = typer.Option(
         False,
         "--fresh-reset",
@@ -225,12 +231,18 @@ def start_command(
             "budget_cap_usd": budget_usd,
             "disk_cap_gb": disk_cap_gb,
             "translate_non_english": translate_non_english,
+            "fragments": fragments,
             "inbox": inbox,
         }
         if corpus:
             intake_data["corpus"] = corpus
     else:
-        answers = intake.run_intake(corpus=corpus, budget_usd=budget_usd, time_cap=time_cap)
+        answers = intake.run_intake(
+            corpus=corpus,
+            budget_usd=budget_usd,
+            time_cap=time_cap,
+            fragments=fragments,
+        )
         intake_data = {
             **answers,
             "time_cap_hours": answers["time_cap"],
@@ -238,6 +250,7 @@ def start_command(
             "corpus": answers["corpus_path"],
             "disk_cap_gb": disk_cap_gb,
             "translate_non_english": translate_non_english,
+            "fragments": bool(answers.get("fragments") or fragments),
             "inbox": inbox,
         }
 
@@ -278,6 +291,12 @@ def start_command(
         os.environ["RESEARCH_MODELS_CONFIG"] = str(local_cfg)
         os.environ["RESEARCH_DAEMON_SKIP_HEALTH_CHECKS"] = "1"
         intake_data["local"] = True
+
+    if fragments:
+        # Spawned daemon inherits parent env; this mirrors --local's control
+        # surface and keeps RESEARCH_FRAGMENT_SYNTH as the runtime source of truth.
+        os.environ["RESEARCH_FRAGMENT_SYNTH"] = "1"
+        intake_data["fragments"] = True
 
     # Make sure the schema exists so the testing back door is self-bootstrapping.
     db.migrate().close()
@@ -988,6 +1007,7 @@ class ComparisonSummary:
     departments: set[str] = field(default_factory=set)
     source_hosts: Counter = field(default_factory=Counter)
     top_cited: list[tuple[int, int]] = field(default_factory=list)
+    fragments: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 # Match either ``[1]`` / ``[1, 2]`` (current synthesizer shape) or ``[S1]``
@@ -1068,6 +1088,8 @@ def _newest_archive_report(job: Job) -> Path | None:
 
 def _collect_from_db(job: Job, label: str) -> ComparisonSummary:
     """Build a ``ComparisonSummary`` from live DB counts + (if present) report.md."""
+    from research_agent.storage.markdown import fragment_digests
+
     summary = ComparisonSummary(label=label)
     conn = db.connect(job.db_path)
     try:
@@ -1123,6 +1145,7 @@ def _collect_from_db(job: Job, label: str) -> ComparisonSummary:
         summary.departments = parsed["departments"]
         summary.source_hosts = parsed["source_hosts"]
         summary.top_cited = parsed["top_cited"]
+    summary.fragments = fragment_digests(job)
     return summary
 
 
