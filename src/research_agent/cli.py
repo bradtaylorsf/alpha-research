@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -20,16 +19,16 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-from research_agent import __version__, config, daemon, doctor, intake
+import research_agent.api as public_api
+from research_agent import __version__, config, doctor, intake
+from research_agent import daemon as daemon  # noqa: F401 - tests monkeypatch cli.daemon
+from research_agent.errors import InvalidGoal, JobAlreadyRunning, JobNotFound
 from research_agent.storage import db
 from research_agent.storage.jobs import (
     _JOB_ID_RE,
     DEFAULT_JOBS_ROOT,
     INBOX_REPLAN_FILE,
-    RESUME_REPLAN_FILE,
     Job,
-    _atomic_write_json,
-    list_jobs,
 )
 from research_agent.ui import render
 
@@ -298,76 +297,46 @@ def start_command(
         os.environ["RESEARCH_FRAGMENT_SYNTH"] = "1"
         intake_data["fragments"] = True
 
-    # Make sure the schema exists so the testing back door is self-bootstrapping.
-    db.migrate().close()
-
     goal_text = str(intake_data.get("goal") or "").strip()
-    existing = (
-        Job.find_by_goal_slug(goal_text)
-        if (goal_text and not fresh_reset)
-        else None
-    )
-    if existing is not None:
-        archived = existing.archive_and_soft_reset()
-        if archived is not None:
-            typer.echo(f"archived prior report to {archived}")
-        else:
-            typer.echo(
-                f"reusing job {existing.id} (no prior report.md to archive)"
-            )
-        # Update intake to reflect the new run's settings — the operator may
-        # have changed --budget-usd / --time-cap / --max-tasks since the prior
-        # run. archive_and_soft_reset preserved the goal slug + folder; we
-        # rewrite intake.json/job.json + the jobs row so the daemon picks up
-        # the new caps.
-        existing.intake = intake_data
-        _atomic_write_json(existing.root / "intake.json", intake_data)
-        meta_path = existing.root / "job.json"
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        meta["intake"] = intake_data
-        meta["domain"] = intake_data.get("domain") or meta.get("domain")
-        _atomic_write_json(meta_path, meta)
-        intake_json = json.dumps(intake_data, sort_keys=True)
-        conn = db.connect(existing.db_path)
-        try:
-            with conn:
-                conn.execute(
-                    "UPDATE jobs SET intake_json = ?, time_cap_hours = ?,"
-                    " budget_cap_usd = ?, aggressiveness = ?, domain = ?"
-                    " WHERE id = ?",
-                    (
-                        intake_json,
-                        intake_data.get("time_cap_hours"),
-                        intake_data.get("budget_cap_usd"),
-                        intake_data.get("aggressiveness"),
-                        intake_data.get("domain") or existing.domain,
-                        existing.id,
-                    ),
-                )
-        finally:
-            conn.close()
-        job = existing
-    else:
-        job = Job.create(intake_data)
-
-    if input_csv is not None:
-        from research_agent.storage.enrichment import import_csv_as_artifact
-
-        try:
-            import_csv_as_artifact(
-                job,
-                input_csv,
-                artifact_name=artifact_name,
-                key_columns=key_columns,
-                target_columns=target_columns,
-            )
-        except Exception as exc:
+    try:
+        result = public_api.start_job(
+            goal_text,
+            budget_usd=budget_usd,
+            time_cap=time_cap,
+            corpus=corpus,
+            disk_cap_gb=disk_cap_gb,
+            max_tasks=max_tasks,
+            fresh_reset=fresh_reset,
+            intake=intake_data,
+            input_csv=input_csv,
+            artifact_name=artifact_name,
+            key_columns=key_columns,
+            target_columns=target_columns,
+            update_existing=bool(update_existing and not no_overwrite),
+        )
+    except InvalidGoal as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except JobAlreadyRunning as exc:
+        if fresh_reset and isinstance(exc.__cause__, FileExistsError):
+            raise exc.__cause__ from exc
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:
+        if input_csv is not None:
             typer.echo(f"failed to import --input-csv: {exc}", err=True)
-            raise typer.Exit(code=1) from exc
+        else:
+            typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
 
-    pid = daemon.spawn_daemon(job.id)
+    if result.reused:
+        if result.archived_report is not None:
+            typer.echo(f"archived prior report to {result.archived_report}")
+        else:
+            typer.echo(f"reusing job {result.job_id} (no prior report.md to archive)")
     typer.echo(
-        f"Started job {job.id} (daemon pid {pid}). Tail logs with: research logs {job.id} -f"
+        f"Started job {result.job_id} (daemon pid {result.daemon_pid}). "
+        f"Tail logs with: research logs {result.job_id} -f"
     )
 
 
@@ -381,7 +350,10 @@ def list_command(
     ),
 ) -> None:
     """List research jobs (newest first)."""
-    jobs = list_jobs(status=status)
+    jobs = [
+        item.model_dump(by_alias=True)
+        for item in public_api.list_jobs(status=status)
+    ]
     use_json = json_output or not sys.stdout.isatty()
     if use_json:
         typer.echo(render.jobs_to_json(jobs))
@@ -587,7 +559,8 @@ def view_command(
         if path is None:
             typer.echo(f"no findings present for job {job_id}", err=True)
             raise typer.Exit(code=1)
-        body = path.read_text(encoding="utf-8")
+        items = public_api.get_findings(job_id)
+        body = items[-1].body if items else path.read_text(encoding="utf-8")
     elif sources:
         body = _render_sources_block(job)
         path = None
@@ -597,10 +570,12 @@ def view_command(
     else:  # report (default; --report is treated as the same path)
         _ = report  # accepted explicitly even though it's the default
         path = job.root / "report.md"
-        if not path.exists():
+        try:
+            report_result = public_api.get_report(job_id)
+        except JobNotFound as exc:
             typer.echo(f"report.md not present for job {job_id}", err=True)
-            raise typer.Exit(code=1)
-        body = path.read_text(encoding="utf-8")
+            raise typer.Exit(code=1) from exc
+        body = report_result.report_md
         if job.completion_reason:
             body = f"<!-- completion_reason: {job.completion_reason} -->\n\n{body}"
 
@@ -771,11 +746,7 @@ def search_command(
     import sqlite3
 
     from research_agent.llm.router import load_models_config
-    from research_agent.storage.search import (
-        ALLOWED_KINDS,
-        search_fts,
-        search_hybrid,
-    )
+    from research_agent.storage.search import ALLOWED_KINDS
 
     if kind not in ALLOWED_KINDS:
         typer.echo(
@@ -790,17 +761,17 @@ def search_command(
         job_id = job
 
     try:
-        if fts_only:
-            results = search_fts(query, job_id=job_id, kind=kind, db_path=db.DEFAULT_DB_PATH)
-        else:
-            models_cfg = load_models_config(Path("config/models.yaml"))
-            results = search_hybrid(
+        models_cfg = None if fts_only else load_models_config(Path("config/models.yaml"))
+        results = [
+            item.model_dump()
+            for item in public_api.search_findings(
                 query,
                 job_id=job_id,
-                kind=kind,
-                db_path=db.DEFAULT_DB_PATH,
+                kind=kind,  # type: ignore[arg-type]
+                fts_only=fts_only,
                 models_config=models_cfg,
             )
+        ]
     except sqlite3.OperationalError as e:
         typer.echo(f"FTS5 query error: {e}", err=True)
         raise typer.Exit(code=1) from e
@@ -826,24 +797,17 @@ def stop_command(
     ),
 ) -> None:
     """Stop a running job, gracefully (default) or hard-killing the daemon."""
-    job = _load_job_or_exit(job_id)
+    try:
+        public_api.stop_job(job_id, graceful=graceful)
+    except JobNotFound as exc:
+        msg = str(exc)
+        typer.echo(msg if "daemon PID" in msg else f"job not found: {job_id} ({msg})", err=True)
+        raise typer.Exit(code=1) from exc
 
     if graceful:
-        job.request_stop()
         typer.echo("Stop requested; daemon will finish current task and synthesize.")
         return
 
-    try:
-        job.kill()
-    except FileNotFoundError:
-        typer.echo(f"no daemon PID file for job {job_id}", err=True)
-        raise typer.Exit(code=1) from None
-
-    pid_file = job.root / "daemon.pid"
-    try:
-        pid_file.unlink()
-    except FileNotFoundError:
-        pass
     typer.echo(f"Killed daemon for job {job_id}.")
 
 
@@ -867,45 +831,28 @@ def resume_command(
     ),
 ) -> None:
     """Restart a stranded job's daemon — checkpoint-restore happens at startup."""
-    job = _load_job_or_exit(job_id)
-
-    if daemon.is_daemon_alive(job.id):
+    try:
+        result = public_api.resume_job(
+            job_id,
+            force=force,
+            replan=replan,
+            note=note,
+        )
+    except JobAlreadyRunning as exc:
         typer.echo(
             f"job {job_id} is already running (pid file present and process alive)",
             err=True,
         )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
+    except InvalidGoal as exc:
+        typer.echo(str(exc), err=True)
+        code = 2 if "--note" in str(exc) else 1
+        raise typer.Exit(code=code) from exc
+    except JobNotFound as exc:
+        typer.echo(f"job not found: {job_id} ({exc})", err=True)
+        raise typer.Exit(code=1) from exc
 
-    if job.status in {"completed", "failed"} and not force:
-        typer.echo(
-            f"job {job_id} is {job.status}; pass --force to resume anyway",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    # The orchestrator loop's first check is `_should_stop(job)`, which reads
-    # `jobs/<id>/STOP`. A prior `stop --graceful` leaves that flag on disk —
-    # left alone, the freshly spawned daemon would observe it and exit before
-    # touching the queue. Resume is an explicit intent to restart, so clear
-    # the stale flag here.
-    stop_flag = job.root / "STOP"
-    try:
-        stop_flag.unlink()
-    except FileNotFoundError:
-        pass
-
-    if note and not replan:
-        typer.echo("--note requires --replan", err=True)
-        raise typer.Exit(code=2)
-
-    if replan:
-        payload: dict[str, Any] = {}
-        if note:
-            payload["note"] = note
-        _atomic_write_json(job.root / RESUME_REPLAN_FILE, payload)
-
-    pid = daemon.spawn_daemon(job.id)
-    typer.echo(f"Resumed job {job.id} (daemon pid {pid}).")
+    typer.echo(f"Resumed job {job_id} (daemon pid {result.daemon_pid}).")
 
 
 @app.command(name="logs")
@@ -951,7 +898,6 @@ def export_command(
 ) -> None:
     """Export a job as a shareable bundle or table artifact."""
     from research_agent.storage.artifacts import list_artifacts
-    from research_agent.storage.export import export_csv, export_md_bundle, export_zip
 
     selected = sum([bool(zip_), bool(md_bundle), bool(csv_artifact)])
     if selected != 1:
@@ -972,20 +918,21 @@ def export_command(
     else:
         out_path = out
 
-    if zip_:
-        written = export_zip(job, out_path, include_history=include_history)
-    elif md_bundle:
-        written = export_md_bundle(job, out_path, include_history=include_history)
-    else:
-        assert csv_artifact is not None  # noqa: S101
-        try:
-            written = export_csv(job, csv_artifact, out_path)
-        except FileNotFoundError as exc:
-            available = [item["name"] for item in list_artifacts(job)]
-            suffix = f" Available artifacts: {', '.join(available)}." if available else ""
-            typer.echo(f"{exc}.{suffix}", err=True)
-            raise typer.Exit(code=1) from exc
-    typer.echo(str(written))
+    try:
+        result = public_api.export_job(
+            job_id,
+            zip=zip_,
+            md_bundle=md_bundle,
+            csv_artifact=csv_artifact,
+            out=out_path,
+            include_history=include_history,
+        )
+    except FileNotFoundError as exc:
+        available = [item["name"] for item in list_artifacts(job)]
+        suffix = f" Available artifacts: {', '.join(available)}." if available else ""
+        typer.echo(f"{exc}.{suffix}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(result.path)
 
 
 # ---------------------------------------------------------------------------

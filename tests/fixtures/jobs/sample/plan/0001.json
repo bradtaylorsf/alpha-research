@@ -1,0 +1,14 @@
+{
+  "scope_class": "narrow",
+  "active_strategies": [
+    "triangulation"
+  ],
+  "tasks": [
+    {
+      "kind": "web_search",
+      "payload": {
+        "query": "Widget Co financials"
+      }
+    }
+  ]
+}

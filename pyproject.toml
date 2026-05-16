@@ -39,6 +39,7 @@ dependencies = [
     "pywhispercpp>=1.2",
     "mlx-whisper>=0.4; platform_machine=='arm64' and sys_platform=='darwin'",
     "yt-dlp>=2024.4",
+    "mcp>=1.27",
 ]
 
 [project.optional-dependencies]
@@ -66,6 +67,7 @@ dev = [
 
 [project.scripts]
 research = "research_agent.cli:app"
+research-mcp = "research_agent.mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

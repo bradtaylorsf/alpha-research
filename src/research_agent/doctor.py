@@ -630,6 +630,26 @@ def check_registry_skill_summary_coherence(
         )
 
 
+def check_mcp_server_importable() -> CheckResult:
+    """Verify the stdio MCP server module imports cleanly."""
+    name = "mcp_server_importable"
+    try:
+        import research_agent.mcp.server  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            name,
+            "fail",
+            required=True,
+            detail=f"research_agent.mcp.server import failed: {type(exc).__name__}: {exc}",
+        )
+    return CheckResult(
+        name,
+        "ok",
+        required=True,
+        detail="research_agent.mcp.server imports",
+    )
+
+
 def run_all_checks(
     loaded_env_files: list[Path],
     *,
@@ -651,6 +671,7 @@ def run_all_checks(
     results.append(check_trove_api_note())
     results.append(check_dpla_api_note())
     results.append(check_europeana_api_note())
+    results.append(check_mcp_server_importable())
     results.extend(check_sanctions_refresh())
     results.append(check_planner_allowlist_coherence())
     results.append(check_task_kind_registry_coherence())
