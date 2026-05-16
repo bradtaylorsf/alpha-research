@@ -74,14 +74,31 @@ If it fails on main too, it's pre-existing — flag in summary, do not block on 
 - **Substring host match**: `if "trusted.com" in netloc` is spoofable. Require `netloc == host or netloc.endswith("." + host)`.
 - **`tempfile.mkstemp(...)[1]` discarding fd**: leak. Demand `os.close(fd)` or a helper.
 - **In-function `import json as _json`** when module-level `import json` already exists: cleanup, not blocker.
+- **Traversal-shaped identifiers**: public APIs must validate job IDs before fallback folder scans, and sidecar `md_path` fields must stay relative to the job folder.
+- **Process-global request settings**: HTTP/API wrappers must not mutate `os.environ` for per-request daemon options; pass explicit child-process env instead.
 
-### 8. Connector schema/URL contract
+### 8. Lightweight import audit
+
+For changes to `research_agent.__init__`, `research_agent.api`, `research_agent.mcp`, or `research_agent.http`, run a quick import-side-effect check:
+
+```bash
+uv run python - <<'PY'
+import sys
+import research_agent
+print("research_agent.daemon" in sys.modules)
+print("research_agent.llm.router" in sys.modules)
+PY
+```
+
+If the output is `True` for daemon/LLM modules before the caller uses start/resume behavior, flag it and prefer lazy imports.
+
+### 9. Connector schema/URL contract
 
 For connectors fetching XML/JSON from a documented upstream:
 - Verify the URL constant points at the schema the parser actually understands. **Test fixtures that mirror the parser's expected shape can hide URL/schema mismatches** — this is exactly how #116 (SDN advanced URL pointing at relational `<DistinctParty>`/`<Profile>` schema while parser expected flat `<sdnEntry>`) almost shipped a connector that would have indexed zero entries in prod. Cross-check: open the URL's documented schema or sample document and confirm it matches the parser's expected element/field names.
 - For `setup_command`-installed CLIs, confirm `uv tool install -e .` is present so the verifier's bare `research` shell-out resolves.
 
-### 9. Test suites that mask signature/contract bugs
+### 10. Test suites that mask signature/contract bugs
 
 - Parametrized dispatch tests using `**kwargs`-accepting fakes silently swallow signature mismatches across connectors (#180 had this — masked 10 of 18 connectors with mismatched kwargs from the planner). Look for fakes that take `**kwargs` and consider whether the test would actually catch a real signature drift.
 

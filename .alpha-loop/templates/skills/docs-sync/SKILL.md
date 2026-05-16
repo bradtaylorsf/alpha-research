@@ -33,6 +33,7 @@ When making changes that affect user-facing behavior, always update the correspo
 ### Public API or behavior changed?
 - Update relevant README sections
 - Update CLAUDE.md if architectural
+- If a public contract doc changes, update the matching reader/API docs and `AGENTS.md` contract rules in the same diff
 
 ## Rules
 

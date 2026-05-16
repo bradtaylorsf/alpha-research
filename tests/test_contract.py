@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from research_agent.contract import (
+    ContractReadError,
     Finding,
     JobMetadata,
     Report,
@@ -69,3 +72,27 @@ def test_read_source_accepts_job_root_when_single_source_exists() -> None:
 
     assert source.title == "Widget Co Sample Filing"
     assert source.metadata["pub_date"] == "2026-05-16"
+
+
+def test_read_source_rejects_sidecar_md_path_traversal(tmp_path: Path) -> None:
+    sources_dir = tmp_path / "sources"
+    sources_dir.mkdir()
+    sidecar = sources_dir / "bad.json"
+    sidecar.write_text(
+        """
+        {
+          "sha256": "bad",
+          "url": "https://example.com/bad",
+          "title": "Bad",
+          "fetched_at": 1778956860,
+          "archive_url": "",
+          "kind": "web",
+          "md_path": "../secret.md",
+          "metadata": {}
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ContractReadError):
+        read_source(sidecar)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 
 import anyio
@@ -15,18 +14,11 @@ async def _main() -> None:
     import research_agent.tools  # noqa: F401 - populate local registry
     from research_agent.tools._registry import iter_kinds
 
-    executable = shutil.which("research-mcp")
-    if executable:
-        params = StdioServerParameters(
-            command=executable,
-            env={**os.environ, "MUCKWIRE_MCP_TEST_FAKE_CONNECTOR": "1"},
-        )
-    else:
-        params = StdioServerParameters(
-            command=sys.executable,
-            args=["-m", "research_agent.mcp.server"],
-            env={**os.environ, "MUCKWIRE_MCP_TEST_FAKE_CONNECTOR": "1"},
-        )
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "research_agent.mcp.server"],
+        env={**os.environ, "MUCKWIRE_MCP_TEST_FAKE_CONNECTOR": "1"},
+    )
 
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:

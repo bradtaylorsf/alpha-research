@@ -12,7 +12,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from research_agent import daemon
 from research_agent.contract import iter_findings, read_job, read_report, tail_events
 from research_agent.errors import InvalidGoal, JobAlreadyRunning, JobNotFound
 from research_agent.storage import db
@@ -24,6 +23,7 @@ from research_agent.storage.jobs import (
     RESUME_REPLAN_FILE,
     Job,
     _atomic_write_json,
+    _validate_job_id,
 )
 from research_agent.storage.search import ALLOWED_KINDS, search_fts, search_hybrid
 from research_agent.tools.models import Source
@@ -129,9 +129,18 @@ def _load_job(job_id: str, *, jobs_root: Path | str, db_path: Path | str) -> Job
 
 
 def _job_root(job_id: str, jobs_root: Path | str) -> Path:
+    try:
+        _validate_job_id(job_id)
+    except ValueError as exc:
+        raise JobNotFound(f"job not found: {job_id}") from exc
+
     root = Path(jobs_root) / job_id
     if (root / "job.json").exists():
-        return root
+        try:
+            if read_job(root).id == job_id:
+                return root
+        except Exception:
+            pass
     jobs_root_p = Path(jobs_root)
     if jobs_root_p.is_dir():
         for child in jobs_root_p.iterdir():
@@ -143,6 +152,21 @@ def _job_root(job_id: str, jobs_root: Path | str) -> Path:
             except Exception:
                 continue
     raise JobNotFound(f"job not found: {job_id}")
+
+
+def _filter_rows_for_jobs_root(
+    rows: list[dict[str, Any]],
+    jobs_root: Path | str,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        job_id = str(row.get("id") or "")
+        try:
+            _job_root(job_id, jobs_root)
+        except JobNotFound:
+            continue
+        filtered.append(row)
+    return filtered
 
 
 def _fallback_job_summaries(jobs_root: Path | str) -> list[JobSummary]:
@@ -178,6 +202,8 @@ def _last_event_summary(root: Path) -> str | None:
 
 
 def _is_daemon_alive(job_id: str, jobs_root: Path | str) -> bool:
+    from research_agent import daemon
+
     try:
         return daemon.is_daemon_alive(job_id, jobs_root=jobs_root)
     except TypeError as exc:
@@ -186,18 +212,66 @@ def _is_daemon_alive(job_id: str, jobs_root: Path | str) -> bool:
         return daemon.is_daemon_alive(job_id)
 
 
-def _spawn_daemon(job_id: str, jobs_root: Path | str) -> int:
+def _spawn_daemon(
+    job_id: str,
+    jobs_root: Path | str,
+    *,
+    env: dict[str, str] | None = None,
+) -> int:
+    from research_agent import daemon
+
+    def _spawn_without_env() -> int:
+        try:
+            return daemon.spawn_daemon(job_id, jobs_root=jobs_root)
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            return daemon.spawn_daemon(job_id)
+
     try:
-        return daemon.spawn_daemon(job_id, jobs_root=jobs_root)
+        return daemon.spawn_daemon(job_id, jobs_root=jobs_root, env=env)
     except TypeError as exc:
         if "unexpected keyword argument" not in str(exc):
             raise
-        return daemon.spawn_daemon(job_id)
+        if env:
+            old_values = {key: os.environ.get(key) for key in env}
+            os.environ.update(env)
+            try:
+                return _spawn_without_env()
+            finally:
+                for key, old_value in old_values.items():
+                    if old_value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = old_value
+        return _spawn_without_env()
 
 
-def _source_url_for_ids(root: Path, source_ids: list[int]) -> str | None:
+def _source_url_for_ids(
+    root: Path,
+    source_ids: list[int],
+    *,
+    db_path: Path | str,
+) -> str | None:
     if not source_ids:
         return None
+    try:
+        job_id = read_job(root).id
+        conn = db.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT s.url FROM sources s"
+                " JOIN job_sources js ON js.source_id = s.id"
+                " WHERE js.job_id = ? AND s.id = ?",
+                (job_id, source_ids[0]),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is not None:
+            return row["url"] or None
+    except Exception:
+        pass
+
     try:
         report = read_report(root)
     except Exception:
@@ -265,15 +339,16 @@ def start_job(
 
     if max_tasks is not None:
         intake_data["max_tasks"] = max_tasks
+    daemon_env: dict[str, str] = {}
     if local:
         local_cfg = Path("config/models.local.yaml")
         if not local_cfg.exists():
             raise InvalidGoal(f"--local requires {local_cfg} (not found)")
-        os.environ["RESEARCH_MODELS_CONFIG"] = str(local_cfg)
-        os.environ["RESEARCH_DAEMON_SKIP_HEALTH_CHECKS"] = "1"
+        daemon_env["RESEARCH_MODELS_CONFIG"] = str(local_cfg)
+        daemon_env["RESEARCH_DAEMON_SKIP_HEALTH_CHECKS"] = "1"
         intake_data["local"] = True
     if fragments or intake_data.get("fragments"):
-        os.environ["RESEARCH_FRAGMENT_SYNTH"] = "1"
+        daemon_env["RESEARCH_FRAGMENT_SYNTH"] = "1"
         intake_data["fragments"] = True
     if input_csv is not None:
         intake_data["input_csv_artifact"] = artifact_name
@@ -342,7 +417,7 @@ def start_job(
             target_columns=list(target_columns or []),
         )
 
-    pid = _spawn_daemon(job.id, jobs_root_p)
+    pid = _spawn_daemon(job.id, jobs_root_p, env=daemon_env or None)
     return StartJobResult(
         job_id=job.id,
         daemon_pid=pid,
@@ -415,6 +490,8 @@ def list_jobs(
         rows = []
     except Exception:
         rows = []
+    if rows:
+        rows = _filter_rows_for_jobs_root([dict(row) for row in rows], jobs_root)
     if rows:
         return [JobSummary.model_validate(row) for row in rows]
     summaries = _fallback_job_summaries(jobs_root)
@@ -509,6 +586,7 @@ def get_findings(
     job_id: str,
     *,
     jobs_root: Path | str = DEFAULT_JOBS_ROOT,
+    db_path: Path | str = db.DEFAULT_DB_PATH,
 ) -> list[FindingResult]:
     """Read finding files from a job folder.
 
@@ -524,7 +602,7 @@ def get_findings(
                 title=finding.claim,
                 body=finding.body_md,
                 citations=finding.source_ids,
-                source_url=_source_url_for_ids(root, finding.source_ids),
+                source_url=_source_url_for_ids(root, finding.source_ids, db_path=db_path),
                 created_at=finding.created_at,
             )
         )
@@ -571,7 +649,12 @@ def search_findings(
         rows = []
 
     if not rows:
-        rows = _search_fixture_findings(query, job_id=job_id, jobs_root=jobs_root)
+        rows = _search_fixture_findings(
+            query,
+            job_id=job_id,
+            jobs_root=jobs_root,
+            db_path=db_path,
+        )
     return [SearchFindingResult.model_validate(row) for row in rows]
 
 
@@ -580,6 +663,7 @@ def _search_fixture_findings(
     *,
     job_id: str | None,
     jobs_root: Path | str,
+    db_path: Path | str,
 ) -> list[dict[str, Any]]:
     tokens = [token.lower() for token in query.split() if token.strip()]
     if not tokens:
@@ -601,7 +685,11 @@ def _search_fixture_findings(
                     "score": 1.0,
                     "kind": "finding",
                     "snippet": finding.claim,
-                    "source_url": _source_url_for_ids(root, finding.source_ids),
+                    "source_url": _source_url_for_ids(
+                        root,
+                        finding.source_ids,
+                        db_path=db_path,
+                    ),
                     "job_id": read_job(root).id,
                     "id": finding.id,
                     "md_path": finding.md_path,

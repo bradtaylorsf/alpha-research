@@ -88,6 +88,13 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data
 
 
+def _safe_relative_path(value: str, *, field_name: str) -> Path:
+    rel = Path(value)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise ContractReadError(f"{field_name} must stay inside the job folder: {value!r}")
+    return rel
+
+
 def read_job(path: str | Path) -> JobMetadata:
     """Read ``job.json`` from a job folder.
 
@@ -116,7 +123,7 @@ def iter_findings(path: str | Path) -> Iterable[Finding]:
         for sidecar in sorted(findings_dir.glob("[0-9][0-9][0-9][0-9][0-9][0-9].json")):
             data = _read_json(sidecar)
             md_rel = str(data.get("md_path") or f"findings/{sidecar.stem}.md")
-            md_path = root / md_rel
+            md_path = root / _safe_relative_path(md_rel, field_name="finding md_path")
             try:
                 body_md = md_path.read_text(encoding="utf-8")
             except FileNotFoundError as exc:
@@ -141,7 +148,8 @@ def _source_from_sidecar(sidecar: Path) -> Source:
     data = _read_json(sidecar)
     md_rel = data.get("md_path")
     if isinstance(md_rel, str) and md_rel:
-        candidate = sidecar.parent.parent / md_rel
+        rel = _safe_relative_path(md_rel, field_name="source md_path")
+        candidate = sidecar.parent.parent / rel
         md_path = candidate if candidate.exists() else sidecar.with_suffix(".md")
     else:
         md_path = sidecar.with_suffix(".md")
