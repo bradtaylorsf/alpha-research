@@ -30,7 +30,7 @@ from research_agent.tools.models import SearchResult
 
 logger = logging.getLogger(__name__)
 
-Engine = Literal["auto", "brave", "ddg", "google"]
+Engine = Literal["auto", "brave", "ddg", "google", "tavily"]
 
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 BRAVE_HTTP_TIMEOUT_S = 15.0
@@ -323,6 +323,11 @@ def _brave_api_key() -> str | None:
     return config.get("BRAVE_SEARCH_API_KEY")
 
 
+def _tavily_api_key() -> str | None:
+    """Resolve the Tavily API key from env / config, or None."""
+    return config.get("TAVILY_API_KEY")
+
+
 def _normalize_lang(lang: str | None) -> str | None:
     """Return a non-empty Brave language token, or None when unset."""
     if not isinstance(lang, str):
@@ -405,6 +410,54 @@ async def _search_brave(
     return results
 
 
+async def _search_tavily(
+    query: str,
+    max_results: int,
+) -> list[SearchResult]:
+    """Hit the Tavily Search API and return up to ``max_results`` hits.
+
+    Uses the tavily-python AsyncTavilyClient. Free tier allows 1,000
+    API credits/month. ``search_depth="basic"`` costs 1 credit per query.
+    """
+    api_key = _tavily_api_key()
+    if not api_key:
+        logger.warning("tavily search requested but TAVILY_API_KEY not set")
+        return []
+
+    try:
+        from tavily import AsyncTavilyClient
+    except ImportError:
+        logger.warning("tavily-python is not installed; cannot use engine='tavily'")
+        return []
+
+    try:
+        client = AsyncTavilyClient(api_key=api_key)
+        response = await client.search(
+            query=query,
+            max_results=min(max_results, 20),
+            search_depth="basic",
+        )
+    except Exception as exc:  # noqa: BLE001 — network / auth errors must not crash search
+        logger.warning("tavily search failed for %r: %s", query, exc)
+        return []
+
+    results: list[SearchResult] = []
+    for hit in (response.get("results") or [])[:max_results]:
+        url = hit.get("url")
+        if not url:
+            continue
+        results.append(
+            SearchResult(
+                url=url,
+                title=hit.get("title") or url,
+                snippet=hit.get("content") or "",
+                source_kind="web",
+                extras={"source_engine": "tavily", "tavily_score": hit.get("score")},
+            )
+        )
+    return results
+
+
 async def search(
     query: str,
     max_results: int = 10,
@@ -416,8 +469,9 @@ async def search(
 
     Engine selection:
 
-    * ``"auto"`` (default) — Brave Search API when ``BRAVE_SEARCH_API_KEY`` is
-      set, else DDG-Playwright. Keeps callers blissfully unaware.
+    * ``"auto"`` (default) — Tavily when ``TAVILY_API_KEY`` is set, then
+      Brave when ``BRAVE_SEARCH_API_KEY`` is set, else DDG-Playwright.
+    * ``"tavily"`` — force Tavily; returns ``[]`` if the key is missing.
     * ``"brave"`` — force Brave; returns ``[]`` if the key is missing.
     * ``"ddg"`` / ``"google"`` — force the respective Playwright SERP scrape.
 
@@ -432,7 +486,21 @@ async def search(
     normalized_lang = _normalize_lang(lang)
 
     if engine == "auto":
-        engine = "brave" if _brave_api_key() else "ddg"
+        if _tavily_api_key():
+            engine = "tavily"
+        elif _brave_api_key():
+            engine = "brave"
+        else:
+            engine = "ddg"
+
+    if engine == "tavily":
+        if normalized_lang:
+            logger.info(
+                "web_search lang=%r ignored for engine=%s; lang is Brave-only",
+                normalized_lang,
+                engine,
+            )
+        return await _search_tavily(query, max_results)
 
     if engine == "brave":
         return await _search_brave(query, max_results, lang=normalized_lang)

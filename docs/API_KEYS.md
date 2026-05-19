@@ -16,6 +16,7 @@ connector. Sign up only for the connectors you actually plan to use.
 |---|---|---|---|
 | `OPENROUTER_API_KEY` | yes (cloud mode only) | <https://openrouter.ai/settings/keys> | pay-per-token |
 | `BRAVE_SEARCH_API_KEY` | optional but recommended | <https://api.search.brave.com/app/keys> | **free** 2K/mo |
+| `TAVILY_API_KEY` | optional | <https://app.tavily.com> | **free** 1K credits/mo |
 
 If you only run with `--local` (LM Studio, gemma), even OpenRouter is
 optional — LM Studio is your inference backend and there's nothing to
