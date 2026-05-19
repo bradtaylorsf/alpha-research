@@ -494,6 +494,12 @@ async def search(
             engine = "ddg"
 
     if engine == "tavily":
+        if normalized_lang:
+            logger.info(
+                "web_search lang=%r ignored for engine=%s; lang is Brave-only",
+                normalized_lang,
+                engine,
+            )
         return await _search_tavily(query, max_results)
 
     if engine == "brave":

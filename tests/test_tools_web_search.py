@@ -303,6 +303,7 @@ async def test_search_brave_omits_search_lang_when_unset(monkeypatch):
 
 
 async def test_search_auto_brave_includes_lang_when_key_set(monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     payload = _load_json("web_search/lang-fr.json")
     captured = _patch_brave_httpx(monkeypatch, payload=payload)
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
@@ -318,6 +319,7 @@ async def test_search_auto_ddg_fallback_logs_lang_ignored_and_proceeds(
     monkeypatch,
     caplog,
 ):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
     page = FakePage(_load("web_search_ddg.html"))
     _patch_browser_session(monkeypatch, page)
@@ -340,6 +342,7 @@ async def test_search_auto_ddg_fallback_with_lang_zero_results_is_quiet(
     tmp_path,
     caplog,
 ):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
     page = FakePage("<html><body>no matches here</body></html>")
@@ -369,6 +372,7 @@ async def test_search_auto_ddg_fallback_with_lang_session_failure_is_quiet(
         raise web_search.PlaywrightError("launch denied")
         yield
 
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
     monkeypatch.setattr(browser, "browser_session", _broken_session)
 
@@ -380,6 +384,171 @@ async def test_search_auto_ddg_fallback_with_lang_session_failure_is_quiet(
     assert any("lang='fr' ignored" in message for message in messages)
     assert not any("browser session failed" in message for message in messages)
     assert not any(record.levelno >= logging.WARNING for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Tavily engine tests
+# ---------------------------------------------------------------------------
+
+
+async def test_search_tavily_maps_results_with_score(monkeypatch):
+    """Successful Tavily search maps results to SearchResult with tavily_score."""
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test-key")
+
+    fake_response = {
+        "results": [
+            {
+                "url": "https://example.com/tavily-hit",
+                "title": "Tavily Hit One",
+                "content": "Snippet from Tavily",
+                "score": 0.95,
+            },
+            {
+                "url": "https://example.com/tavily-hit-2",
+                "title": "Tavily Hit Two",
+                "content": "Another snippet",
+                "score": 0.80,
+            },
+        ]
+    }
+
+    class _FakeAsyncTavilyClient:
+        def __init__(self, api_key):
+            self._api_key = api_key
+
+        async def search(self, *, query, max_results, search_depth):
+            return fake_response
+
+    monkeypatch.setattr(
+        "tavily.AsyncTavilyClient", _FakeAsyncTavilyClient, raising=False
+    )
+    # Force re-import so the lazy import inside _search_tavily picks up the mock.
+    import tavily
+
+    monkeypatch.setattr(tavily, "AsyncTavilyClient", _FakeAsyncTavilyClient)
+
+    results = await web_search.search("test query", max_results=5, engine="tavily")
+
+    assert len(results) == 2
+    assert all(isinstance(r, SearchResult) for r in results)
+    assert results[0].url == "https://example.com/tavily-hit"
+    assert results[0].title == "Tavily Hit One"
+    assert results[0].snippet == "Snippet from Tavily"
+    assert results[0].source_kind == "web"
+    assert results[0].extras["source_engine"] == "tavily"
+    assert results[0].extras["tavily_score"] == 0.95
+    assert results[1].extras["tavily_score"] == 0.80
+
+
+async def test_search_tavily_no_key_returns_empty(monkeypatch, caplog):
+    """Missing TAVILY_API_KEY → warning + empty list."""
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+    caplog.set_level(logging.WARNING, logger="research_agent.tools.web_search")
+    results = await web_search.search("test", engine="tavily")
+
+    assert results == []
+    assert any("TAVILY_API_KEY not set" in r.getMessage() for r in caplog.records)
+
+
+async def test_search_tavily_exception_returns_empty(monkeypatch, caplog):
+    """Network/auth errors in Tavily → warning + empty list, no crash."""
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test-key")
+
+    class _BrokenClient:
+        def __init__(self, api_key):
+            pass
+
+        async def search(self, **kwargs):
+            raise RuntimeError("connection refused")
+
+    import tavily
+
+    monkeypatch.setattr(tavily, "AsyncTavilyClient", _BrokenClient)
+
+    caplog.set_level(logging.WARNING, logger="research_agent.tools.web_search")
+    results = await web_search.search("test", engine="tavily")
+
+    assert results == []
+    assert any("tavily search failed" in r.getMessage() for r in caplog.records)
+
+
+async def test_search_tavily_import_error_returns_empty(monkeypatch, caplog):
+    """If tavily-python is not installed, _search_tavily warns and returns []."""
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test-key")
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _block_tavily(name, *args, **kwargs):
+        if name == "tavily":
+            raise ImportError("no module named 'tavily'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _block_tavily)
+
+    caplog.set_level(logging.WARNING, logger="research_agent.tools.web_search")
+    results = await web_search.search("test", engine="tavily")
+
+    assert results == []
+    assert any("tavily-python is not installed" in r.getMessage() for r in caplog.records)
+
+
+async def test_search_tavily_logs_lang_ignored(monkeypatch, caplog):
+    """Tavily does not support lang; passing it logs an info message like DDG/Google."""
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test-key")
+
+    class _FakeAsyncTavilyClient:
+        def __init__(self, api_key):
+            pass
+
+        async def search(self, **kwargs):
+            return {"results": [{"url": "https://example.com/x", "title": "X", "content": "c", "score": 0.5}]}
+
+    import tavily
+
+    monkeypatch.setattr(tavily, "AsyncTavilyClient", _FakeAsyncTavilyClient)
+
+    caplog.set_level(logging.INFO, logger="research_agent.tools.web_search")
+    results = await web_search.search("test", engine="tavily", lang="fr")
+
+    assert len(results) == 1
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("lang='fr' ignored" in m and "engine=tavily" in m for m in messages)
+
+
+async def test_search_auto_prefers_tavily_when_key_set(monkeypatch):
+    """engine='auto' with TAVILY_API_KEY set routes to Tavily."""
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test-key")
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-key-also-set")
+
+    fake_response = {
+        "results": [
+            {
+                "url": "https://example.com/auto-tavily",
+                "title": "Auto Tavily",
+                "content": "Found via auto",
+                "score": 0.9,
+            },
+        ]
+    }
+
+    class _FakeAsyncTavilyClient:
+        def __init__(self, api_key):
+            pass
+
+        async def search(self, **kwargs):
+            return fake_response
+
+    import tavily
+
+    monkeypatch.setattr(tavily, "AsyncTavilyClient", _FakeAsyncTavilyClient)
+
+    results = await web_search.search("test", max_results=5)
+
+    assert len(results) == 1
+    assert results[0].extras["source_engine"] == "tavily"
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +575,8 @@ def test_smoke_web_search_invokes_auto_engine_only(monkeypatch):
         return []
 
     monkeypatch.setattr(web_search, "search", _fake_search)
-    # No Brave key → label should say ddg-fallback when results are empty.
+    # No API keys → label should say ddg-fallback when results are empty.
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
 
     output = TOOL_REGISTRY["web_search"]("project 2025")
@@ -426,6 +596,7 @@ def test_smoke_web_search_brave_path_labels_engine(monkeypatch):
     from research_agent.tools import TOOL_REGISTRY
     from research_agent.tools.models import SearchResult
 
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
 
     fake_hit = SearchResult(
