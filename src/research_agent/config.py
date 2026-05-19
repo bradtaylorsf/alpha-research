@@ -38,6 +38,14 @@ EXPECTED_ENV_KEYS: tuple[EnvKey, ...] = (
         ),
     ),
     EnvKey(
+        name="TAVILY_API_KEY",
+        required=False,
+        description=(
+            "Tavily Search API key. When set, web_search 'auto' prefers Tavily"
+            " over Brave and DDG-Playwright. Free tier: 1,000 credits/month."
+        ),
+    ),
+    EnvKey(
         name="RESEARCH_USER_AGENT",
         required=False,
         description=(
