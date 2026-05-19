@@ -383,6 +383,284 @@ def test_smoke_pdf_against_local_fixture():
 
 
 # ---------------------------------------------------------------------------
+# Per-page extraction (issue #351 — dossier mode, epic #359)
+# ---------------------------------------------------------------------------
+
+
+def _stub_pypdf_pages(monkeypatch, pages: list[str]):
+    """Install a pypdf stub whose reader returns the supplied per-page texts."""
+
+    class _FakePage:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def extract_text(self) -> str:
+            return self._text
+
+    class _FakeReader:
+        def __init__(self, *_a, **_kw) -> None:
+            self.pages = [_FakePage(t) for t in pages]
+            self.outline = []
+
+    fake_pypdf = type("M", (), {"PdfReader": _FakeReader})
+    monkeypatch.setitem(__import__("sys").modules, "pypdf", fake_pypdf)
+
+
+def test_extract_pages_sync_single_page_fixture():
+    """Real single-page arxiv fixture: returns one tuple with 1-based page_no."""
+    pages = pdf.extract_pages_sync(ARXIV_PDF)
+    assert len(pages) == 1
+    page_no, text = pages[0]
+    assert page_no == 1
+    assert "arxiv research paper text" in text
+
+
+def test_extract_pages_sync_returns_distinct_per_page(monkeypatch):
+    """Multi-page text-layer: every page's text is distinct, in order, no bleed."""
+    _stub_pypdf_pages(
+        monkeypatch,
+        [
+            "First page content about Alpha. " * 20,
+            "Second page covers Beta in detail. " * 20,
+            "Third page mentions Gamma topics. " * 20,
+        ],
+    )
+
+    pages = pdf.extract_pages_sync(ARXIV_PDF)
+    assert [n for n, _ in pages] == [1, 2, 3]
+    assert "Alpha" in pages[0][1]
+    assert "Beta" in pages[1][1]
+    assert "Gamma" in pages[2][1]
+    # Acceptance: per-page boundaries hold, no cross-page bleed.
+    assert "Beta" not in pages[0][1]
+    assert "Alpha" not in pages[1][1]
+    assert "Gamma" not in pages[1][1]
+
+
+def test_extract_pages_sync_respects_max_pages(monkeypatch):
+    _stub_pypdf_pages(monkeypatch, [f"Page {i} body " * 30 for i in range(5)])
+    pages = pdf.extract_pages_sync(ARXIV_PDF, max_pages=2)
+    assert [n for n, _ in pages] == [1, 2]
+
+
+def test_extract_pages_sync_truncates_per_page(monkeypatch):
+    """max_chars is applied per page so callers see bounded entries."""
+    _stub_pypdf_pages(monkeypatch, ["x" * 5_000, "y" * 5_000])
+    monkeypatch.setattr(pdf, "_pages_density", lambda _pages: True)
+
+    pages = pdf.extract_pages_sync(ARXIV_PDF, max_chars=100)
+    assert len(pages) == 2
+    for _, text in pages:
+        body, _, _ = text.partition("…[truncated]")
+        assert len(body.rstrip()) <= 100
+        assert text.endswith("…[truncated]")
+
+
+def test_extract_pages_sync_emits_empty_string_for_blank_pages(monkeypatch):
+    """Sub-floor pages remain in the list so callers can correlate by index."""
+    _stub_pypdf_pages(
+        monkeypatch,
+        ["Real content " * 30, "", "More content " * 30, ""],
+    )
+
+    pages = pdf.extract_pages_sync(ARXIV_PDF)
+    assert [n for n, _ in pages] == [1, 2, 3, 4]
+    assert pages[1][1] == ""
+    assert pages[3][1] == ""
+
+
+def test_extract_pages_sync_falls_through_to_ocr(monkeypatch):
+    """Scanned PDF: pypdf empty, OCR fills every page, distinct per page."""
+    monkeypatch.setattr(pdf, "_extract_pypdf_pages", lambda *a, **k: ["", ""])
+    monkeypatch.setattr(pdf, "_extract_pdfplumber_pages", lambda *a, **k: ["", ""])
+    monkeypatch.setattr(
+        pdf,
+        "_extract_tesseract_pages",
+        lambda *a, **k: [
+            "Scanned filing recovered via OCR " * 20,
+            "Page two OCR distinct content " * 20,
+        ],
+    )
+
+    pages = pdf.extract_pages_sync(SCANNED_PDF)
+    assert len(pages) == 2
+    assert [n for n, _ in pages] == [1, 2]
+    assert "Scanned filing" in pages[0][1]
+    assert "Page two OCR" in pages[1][1]
+    # Cross-page bleed check on the OCR fall-through path too.
+    assert "Page two OCR" not in pages[0][1]
+    assert "Scanned filing" not in pages[1][1]
+
+
+def test_extract_pages_sync_no_density_returns_best_layer(monkeypatch):
+    """No layer meets the floor — return whichever produced the most text."""
+    monkeypatch.setattr(pdf, "_extract_pypdf_pages", lambda *a, **k: [""])
+    monkeypatch.setattr(
+        pdf, "_extract_pdfplumber_pages", lambda *a, **k: ["short"]
+    )
+    monkeypatch.setattr(
+        pdf,
+        "_extract_tesseract_pages",
+        lambda *a, **k: ["a much longer string that beats plumber"],
+    )
+
+    pages = pdf.extract_pages_sync(ARXIV_PDF)
+    assert len(pages) == 1
+    assert "much longer string" in pages[0][1]
+
+
+def test_extract_pages_sync_returns_empty_when_every_layer_yields_nothing(
+    monkeypatch,
+):
+    monkeypatch.setattr(pdf, "_extract_pypdf_pages", lambda *a, **k: [])
+    monkeypatch.setattr(pdf, "_extract_pdfplumber_pages", lambda *a, **k: [])
+    monkeypatch.setattr(pdf, "_extract_tesseract_pages", lambda *a, **k: [])
+
+    assert pdf.extract_pages_sync(ARXIV_PDF) == []
+
+
+def test_extract_pages_sync_hybrid_merges_text_and_ocr(monkeypatch):
+    """Hybrid: text-layer + OCR supplement per page, no cross-page bleed."""
+    monkeypatch.setattr(
+        pdf,
+        "_extract_pypdf_pages",
+        lambda *a, **k: ["Text layer page one.", "Text layer page two."],
+    )
+    monkeypatch.setattr(pdf, "_extract_pdfplumber_pages", lambda *a, **k: [])
+    monkeypatch.setattr(
+        pdf,
+        "_extract_tesseract_pages",
+        lambda *a, **k: ["OCR alpha supplement.", "OCR beta supplement."],
+    )
+
+    pages = pdf.extract_pages_sync(ARXIV_PDF, hybrid_pages=True)
+    assert [n for n, _ in pages] == [1, 2]
+    p1, p2 = pages[0][1], pages[1][1]
+    assert "Text layer page one." in p1
+    assert "OCR alpha supplement." in p1
+    assert "[OCR supplement]" in p1
+    assert "Text layer page two." in p2
+    assert "OCR beta supplement." in p2
+    # The signal acceptance criterion: OCR for page N never appears in
+    # any other page's slot.
+    assert "OCR beta supplement" not in p1
+    assert "OCR alpha supplement" not in p2
+    assert "Text layer page two" not in p1
+    assert "Text layer page one" not in p2
+
+
+def test_extract_pages_sync_hybrid_text_only_when_ocr_unavailable(monkeypatch):
+    """Hybrid with no OCR binary: text-only pages, no supplement marker."""
+    monkeypatch.setattr(
+        pdf,
+        "_extract_pypdf_pages",
+        lambda *a, **k: ["Text layer page one.", "Text layer page two."],
+    )
+    monkeypatch.setattr(pdf, "_extract_pdfplumber_pages", lambda *a, **k: [])
+    monkeypatch.setattr(pdf, "_extract_tesseract_pages", lambda *a, **k: [])
+
+    pages = pdf.extract_pages_sync(ARXIV_PDF, hybrid_pages=True)
+    assert len(pages) == 2
+    assert pages[0][1] == "Text layer page one."
+    assert pages[1][1] == "Text layer page two."
+    assert "[OCR supplement]" not in pages[0][1]
+
+
+def test_extract_pages_sync_hybrid_ocr_only_when_text_blank(monkeypatch):
+    """Hybrid with empty text layer falls back to OCR-only pages."""
+    monkeypatch.setattr(pdf, "_extract_pypdf_pages", lambda *a, **k: ["", ""])
+    monkeypatch.setattr(
+        pdf, "_extract_pdfplumber_pages", lambda *a, **k: ["", ""]
+    )
+    monkeypatch.setattr(
+        pdf,
+        "_extract_tesseract_pages",
+        lambda *a, **k: ["OCR alpha page one.", "OCR beta page two."],
+    )
+
+    pages = pdf.extract_pages_sync(ARXIV_PDF, hybrid_pages=True)
+    assert len(pages) == 2
+    assert pages[0][1] == "OCR alpha page one."
+    assert pages[1][1] == "OCR beta page two."
+    assert "[OCR supplement]" not in pages[0][1]
+
+
+def test_extract_pages_sync_hybrid_prefers_plumber_when_pypdf_thin(monkeypatch):
+    """When pypdf returns thin text but plumber recovers more, hybrid uses plumber."""
+    monkeypatch.setattr(pdf, "_extract_pypdf_pages", lambda *a, **k: ["x", "y"])
+    monkeypatch.setattr(
+        pdf,
+        "_extract_pdfplumber_pages",
+        lambda *a, **k: [
+            "Plumber recovered structured text " * 5,
+            "Plumber page two structured " * 5,
+        ],
+    )
+    monkeypatch.setattr(pdf, "_extract_tesseract_pages", lambda *a, **k: [])
+
+    pages = pdf.extract_pages_sync(ARXIV_PDF, hybrid_pages=True)
+    assert "Plumber recovered structured text" in pages[0][1]
+    assert "Plumber page two structured" in pages[1][1]
+
+
+def test_extract_pages_sync_url_routes_through_fetch(monkeypatch):
+    captured: list[str] = []
+
+    async def _fake_fetch(url, *, timeout=60.0):
+        captured.append(url)
+        return ARXIV_PDF.read_bytes()
+
+    monkeypatch.setattr(pdf, "fetch_pdf_bytes", _fake_fetch)
+
+    pages = pdf.extract_pages_sync("https://example.com/sample.pdf")
+    assert captured == ["https://example.com/sample.pdf"]
+    assert pages
+    assert "arxiv research paper text" in pages[0][1]
+
+
+def test_extract_pages_sync_returns_empty_for_missing_path():
+    assert pdf.extract_pages_sync("/no/such/file.pdf") == []
+
+
+async def test_extract_pages_async_wrapper(monkeypatch):
+    """Async wrapper runs the same core in a thread executor."""
+    _stub_pypdf_pages(monkeypatch, ["Async page body " * 30])
+    pages = await pdf.extract_pages(ARXIV_PDF)
+    assert pages[0][0] == 1
+    assert "Async page body" in pages[0][1]
+
+
+def test_extract_sync_regression_unchanged():
+    """extract_sync() contract must stay green after the additive change."""
+    text = pdf.extract_sync(ARXIV_PDF)
+    assert "## Page 1" in text
+    assert "arxiv research paper text" in text
+
+
+def test_hybrid_merge_pages_zero_length_inputs():
+    """Edge: empty lists merge to empty list."""
+    assert pdf._hybrid_merge_pages([], []) == []
+
+
+def test_hybrid_merge_pages_uneven_lengths():
+    """Edge: when one list is shorter, the longer one's tail is preserved."""
+    merged = pdf._hybrid_merge_pages(["A", "B", "C"], ["x"])
+    assert merged[0] == "A\n\n[OCR supplement]\nx"
+    assert merged[1] == "B"
+    assert merged[2] == "C"
+
+
+def test_pages_density_empty_returns_false():
+    assert pdf._pages_density([]) is False
+    assert pdf._pages_density(["", "", ""]) is False
+
+
+def test_pages_density_passes_when_above_threshold():
+    one_page = "a" * (pdf._DENSITY_MIN_ALPHA_PER_PAGE * 2)
+    assert pdf._pages_density([one_page]) is True
+
+
+# ---------------------------------------------------------------------------
 # Section walk (issue #206)
 # ---------------------------------------------------------------------------
 
