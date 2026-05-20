@@ -15,7 +15,6 @@ cloud failure (intake must not block on cloud failure).
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import Any
 
 import questionary
@@ -113,7 +112,7 @@ def _generate_followup_questions(answers_so_far: dict[str, Any]) -> list[Followu
     Separated from :func:`_collect_followups` so tests can stub the LLM
     call independently of the user-facing prompt loop.
     """
-    cfg = load_models_config(Path("config/models.yaml"))
+    cfg = load_models_config()
     tiers = cfg["tiers"]
     if "general" not in tiers:
         raise KeyError("'general' tier missing from config/models.yaml")

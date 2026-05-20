@@ -139,6 +139,24 @@ def start_command(
         "--corpus",
         help="Path to a local corpus directory to scope the research.",
     ),
+    pdf_hybrid_pages: bool = typer.Option(
+        False,
+        "--pdf-hybrid-pages",
+        help=(
+            "When indexing corpus PDFs, merge each page's text layer with a"
+            " Tesseract OCR supplement (for mixed text + scanned regions)."
+        ),
+    ),
+    pdf_max_pages: int = typer.Option(
+        1000,
+        "--pdf-max-pages",
+        min=1,
+        max=1000,
+        help=(
+            "Max pages to extract from each PDF when indexing a local corpus"
+            " (default 1000)."
+        ),
+    ),
     disk_cap_gb: float = typer.Option(
         10.0,
         "--disk-cap-gb",
@@ -235,6 +253,9 @@ def start_command(
         }
         if corpus:
             intake_data["corpus"] = corpus
+            intake_data["pdf_max_pages"] = pdf_max_pages
+        if pdf_hybrid_pages:
+            intake_data["pdf_hybrid_pages"] = True
     else:
         answers = intake.run_intake(
             corpus=corpus,
@@ -289,6 +310,14 @@ def start_command(
 
     if fragments:
         intake_data["fragments"] = True
+
+    if pdf_hybrid_pages:
+        intake_data["pdf_hybrid_pages"] = True
+
+    if intake_data.get("corpus") or corpus:
+        if corpus:
+            intake_data.setdefault("corpus", corpus)
+        intake_data["pdf_max_pages"] = pdf_max_pages
 
     goal_text = str(intake_data.get("goal") or "").strip()
     try:
@@ -685,7 +714,7 @@ def smoke_llm_command(
     from research_agent.llm.router import load_models_config
     from research_agent.llm.smoke import run_llm_smoke
 
-    cfg = load_models_config(Path("config/models.yaml"))
+    cfg = load_models_config()
     result = asyncio.run(run_llm_smoke(tier, prompt, cfg, image_path=image))
     _print_smoke_result(result)
     if not result.ok:
@@ -761,7 +790,7 @@ def search_command(
         job_id = job
 
     try:
-        models_cfg = None if fts_only else load_models_config(Path("config/models.yaml"))
+        models_cfg = None if fts_only else load_models_config()
         results = [
             item.model_dump()
             for item in public_api.search_findings(

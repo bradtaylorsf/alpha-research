@@ -28,6 +28,10 @@ def _reset_env_loader(monkeypatch):
         "RESEARCH_HEADFUL",
         "RESEARCH_FRAGMENT_SYNTH",
         "LMSTUDIO_BASE_URL",
+        # Issue #373: resolve_models_config_path() honors this env var.
+        # Tests assume the default ``config/models.yaml`` lookup, so clear
+        # any operator-set override from the host ``.env`` before each run.
+        "RESEARCH_MODELS_CONFIG",
     )
     for key in env_keys:
         os.environ.pop(key, None)

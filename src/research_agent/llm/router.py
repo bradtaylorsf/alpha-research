@@ -123,13 +123,34 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
-def load_models_config(path: Path | str = "config/models.yaml") -> dict[str, Any]:
-    """Parse ``config/models.yaml`` and return the raw dict.
+def resolve_models_config_path() -> Path:
+    """Return the active models YAML path.
+
+    Honors the ``RESEARCH_MODELS_CONFIG`` env var (loaded via
+    :mod:`research_agent.config` so ``.env`` / ``.env.local`` files apply
+    consistently); defaults to ``config/models.yaml`` when unset. This is
+    the single source of truth — every caller that needs the active
+    models config path (CLI subcommands, ``intake``, ``doctor``, the
+    daemon's router builder, the local-corpus embedding endpoint
+    resolver) reads through here so a deployment that points the daemon
+    at ``config/models.local.yaml`` doesn't have ``research doctor`` or
+    ``research smoke-llm`` silently checking the wrong file.
+    """
+    raw = cfg_get("RESEARCH_MODELS_CONFIG") or "config/models.yaml"
+    return Path(raw)
+
+
+def load_models_config(path: Path | str | None = None) -> dict[str, Any]:
+    """Parse the active models routing YAML and return the raw dict.
+
+    When ``path`` is omitted, uses :func:`resolve_models_config_path` so
+    every caller honors ``RESEARCH_MODELS_CONFIG`` without re-implementing
+    the env lookup.
 
     Raises :class:`ValueError` if the top-level ``tiers`` key is missing —
     every other layer of the system assumes it exists.
     """
-    p = Path(path)
+    p = Path(path) if path is not None else resolve_models_config_path()
     with p.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
     if not isinstance(data, dict) or "tiers" not in data:
@@ -803,4 +824,5 @@ __all__ = [
     "Router",
     "Tier",
     "load_models_config",
+    "resolve_models_config_path",
 ]

@@ -2548,6 +2548,131 @@ def test_expand_search_to_fetches_no_plan_falls_back_to_three(job: Job) -> None:
 
 
 # ---------------------------------------------------------------------------
+# _expand_corpus_query_to_extract_findings (issue #378)
+# ---------------------------------------------------------------------------
+
+
+def _make_corpus_hits(n: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "source_id": 100 + i,
+            "sha256": f"deadbeef{i:04d}",
+            "md_path": f"sources/deadbeef{i:04d}.md",
+            "score": 0.9 - i * 0.05,
+        }
+        for i in range(n)
+    ]
+
+
+def test_expand_corpus_query_broad_scope_emits_seven_extract_findings(job: Job) -> None:
+    """Mirrors ``_expand_search_to_fetches`` cardinality at broad scope."""
+    from research_agent.orchestrator.loop import _expand_corpus_query_to_extract_findings
+
+    _persist_plan_with_scope(job, "broad")
+    hits = _make_corpus_hits(10)
+
+    out = _expand_corpus_query_to_extract_findings(job, {"query": "q"}, hits)
+
+    assert len(out["follow_up_tasks"]) == 7
+    assert len(out["results"]) == 10
+    assert all(t["kind"] == "extract_findings" for t in out["follow_up_tasks"])
+    assert all(
+        t["payload"]["source_id"] == hit["source_id"]
+        for t, hit in zip(out["follow_up_tasks"], hits[:7])
+    )
+
+
+@pytest.mark.parametrize(
+    "scope,expected",
+    [
+        ("narrow", 3),
+        ("medium", 5),
+        ("broad", 7),
+        ("comprehensive", 10),
+    ],
+)
+def test_expand_corpus_query_scope_mapping(
+    job: Job, scope: ScopeClass, expected: int
+) -> None:
+    """Default-K table is reused; no duplicate constants drift."""
+    from research_agent.orchestrator.loop import _expand_corpus_query_to_extract_findings
+
+    _persist_plan_with_scope(job, scope)
+    hits = _make_corpus_hits(10)
+
+    out = _expand_corpus_query_to_extract_findings(job, {"query": "q"}, hits)
+
+    assert len(out["follow_up_tasks"]) == expected
+
+
+def test_expand_corpus_query_payload_top_k_override_wins(job: Job) -> None:
+    """Explicit ``expand_top_k`` overrides the scope default."""
+    from research_agent.orchestrator.loop import _expand_corpus_query_to_extract_findings
+
+    _persist_plan_with_scope(job, "broad")
+    hits = _make_corpus_hits(10)
+
+    out = _expand_corpus_query_to_extract_findings(
+        job, {"query": "q", "expand_top_k": 2}, hits
+    )
+
+    assert len(out["follow_up_tasks"]) == 2
+
+
+def test_expand_corpus_query_skips_hits_without_source_id(job: Job) -> None:
+    """Hits missing an integer ``source_id`` stay in ``results`` but emit no follow-up."""
+    from research_agent.orchestrator.loop import _expand_corpus_query_to_extract_findings
+
+    _persist_plan_with_scope(job, "broad")
+    hits = [
+        {"source_id": 1, "sha256": "abc", "md_path": "p", "score": 0.9},
+        {"sha256": "xyz", "md_path": "p2", "score": 0.7},  # no source_id
+        {"source_id": None, "sha256": "qqq", "md_path": "p3", "score": 0.5},
+    ]
+
+    out = _expand_corpus_query_to_extract_findings(job, {"query": "q"}, hits)
+
+    assert len(out["results"]) == 3
+    assert len(out["follow_up_tasks"]) == 1
+    assert out["follow_up_tasks"][0]["payload"]["source_id"] == 1
+
+
+def test_expand_corpus_query_empty_results_emit_no_follow_ups(job: Job) -> None:
+    """Empty semantic search → empty follow-up list, no errors."""
+    from research_agent.orchestrator.loop import _expand_corpus_query_to_extract_findings
+
+    _persist_plan_with_scope(job, "broad")
+    out = _expand_corpus_query_to_extract_findings(job, {"query": "q"}, [])
+
+    assert out["results"] == []
+    assert out["follow_up_tasks"] == []
+
+
+def test_expand_corpus_query_sub_question_fallback_chain(job: Job) -> None:
+    """``sub_question`` > ``query`` > ``job.goal``."""
+    from research_agent.orchestrator.loop import _expand_corpus_query_to_extract_findings
+
+    _persist_plan_with_scope(job, "narrow")
+    hits = _make_corpus_hits(3)
+
+    # 1. explicit sub_question wins
+    out = _expand_corpus_query_to_extract_findings(
+        job,
+        {"sub_question": "explicit Q", "query": "ignored"},
+        hits,
+    )
+    assert all(t["payload"]["sub_question"] == "explicit Q" for t in out["follow_up_tasks"])
+
+    # 2. fall back to query
+    out = _expand_corpus_query_to_extract_findings(job, {"query": "from-query"}, hits)
+    assert all(t["payload"]["sub_question"] == "from-query" for t in out["follow_up_tasks"])
+
+    # 3. fall back to job.goal
+    out = _expand_corpus_query_to_extract_findings(job, {}, hits)
+    assert all(t["payload"]["sub_question"] == job.goal for t in out["follow_up_tasks"])
+
+
+# ---------------------------------------------------------------------------
 # Cornerstone-document extraction (issue #177)
 # ---------------------------------------------------------------------------
 

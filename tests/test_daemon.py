@@ -1462,3 +1462,190 @@ async def test_cancel_with_timeout_no_op_for_already_done_task() -> None:
     assert task.done()
     # Should be a no-op — neither raise nor block.
     await daemon._cancel_with_timeout(task, "already_done", timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# _index_intake_corpus + corpus_indexed event (issue #377)
+# ---------------------------------------------------------------------------
+
+
+def _update_intake(job: Job, **fields: Any) -> None:
+    """Mutate ``job.intake`` in-memory, persist the JSON sidecar, AND update
+    the ``jobs.intake_json`` row so ``Job.load(...)`` inside ``run_daemon``
+    sees the new fields. ``Job.load`` reads from the DB, not the sidecar.
+    """
+    job.intake.update(fields)
+    intake_json = json.dumps(job.intake, sort_keys=True)
+    (job.root / "intake.json").write_text(intake_json, encoding="utf-8")
+    conn = db.connect(job.db_path)
+    try:
+        conn.execute(
+            "UPDATE jobs SET intake_json = ? WHERE id = ?",
+            (intake_json, job.id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_index_intake_corpus_returns_none_when_no_corpus_configured(
+    seeded_job: Job,
+) -> None:
+    """Jobs without ``intake.corpus`` skip the indexing pass entirely."""
+    result = await daemon._index_intake_corpus(seeded_job)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_index_intake_corpus_raises_when_corpus_missing(
+    seeded_job: Job, tmp_path: Path
+) -> None:
+    """A configured but-non-existent corpus path fails fast (operator typo)."""
+    _update_intake(seeded_job, corpus=str(tmp_path / "does-not-exist"))
+
+    with pytest.raises(FileNotFoundError):
+        await daemon._index_intake_corpus(seeded_job)
+
+
+@pytest.mark.asyncio
+async def test_index_intake_corpus_calls_local_corpus_with_hybrid_pages(
+    seeded_job: Job,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intake corpus path + hybrid flag flow into ``local_corpus.index``."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "doc.txt").write_text("hello", encoding="utf-8")
+
+    _update_intake(seeded_job, corpus=str(corpus_dir), pdf_hybrid_pages=True)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_index(path: Path, job: Job, *, hybrid_pages: bool = False) -> dict[str, int]:
+        captured["path"] = path
+        captured["job_id"] = job.id
+        captured["hybrid_pages"] = hybrid_pages
+        return {
+            "files_indexed": 1,
+            "files_skipped": 0,
+            "chunks_indexed": 1,
+            "chunks_skipped": 0,
+            "embed_dim": 768,
+        }
+
+    monkeypatch.setattr("research_agent.tools.local_corpus.index", _fake_index)
+
+    result = await daemon._index_intake_corpus(seeded_job)
+
+    assert result is not None
+    assert result["files_indexed"] == 1
+    assert captured["job_id"] == seeded_job.id
+    assert captured["hybrid_pages"] is True
+    assert captured["path"] == corpus_dir
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_indexes_intake_corpus_on_startup(
+    seeded_job: Job,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_daemon`` emits ``corpus_indexed`` before the planner fires."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "doc.txt").write_text("hello", encoding="utf-8")
+
+    _update_intake(seeded_job, corpus=str(corpus_dir), pdf_max_pages=250)
+
+    index_calls: list[Path] = []
+
+    def _fake_index(path: Path, job: Job, *, hybrid_pages: bool = False) -> dict[str, int]:
+        index_calls.append(path)
+        return {
+            "files_indexed": 1,
+            "files_skipped": 0,
+            "chunks_indexed": 1,
+            "chunks_skipped": 0,
+            "embed_dim": 768,
+        }
+
+    monkeypatch.setattr("research_agent.tools.local_corpus.index", _fake_index)
+
+    async def _instant_run_loop(job: Job, router: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"tasks_done": 0, "stopped": False, "completed": True, "cap_hit": False}
+
+    _patch_run_daemon_for_in_process(monkeypatch, run_loop_impl=_instant_run_loop)
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert exit_code == 0
+    assert index_calls == [corpus_dir]
+
+    conn = db.connect(seeded_job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'corpus_indexed'",
+            (seeded_job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["corpus"] == str(corpus_dir)
+    assert payload["pdf_hybrid_pages"] is False
+    assert payload["pdf_max_pages"] == 250
+    assert payload["files_indexed"] == 1
+    assert payload["embed_dim"] == 768
+
+
+@pytest.mark.asyncio
+async def test_run_daemon_fails_when_corpus_indexing_raises(
+    seeded_job: Job,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A FileNotFoundError on corpus index marks the job ``failed`` with
+    a single ``error`` event tagged ``stage=corpus_index``.
+    """
+    _update_intake(seeded_job, corpus=str(tmp_path / "missing-corpus"))
+
+    _patch_run_daemon_for_in_process(
+        monkeypatch,
+        run_loop_impl=lambda job, router, **kw: (_ for _ in ()).throw(
+            AssertionError("run_loop must not be called when corpus index fails")
+        ),
+    )
+
+    exit_code = await daemon.run_daemon(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert exit_code == 1
+
+    refreshed = Job.load(
+        seeded_job.id,
+        jobs_root=seeded_job.root.parent,
+        db_path=seeded_job.db_path,
+    )
+    assert refreshed.status == "failed"
+
+    conn = db.connect(seeded_job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM events"
+            " WHERE job_id = ? AND kind = 'error'",
+            (seeded_job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    stages = [json.loads(r["payload_json"]).get("stage") for r in rows]
+    assert "corpus_index" in stages

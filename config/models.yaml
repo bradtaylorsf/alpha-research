@@ -8,7 +8,7 @@
 tiers:
   fast:
     provider: lmstudio
-    model: qwen3-4b-instruct-q4_k_m
+    model: josiefied-qwen3-4b-instruct-2507-abliterated-v2
     timeout_s: 30
     fallback_tier: frontier_speed
     purpose: |
@@ -17,7 +17,7 @@ tiers:
 
   general:
     provider: lmstudio
-    model: qwen3-32b-instruct-q6_k
+    model: qwen3.6-35b-a3b-holo3-qwopus-instruct-qx64-hi-mlx
     timeout_s: 90
     fallback_tier: frontier_speed
     purpose: |
@@ -26,7 +26,7 @@ tiers:
 
   reasoner:
     provider: lmstudio
-    model: deepseek-r1-distill-32b-q6_k
+    model: deepseek-r1-distill-qwen-32b
     timeout_s: 300
     fallback_tier: frontier
     purpose: |
@@ -35,7 +35,7 @@ tiers:
 
   vision:
     provider: lmstudio
-    model: qwen3-vl-8b-instruct
+    model: deepseek-ocr-2
     timeout_s: 60
     fallback_tier: frontier_speed
     purpose: PDF page screenshots, chart reading.
@@ -45,7 +45,7 @@ tiers:
   # surface as a hard error rather than silently rerouting to a chat model.
   embeddings:
     provider: lmstudio
-    model: qwen3-embedding-4b
+    model: qwen3-embedding-4b-dwq
     timeout_s: 60
     purpose: Semantic search across findings and sources.
 
