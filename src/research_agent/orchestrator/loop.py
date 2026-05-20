@@ -556,7 +556,7 @@ def default_handlers(router: Any) -> dict[str, Handler]:
                 top_k=payload.get("top_k", 10),
             ),
         )
-        return {"results": results}
+        return _expand_corpus_query_to_extract_findings(job, payload, results)
 
     async def _cornerstone_query(job: Job, task: dict[str, Any]) -> dict[str, Any]:
         return await _run_cornerstone_query(job, task, router=router)
@@ -1792,6 +1792,65 @@ def _expand_search_to_fetches(
 
     return {
         "results": [r.model_dump(mode="json") for r in results],
+        "follow_up_tasks": [t.model_dump() for t in follow_ups],
+    }
+
+
+def _expand_corpus_query_to_extract_findings(
+    job: Job,
+    payload: dict[str, Any],
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Turn a ``local_corpus.search`` return into ``extract_findings``
+    follow-ups, mirroring :func:`_expand_search_to_fetches` for web search.
+
+    Without this fan-out, ``local_corpus_query`` returned the raw hit list
+    and no claims ever landed against those chunks — the planner kept
+    re-issuing the same semantic search because nothing in the queue
+    extracted findings from the matched sources. Each top-K hit becomes
+    one ``extract_findings`` task carrying the chunk's ``source_id`` and
+    the inherited ``sub_question``.
+
+    ``payload`` knobs:
+      * ``expand_top_k`` — when set, caps the number of follow-ups
+        emitted; otherwise the default scales with the plan's
+        ``scope_class`` (matches ``_expand_search_to_fetches``).
+      * ``sub_question`` — overrides the auto-derived question; falls
+        back to ``payload['query']`` then ``job.goal``.
+
+    Hits without an integer ``source_id`` (defensive — every
+    ``local_corpus.search`` row has one today) are silently dropped from
+    the follow-up list but stay in ``results``.
+    """
+    from research_agent.orchestrator.plan import TaskSpec
+
+    if "expand_top_k" in payload:
+        top_k = int(payload["expand_top_k"])
+    else:
+        plan = _load_latest_plan(job)
+        scope = plan.scope_class if plan is not None else None
+        top_k = _DEFAULT_TOP_K_BY_SCOPE.get(scope or "", _DEFAULT_TOP_K_FALLBACK)
+
+    sub_question = payload.get("sub_question") or payload.get("query") or job.goal
+
+    follow_ups: list[TaskSpec] = []
+    for hit in results[:top_k]:
+        source_id = hit.get("source_id") if isinstance(hit, dict) else None
+        if not isinstance(source_id, int):
+            continue
+        follow_ups.append(
+            TaskSpec(
+                kind="extract_findings",
+                payload={
+                    "source_id": source_id,
+                    "sub_question": sub_question,
+                    **_task_passthrough_payload(payload),
+                },
+            )
+        )
+
+    return {
+        "results": results,
         "follow_up_tasks": [t.model_dump() for t in follow_ups],
     }
 
