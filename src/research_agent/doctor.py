@@ -665,7 +665,12 @@ def run_all_checks(
     results.append(check_lm_studio(config.get("LMSTUDIO_BASE_URL")))
     results.append(check_writable_dirs(root))
     results.append(check_sqlite_wal())
-    results.append(check_models_yaml(root / "config" / "models.yaml"))
+    from research_agent.llm.router import resolve_models_config_path
+
+    models_path = resolve_models_config_path()
+    if not models_path.is_absolute():
+        models_path = root / models_path
+    results.append(check_models_yaml(models_path))
     results.append(check_tesseract())
     results.append(check_serpapi_cost_note())
     results.append(check_trove_api_note())
