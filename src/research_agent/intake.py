@@ -178,6 +178,7 @@ def _render_summary(intake: dict[str, Any]) -> Panel:
 
 def run_intake(
     corpus: str | None = None,
+    corpus_dossier: bool = False,
     budget_usd: float | None = None,
     time_cap: int | None = None,
     fragments: bool = False,
@@ -186,12 +187,13 @@ def run_intake(
 
     Loops the 1–10 step flow until the user confirms; on revise we re-prompt
     every field from scratch (per §5.1, no preserved state). The CLI pre-fills
-    ``time_cap`` / ``budget_usd`` / ``corpus`` defaults; the user can still
-    override any of them inside the flow.
+    ``time_cap`` / ``budget_usd`` / ``corpus`` / ``corpus_dossier`` defaults;
+    the user can still override any of them inside the flow.
 
     Returns a dict with stable intake keys: ``goal``, ``goal_one_sentence``,
     ``domain``, ``time_cap``, ``budget_usd``, ``output_orientation``,
-    ``aggressiveness``, ``corpus_path``, ``fragments``, ``followup_qa``.
+    ``aggressiveness``, ``corpus_path``, ``corpus_dossier``, ``fragments``,
+    ``followup_qa``.
     """
     console = Console()
 
@@ -254,6 +256,19 @@ def run_intake(
         )
         corpus_path = corpus_answer.strip() or None
 
+        # Step 8b — opt into dossier mode if a corpus was supplied.
+        # The flag has no effect without a corpus path (the daemon only
+        # walks files when one is set) so we hide the prompt entirely
+        # when corpus_path is None and the CLI didn't pre-set it.
+        dossier_enabled = False
+        if corpus_path:
+            dossier_enabled = bool(
+                questionary.confirm(
+                    "Run dossier mode? (one finding per page; epic #359)",
+                    default=bool(corpus_dossier),
+                ).ask()
+            )
+
         partial = {
             "goal": goal.strip(),
             "goal_one_sentence": goal_one_sentence.strip(),
@@ -272,6 +287,7 @@ def run_intake(
             "output_orientation": output_orientation,
             "aggressiveness": aggressiveness,
             "corpus_path": corpus_path,
+            "corpus_dossier": dossier_enabled,
             "fragments": bool(fragments),
             "followup_qa": followup_qa,
         }

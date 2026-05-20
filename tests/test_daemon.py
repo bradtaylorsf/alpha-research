@@ -1348,7 +1348,9 @@ async def test_inbox_watcher_indexes_moves_and_requests_replan(
     doc.write_text("# FOIA\n\nContract award file from the clerk.\n", encoding="utf-8")
     calls: list[Path] = []
 
-    def _fake_index(path: Path, job: Job) -> dict[str, int]:
+    def _fake_index(
+        path: Path, job: Job, *, per_page: bool = False
+    ) -> dict[str, int]:
         calls.append(path)
         return {
             "files_indexed": 1,
@@ -1400,6 +1402,56 @@ async def test_inbox_watcher_indexes_moves_and_requests_replan(
     assert payload["files_indexed"] == 1
     assert payload["chunks_indexed"] == 1
 
+
+@pytest.mark.asyncio
+async def test_inbox_watcher_respects_corpus_dossier_intake_flag(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """intake.corpus_dossier=True routes inbox indexing through per_page=True."""
+    seeded_job.intake = {**(seeded_job.intake or {}), "corpus_dossier": True}
+    (seeded_job.root / "intake.json").write_text(
+        json.dumps(seeded_job.intake), encoding="utf-8"
+    )
+
+    inbox = seeded_job.root / "inbox"
+    inbox.mkdir(exist_ok=True)
+    doc = inbox / "dossier-evidence.md"
+    doc.write_text("# Dossier evidence\n\nbody body body\n", encoding="utf-8")
+    per_page_calls: list[bool] = []
+
+    def _fake_index(
+        path: Path, job: Job, *, per_page: bool = False
+    ) -> dict[str, int]:
+        per_page_calls.append(per_page)
+        return {
+            "files_indexed": 1,
+            "files_skipped": 0,
+            "chunks_indexed": 1,
+            "chunks_skipped": 0,
+            "pages_indexed": 1,
+            "pages_skipped": 0,
+            "per_page": per_page,
+            "embed_dim": 1024,
+        }
+
+    monkeypatch.setattr("research_agent.tools.local_corpus.index", _fake_index)
+    should_stop = asyncio.Event()
+    task = asyncio.create_task(
+        daemon._inbox_watcher(seeded_job, should_stop, interval_s=0.02)
+    )
+    try:
+        for _ in range(100):
+            if (seeded_job.root / "INBOX_REPLAN.json").exists():
+                should_stop.set()
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        should_stop.set()
+        if not task.done():
+            task.cancel()
+
+    assert per_page_calls == [True]
 
 
 # ---------------------------------------------------------------------------

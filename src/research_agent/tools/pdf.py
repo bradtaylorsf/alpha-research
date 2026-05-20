@@ -657,6 +657,330 @@ def extract_sync(
 
 
 # ---------------------------------------------------------------------------
+# Per-page extraction (issue #351 — dossier mode)
+# ---------------------------------------------------------------------------
+#
+# Dossier mode (epic #359) needs the LLM grain to be a single page so a
+# downstream extractor never blends content from page 1 and page 30 into the
+# same finding. The existing layer helpers all return one concatenated
+# string per document; the per-page helpers below keep one entry per page
+# (empty string for blank/broken pages) so callers can correlate by index.
+# Existing entry points (``extract``, ``extract_sync``, ``extract_from_bytes``)
+# are untouched — this is purely additive.
+
+
+def _extract_pypdf_pages(path: Path, max_pages: int) -> list[str]:
+    """Per-page pypdf text. One entry per page; ``""`` for empty/broken pages.
+
+    Returns an empty list when pypdf can't open the file at all so the
+    caller can fall through to the next layer.
+    """
+    import pypdf  # lazy
+
+    try:
+        reader = pypdf.PdfReader(str(path))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pypdf open failed for %s: %s", path, exc)
+        return []
+
+    total_pages = len(reader.pages)
+    page_slice = min(total_pages, max_pages)
+    pages: list[str] = []
+    for idx in range(page_slice):
+        try:
+            text = reader.pages[idx].extract_text() or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pypdf page %d extract failed: %s", idx, exc)
+            text = ""
+        pages.append(text.strip())
+    return pages
+
+
+def _extract_pdfplumber_pages(path: Path, max_pages: int) -> list[str]:
+    """Per-page pdfplumber text (incl. tables). Empty list on whole-doc failure."""
+    try:
+        import pdfplumber  # lazy
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pdfplumber import failed: %s", exc)
+        return []
+
+    pages: list[str] = []
+    try:
+        with pdfplumber.open(str(path)) as plumber:
+            for idx, page in enumerate(plumber.pages):
+                if idx >= max_pages:
+                    break
+                text = (page.extract_text() or "").strip()
+                table_blocks: list[str] = []
+                try:
+                    tables = page.extract_tables() or []
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "pdfplumber tables failed on page %d: %s", idx, exc
+                    )
+                    tables = []
+                for table in tables:
+                    md_table = _table_to_markdown(table)
+                    if md_table:
+                        table_blocks.append(md_table)
+                merged = "\n\n".join(t for t in (text, *table_blocks) if t)
+                pages.append(merged)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pdfplumber failed for %s: %s", path, exc)
+        return pages
+    return pages
+
+
+def _extract_tesseract_pages(path: Path, max_pages: int) -> list[str]:
+    """Per-page Tesseract OCR. Empty list when binary missing or rasterisation fails."""
+    if not _tesseract_available():
+        logger.warning("tesseract binary not found on PATH — skipping OCR layer")
+        return []
+
+    try:
+        import pytesseract  # lazy
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pytesseract import failed: %s", exc)
+        return []
+
+    images = _render_pages_to_images(path, max_pages)
+    if not images:
+        return []
+
+    pages: list[str] = []
+    for idx, image in enumerate(images):
+        try:
+            text = pytesseract.image_to_string(image) or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pytesseract OCR failed on page %d: %s", idx, exc)
+            text = ""
+        pages.append(text.strip())
+    return pages
+
+
+def _pages_density(pages: list[str]) -> bool:
+    """Aggregate density gate over a per-page list.
+
+    Same threshold as :func:`_text_density` — fewer than
+    ``_DENSITY_MIN_ALPHA_PER_PAGE`` alpha chars on average across the
+    sampled pages counts as "this layer didn't work."
+    """
+    if not pages:
+        return False
+    joined = "\n".join(pages)
+    return _text_density(joined, len(pages))
+
+
+def _best_text_layer_pages(path: Path, max_pages: int) -> list[str]:
+    """Pick whichever of pypdf / pdfplumber yields more alpha text per page.
+
+    Used by the hybrid path so a structured filing that breaks pypdf still
+    contributes a usable text layer to merge with OCR.
+    """
+    pypdf_pages = _extract_pypdf_pages(path, max_pages)
+    plumber_pages = _extract_pdfplumber_pages(path, max_pages)
+    if _alpha_count("".join(plumber_pages)) > _alpha_count("".join(pypdf_pages)):
+        return plumber_pages
+    return pypdf_pages
+
+
+def _hybrid_merge_pages(
+    text_pages: list[str],
+    ocr_pages: list[str],
+) -> list[str]:
+    """Merge text-layer and OCR per-page lists strictly by index.
+
+    Each output entry is the text-layer page followed by an
+    ``[OCR supplement]`` block when *both* layers produced content for
+    that page. When only one layer produced content, that text is the
+    entry. OCR for page N never appears in page M's slot — lists are
+    zipped strictly by index, so the dossier extractor (M2) can rely on
+    "every entry is one page of one file."
+    """
+    max_len = max(len(text_pages), len(ocr_pages))
+    merged: list[str] = []
+    for idx in range(max_len):
+        text = text_pages[idx] if idx < len(text_pages) else ""
+        ocr = ocr_pages[idx] if idx < len(ocr_pages) else ""
+        if text and ocr:
+            merged.append(f"{text}\n\n[OCR supplement]\n{ocr}")
+        else:
+            merged.append(text or ocr)
+    return merged
+
+
+def _select_best_pages(candidates: list[list[str]]) -> list[str]:
+    """Pick whichever candidate produced the most alpha text.
+
+    Used as a no-layer-passed-the-density-gate fallback so callers still
+    see something for files that are only partly readable.
+    """
+    if not candidates:
+        return []
+    return max(candidates, key=lambda pages: _alpha_count("".join(pages)))
+
+
+def _to_indexed_pages(
+    pages: list[str], max_chars: int
+) -> list[tuple[int, str]]:
+    """Wrap a per-page text list in ``(1-based page_no, truncated_text)`` tuples.
+
+    ``max_chars`` is applied **per page** so callers can rely on bounded
+    entries without having to know the total page count.
+    """
+    return [
+        (idx + 1, _truncate(text, max_chars) if text else "")
+        for idx, text in enumerate(pages)
+    ]
+
+
+def _extract_pages(
+    path: Path,
+    *,
+    max_pages: int,
+    max_chars: int,
+    hybrid_pages: bool,
+) -> list[tuple[int, str]]:
+    """Synchronous core of :func:`extract_pages_sync`."""
+    if hybrid_pages:
+        text_pages = _best_text_layer_pages(path, max_pages)
+        ocr_pages = _extract_tesseract_pages(path, max_pages)
+        merged = _hybrid_merge_pages(text_pages, ocr_pages)
+        return _to_indexed_pages(merged, max_chars)
+
+    # Non-hybrid: layered try with aggregate density gate per layer.
+    pypdf_pages = _extract_pypdf_pages(path, max_pages)
+    if _pages_density(pypdf_pages):
+        return _to_indexed_pages(pypdf_pages, max_chars)
+
+    plumber_pages = _extract_pdfplumber_pages(path, max_pages)
+    if _pages_density(plumber_pages):
+        return _to_indexed_pages(plumber_pages, max_chars)
+
+    tesseract_pages = _extract_tesseract_pages(path, max_pages)
+    if _pages_density(tesseract_pages):
+        return _to_indexed_pages(tesseract_pages, max_chars)
+
+    # No layer met the floor — return whichever produced the most text so
+    # downstream callers at least see something to inspect rather than a
+    # confusing empty list when the file *did* have pages.
+    best = _select_best_pages([pypdf_pages, plumber_pages, tesseract_pages])
+    return _to_indexed_pages(best, max_chars)
+
+
+def extract_pages_sync(
+    path_or_url: str | Path,
+    *,
+    max_pages: int = DEFAULT_MAX_PAGES,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    hybrid_pages: bool = False,
+    job: Job | None = None,
+) -> list[tuple[int, str]]:
+    """Per-page PDF extraction. Returns ``[(page_no, text), ...]`` (1-based).
+
+    Layer selection mirrors :func:`extract_sync`: pypdf → pdfplumber →
+    Tesseract; the aggregate density gate per layer decides whether to
+    fall to the next. The first layer that passes wins. When no layer
+    passes, the layer with the most alpha characters wins so callers
+    still see something for files that are partly readable.
+
+    When ``hybrid_pages=True``, every entry is a text-layer page
+    (whichever of pypdf / pdfplumber yields more text) **plus** an OCR
+    supplement for that same page when both layers produced content.
+    OCR for page N never appears in page M's slot — the lists are zipped
+    strictly by index.
+
+    ``max_chars`` is applied per page — each page's text is truncated to
+    that length individually so callers can rely on bounded entries
+    without knowing the total page count.
+
+    Empty / sub-floor pages are emitted as ``(page_no, "")`` rather than
+    being dropped so the dossier rollup can correlate by ``page_no`` and
+    record per-page coverage units (M1.2 / epic #359).
+
+    URLs are fetched synchronously via ``asyncio.run``; this function is
+    safe to call from sync contexts but should not be called from inside
+    a running event loop. Use :func:`extract_pages` for the async path.
+    """
+    raw = str(path_or_url)
+    cleanup_temp: Path | None = None
+    if _looks_like_url(raw):
+        try:
+            data = asyncio.run(fetch_pdf_bytes(raw))
+        except (httpx.HTTPError, OSError) as exc:
+            logger.warning("pdf fetch failed for %s: %s", raw, exc)
+            return []
+        path = _write_temp_pdf(data)
+        cleanup_temp = path
+    else:
+        path = Path(raw)
+        if not path.exists():
+            logger.warning("pdf path does not exist: %s", path)
+            return []
+    try:
+        return _extract_pages(
+            path,
+            max_pages=max_pages,
+            max_chars=max_chars,
+            hybrid_pages=hybrid_pages,
+        )
+    finally:
+        if cleanup_temp is not None:
+            try:
+                cleanup_temp.unlink()
+            except OSError:
+                pass
+
+
+async def extract_pages(
+    path_or_url: str | Path,
+    *,
+    max_pages: int = DEFAULT_MAX_PAGES,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    hybrid_pages: bool = False,
+    job: Job | None = None,
+) -> list[tuple[int, str]]:
+    """Async wrapper around :func:`extract_pages_sync`.
+
+    I/O happens in a thread executor so a 1000-page PDF doesn't stall
+    the event loop while the layers walk pages. URL fetch uses the
+    already-async ``fetch_pdf_bytes`` rather than ``asyncio.run`` so
+    this is safe to call from inside a running loop.
+    """
+    raw = str(path_or_url)
+    cleanup_temp: Path | None = None
+    if _looks_like_url(raw):
+        try:
+            data = await fetch_pdf_bytes(raw)
+        except (httpx.HTTPError, OSError) as exc:
+            logger.warning("pdf fetch failed for %s: %s", raw, exc)
+            return []
+        path = _write_temp_pdf(data)
+        cleanup_temp = path
+    else:
+        path = Path(raw)
+        if not path.exists():
+            logger.warning("pdf path does not exist: %s", path)
+            return []
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: _extract_pages(
+                path,
+                max_pages=max_pages,
+                max_chars=max_chars,
+                hybrid_pages=hybrid_pages,
+            ),
+        )
+    finally:
+        if cleanup_temp is not None:
+            try:
+                cleanup_temp.unlink()
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Section walk (issue #206) — structural splitting for cornerstone PDFs
 # ---------------------------------------------------------------------------
 
@@ -1043,6 +1367,8 @@ __all__ = [
     "DEFAULT_MAX_PAGES",
     "extract",
     "extract_from_bytes",
+    "extract_pages",
+    "extract_pages_sync",
     "extract_sections",
     "extract_sections_sync",
     "extract_sync",

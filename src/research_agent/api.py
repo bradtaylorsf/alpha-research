@@ -321,6 +321,7 @@ def start_job(
     budget_usd: float | None = None,
     time_cap: int | None = None,
     corpus: str | None = None,
+    corpus_dossier: bool = False,
     disk_cap_gb: float = 10.0,
     max_tasks: int | None = None,
     local: bool = False,
@@ -341,6 +342,12 @@ def start_job(
 
     Example:
         ``result = start_job("Investigate Widget Co", budget_usd=5.0)``
+
+    ``corpus_dossier=True`` opts the job into per-page dossier-mode
+    ingestion (epic #359); the daemon will route PDFs through
+    :func:`pdf.extract_pages_sync` and write one Source row per page.
+    Requires ``corpus`` to be set; an :class:`InvalidGoal` is raised
+    otherwise.
     """
 
     goal_text = _normalize_goal(goal)
@@ -351,6 +358,12 @@ def start_job(
     key_cols = list(key_columns or [])
     if input_csv is not None and not key_cols:
         raise InvalidGoal("key_columns is required when input_csv is set")
+    if corpus_dossier and not corpus and (
+        intake is None or not intake.get("corpus")
+    ):
+        raise InvalidGoal(
+            "corpus_dossier requires corpus to be set (epic #359)"
+        )
 
     if intake is None:
         intake_data: dict[str, Any] = {
@@ -365,9 +378,13 @@ def start_job(
         }
         if corpus:
             intake_data["corpus"] = corpus
+        if corpus_dossier:
+            intake_data["corpus_dossier"] = True
     else:
         intake_data = dict(intake)
         intake_data["goal"] = goal_text
+        if corpus_dossier:
+            intake_data["corpus_dossier"] = True
 
     if max_tasks is not None:
         intake_data["max_tasks"] = max_tasks
