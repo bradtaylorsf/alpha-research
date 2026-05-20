@@ -230,6 +230,88 @@ def test_load_models_config_raises_when_tiers_missing(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# resolve_models_config_path() — honors RESEARCH_MODELS_CONFIG everywhere
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_models_config_path_default_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No env var set → resolver returns the documented default path."""
+    from research_agent.llm.router import resolve_models_config_path
+
+    monkeypatch.setattr(
+        "research_agent.llm.router.cfg_get",
+        lambda key, default=None: None,
+    )
+    assert resolve_models_config_path() == Path("config/models.yaml")
+
+
+def test_resolve_models_config_path_reads_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RESEARCH_MODELS_CONFIG override returned verbatim as a Path."""
+    from research_agent.llm.router import resolve_models_config_path
+
+    monkeypatch.setattr(
+        "research_agent.llm.router.cfg_get",
+        lambda key, default=None: "config/models.local.yaml"
+        if key == "RESEARCH_MODELS_CONFIG"
+        else None,
+    )
+    assert resolve_models_config_path() == Path("config/models.local.yaml")
+
+
+def test_load_models_config_no_arg_uses_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """load_models_config() with no path defers to resolve_models_config_path()."""
+    custom = tmp_path / "custom.yaml"
+    custom.write_text(
+        yaml.safe_dump(
+            {"tiers": {"general": {"provider": "lmstudio", "model": "m"}}}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "research_agent.llm.router.cfg_get",
+        lambda key, default=None: str(custom)
+        if key == "RESEARCH_MODELS_CONFIG"
+        else None,
+    )
+    cfg = load_models_config()
+    assert cfg["tiers"]["general"]["model"] == "m"
+
+
+def test_load_models_config_explicit_path_overrides_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit ``path=`` kwarg wins over RESEARCH_MODELS_CONFIG."""
+    env_yaml = tmp_path / "env.yaml"
+    env_yaml.write_text(
+        yaml.safe_dump(
+            {"tiers": {"general": {"provider": "lmstudio", "model": "env-model"}}}
+        ),
+        encoding="utf-8",
+    )
+    explicit_yaml = tmp_path / "explicit.yaml"
+    explicit_yaml.write_text(
+        yaml.safe_dump(
+            {"tiers": {"general": {"provider": "lmstudio", "model": "explicit-model"}}}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "research_agent.llm.router.cfg_get",
+        lambda key, default=None: str(env_yaml)
+        if key == "RESEARCH_MODELS_CONFIG"
+        else None,
+    )
+    cfg = load_models_config(explicit_yaml)
+    assert cfg["tiers"]["general"]["model"] == "explicit-model"
+
+
+# ---------------------------------------------------------------------------
 # model_for(tier)
 # ---------------------------------------------------------------------------
 

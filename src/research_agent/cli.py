@@ -685,7 +685,7 @@ def smoke_llm_command(
     from research_agent.llm.router import load_models_config
     from research_agent.llm.smoke import run_llm_smoke
 
-    cfg = load_models_config(Path("config/models.yaml"))
+    cfg = load_models_config()
     result = asyncio.run(run_llm_smoke(tier, prompt, cfg, image_path=image))
     _print_smoke_result(result)
     if not result.ok:
@@ -761,7 +761,7 @@ def search_command(
         job_id = job
 
     try:
-        models_cfg = None if fts_only else load_models_config(Path("config/models.yaml"))
+        models_cfg = None if fts_only else load_models_config()
         results = [
             item.model_dump()
             for item in public_api.search_findings(
