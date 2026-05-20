@@ -11,9 +11,9 @@ Idempotent by design: each chunk is content-addressed by sha256, so re-
 running on the same corpus skips already-indexed chunks (and never re-
 spends embedding tokens on them).
 
-Heavy parsers — ``pypdf``, ``unstructured.*``, ``bs4`` — are lazy-imported
-only inside their extractor helpers so importing this module on startup
-stays cheap.
+PDFs use the layered :mod:`research_agent.tools.pdf` pipeline (pypdf →
+pdfplumber → Tesseract OCR → optional VLM). HTML uses ``bs4`` with an
+``unstructured`` fallback. Imports stay lazy so module load stays cheap.
 
 ``search(query, job, top_k)`` runs a numpy cosine over the job's local
 sources and returns the top-k matches, sorted descending by score.
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 CHUNK_TARGET_TOKENS = 6000
 CHUNK_OVERLAP_TOKENS = 200
-EMBED_DIM = 1024
+EMBED_DIM = 768
 
 _SUPPORTED_SUFFIXES = frozenset({".pdf", ".md", ".txt", ".html", ".htm"})
 _PYPDF_MIN_CHARS = 100
@@ -67,34 +67,70 @@ def _walk_corpus(path: Path) -> Iterable[Path]:
             yield candidate
 
 
-def _extract_pdf(path: Path) -> str:
-    """Extract text from a PDF. Pypdf first, ``unstructured`` lazy fallback."""
-    import pypdf  # lazy
+def _resolve_pdf_hybrid_pages(job: Job | None, hybrid_pages: bool | None) -> bool:
+    """Resolve ``hybrid_pages`` from an explicit arg or ``job.intake``."""
+    if hybrid_pages is not None:
+        return hybrid_pages
+    if job is None:
+        return False
+    return bool((job.intake or {}).get("pdf_hybrid_pages"))
 
-    try:
-        reader = pypdf.PdfReader(str(path))
-        parts = [page.extract_text() or "" for page in reader.pages]
-        text = "\n\n".join(p for p in parts if p)
-    except Exception as exc:  # noqa: BLE001 — fall through to unstructured
-        logger.debug("pypdf failed for %s: %s", path, exc)
-        text = ""
 
-    if len(text) >= _PYPDF_MIN_CHARS:
-        return text
+def _clamp_pdf_max_pages(value: int) -> int:
+    from research_agent.tools.pdf import MAX_PAGES_HARD_CAP
 
-    # Lazy fallback — only pay the unstructured import when pypdf under-extracts.
-    try:
-        from unstructured.partition.pdf import partition_pdf  # type: ignore[import-untyped]
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("unstructured.partition.pdf import failed: %s", exc)
-        return text
+    return min(max(1, int(value)), MAX_PAGES_HARD_CAP)
 
-    try:
-        elements = partition_pdf(filename=str(path))
-        return "\n\n".join(str(el) for el in elements if str(el).strip())
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("unstructured.partition.pdf failed for %s: %s", path, exc)
-        return text
+
+def _resolve_pdf_max_pages(job: Job | None, max_pages: int | None) -> int:
+    """Resolve per-PDF page cap for corpus indexing (default 1000)."""
+    from research_agent.tools.pdf import CORPUS_MAX_PAGES
+
+    if max_pages is not None:
+        return _clamp_pdf_max_pages(max_pages)
+    if job is not None:
+        intake_pages = (job.intake or {}).get("pdf_max_pages")
+        if intake_pages is not None:
+            return _clamp_pdf_max_pages(int(intake_pages))
+    return CORPUS_MAX_PAGES
+
+
+def _resolve_pdf_max_chars(job: Job | None, max_chars: int | None) -> int:
+    """Resolve per-PDF character cap for corpus indexing."""
+    from research_agent.tools.pdf import CORPUS_MAX_CHARS
+
+    if max_chars is not None:
+        return max(1, int(max_chars))
+    if job is not None:
+        intake_chars = (job.intake or {}).get("pdf_max_chars")
+        if intake_chars is not None:
+            return max(1, int(intake_chars))
+    return CORPUS_MAX_CHARS
+
+
+def _extract_pdf(
+    path: Path,
+    job: Job | None = None,
+    *,
+    hybrid_pages: bool | None = None,
+    max_pages: int | None = None,
+    max_chars: int | None = None,
+) -> str:
+    """Extract text from a PDF via the layered :mod:`pdf` pipeline.
+
+    Scanned documents need the Tesseract OCR layer (``tesseract`` on PATH).
+    When ``hybrid_pages`` is true, each page merges text-layer extraction with
+    an OCR supplement (see :func:`pdf.extract_sync`).
+    """
+    from research_agent.tools import pdf as pdf_mod
+
+    return pdf_mod.extract_sync(
+        path,
+        job=job,
+        hybrid_pages=_resolve_pdf_hybrid_pages(job, hybrid_pages),
+        max_pages=_resolve_pdf_max_pages(job, max_pages),
+        max_chars=_resolve_pdf_max_chars(job, max_chars),
+    )
 
 
 def _extract_html(path: Path) -> str:
@@ -130,7 +166,12 @@ def _extract_html(path: Path) -> str:
         return text
 
 
-def _extract_text(path: Path) -> tuple[str, str]:
+def _extract_text(
+    path: Path,
+    job: Job | None = None,
+    *,
+    hybrid_pages: bool | None = None,
+) -> tuple[str, str]:
     """Return ``(extracted_text, kind_hint)`` for ``path``.
 
     ``kind_hint`` is the file-type label (``pdf``, ``md``, ``txt``, ``html``)
@@ -139,7 +180,7 @@ def _extract_text(path: Path) -> tuple[str, str]:
     """
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return _extract_pdf(path), "pdf"
+        return _extract_pdf(path, job=job, hybrid_pages=hybrid_pages), "pdf"
     if suffix in (".html", ".htm"):
         return _extract_html(path), "html"
     if suffix in (".md", ".txt"):
@@ -193,7 +234,7 @@ def _resolve_embedding_endpoint(
     models_config: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Return ``(base_url, model_name)`` for the embeddings tier."""
-    cfg = models_config or load_models_config(Path("config/models.yaml"))
+    cfg = models_config or load_models_config()
     tiers = cfg.get("tiers") or {}
     spec = tiers.get("embeddings")
     if not spec:
@@ -261,6 +302,7 @@ def index(
     job: Job,
     *,
     models_config: dict[str, Any] | None = None,
+    hybrid_pages: bool | None = None,
 ) -> dict[str, int]:
     """Index every supported file under ``corpus_path`` into ``job``.
 
@@ -276,10 +318,15 @@ def index(
     files_skipped = 0
     chunks_indexed = 0
     chunks_skipped = 0
+    pdf_hybrid = _resolve_pdf_hybrid_pages(job, hybrid_pages)
 
     for file_path in _walk_corpus(root):
         try:
-            raw_text, _kind_hint = _extract_text(file_path)
+            raw_text, _kind_hint = _extract_text(
+                file_path,
+                job=job,
+                hybrid_pages=pdf_hybrid,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("failed to extract %s: %s", file_path, exc)
             files_skipped += 1

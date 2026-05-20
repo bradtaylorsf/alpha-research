@@ -49,6 +49,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_PAGES = 100
 DEFAULT_MAX_CHARS = 200_000
+# Local corpus indexing may ingest large FOIA / archive PDFs whose
+# document-level fidelity matters; the corpus-scoped defaults lift the
+# per-document caps above the connector defaults to fit those payloads.
+CORPUS_MAX_PAGES = 1000
+CORPUS_MAX_CHARS = 2_000_000
+# Absolute clamp shared by the local_corpus resolver so a misconfigured
+# intake value can't push extraction beyond the supported range.
+MAX_PAGES_HARD_CAP = 1000
 
 # Density threshold: a page that yields fewer than this many alpha chars on
 # average across the sampled pages is treated as "this layer didn't work".
@@ -389,6 +397,161 @@ def _extract_tesseract(path: Path, max_pages: int) -> tuple[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Hybrid per-page mode — merge text-layer + OCR within each page
+# ---------------------------------------------------------------------------
+
+
+def _ocr_pages_texts(path: Path, max_pages: int) -> list[str]:
+    """Return per-page Tesseract OCR strings (empty list if OCR unavailable).
+
+    Each entry is the OCR output for page ``i`` (1-indexed by convention
+    in the caller). Pages where OCR fails get an empty string so the
+    caller can align indices with the text-layer extraction.
+    """
+    if not _tesseract_available():
+        return []
+
+    try:
+        import pytesseract  # lazy
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pytesseract import failed: %s", exc)
+        return []
+
+    images = _render_pages_to_images(path, max_pages)
+    texts: list[str] = []
+    for image in images:
+        try:
+            text = pytesseract.image_to_string(image) or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pytesseract OCR failed on page image: %s", exc)
+            text = ""
+        texts.append(text.strip())
+    return texts
+
+
+def _pdfplumber_page_layers(path: Path, max_pages: int) -> list[tuple[str, list[str]]]:
+    """Return ``[(page_text, table_markdown_blocks), ...]`` per page index.
+
+    Empty list when pdfplumber is unavailable or the PDF is unreadable.
+    The hybrid path uses table blocks alongside text-layer extraction so
+    structured tables on typed pages render as markdown rather than
+    collapsing into a noisy text stream.
+    """
+    try:
+        import pdfplumber  # lazy
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pdfplumber import failed: %s", exc)
+        return []
+
+    layers: list[tuple[str, list[str]]] = []
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            for idx, page in enumerate(pdf.pages):
+                if idx >= max_pages:
+                    break
+                text = (page.extract_text() or "").strip()
+                table_blocks: list[str] = []
+                try:
+                    tables = page.extract_tables() or []
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("pdfplumber tables failed on page %d: %s", idx, exc)
+                    tables = []
+                for table in tables:
+                    md_table = _table_to_markdown(table)
+                    if md_table:
+                        table_blocks.append(md_table)
+                layers.append((text, table_blocks))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pdfplumber failed for %s: %s", path, exc)
+        return layers
+
+    return layers
+
+
+def _merge_hybrid_page_body(text: str, table_blocks: list[str], ocr_text: str) -> str:
+    """Compose one page's hybrid body from text + table + OCR layers.
+
+    When both layers produced content, the body is split into
+    ``### Text layer`` and ``### OCR supplement`` sections so the operator
+    can see which content came from where. When only one layer produced
+    content, the body is that content with no subsections (no value in a
+    single-section header).
+    """
+    layer_parts: list[str] = []
+    if text.strip():
+        layer_parts.append(text.strip())
+    layer_parts.extend(block for block in table_blocks if block.strip())
+    body = "\n\n".join(layer_parts)
+    ocr = ocr_text.strip()
+
+    if body and ocr:
+        return f"### Text layer\n\n{body}\n\n### OCR supplement\n\n{ocr}"
+    if body:
+        return body
+    return ocr
+
+
+def _extract_hybrid_pages(path: Path, max_pages: int) -> tuple[str, int]:
+    """Return ``(markdown, pages_with_content)`` from a per-page hybrid pass.
+
+    Unlike the document-scope layered pipeline (pypdf → pdfplumber →
+    Tesseract → VLM, which picks one layer for the whole file), this
+    helper processes every page up to ``max_pages`` independently and
+    merges its text-layer body, pdfplumber tables, and Tesseract OCR
+    under ``## Page N`` headings. That fixes the failure mode where a
+    document mixes typed sections (caught by pypdf) with scanned inserts
+    (which pypdf silently drops because the typed half passed the
+    density gate).
+    """
+    import pypdf  # lazy
+
+    try:
+        reader = pypdf.PdfReader(str(path))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("pypdf open failed for hybrid extract %s: %s", path, exc)
+        return "", 0
+
+    page_count = min(len(reader.pages), max_pages)
+    if page_count <= 0:
+        return "", 0
+
+    parts: list[str] = []
+    outline_md = _format_pypdf_outline(reader)
+    if outline_md:
+        parts.append(outline_md)
+
+    plumber_layers = _pdfplumber_page_layers(path, page_count)
+    ocr_texts = _ocr_pages_texts(path, page_count)
+
+    pages_with_content = 0
+    for idx in range(page_count):
+        try:
+            text = reader.pages[idx].extract_text() or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pypdf page %d extract failed: %s", idx, exc)
+            text = ""
+        text = text.strip()
+
+        plumber_text = ""
+        table_blocks: list[str] = []
+        if idx < len(plumber_layers):
+            plumber_text, table_blocks = plumber_layers[idx]
+            if plumber_text and not text:
+                text = plumber_text
+            elif plumber_text and plumber_text not in text:
+                text = f"{text}\n\n{plumber_text}".strip()
+
+        ocr = ocr_texts[idx] if idx < len(ocr_texts) else ""
+        merged = _merge_hybrid_page_body(text, table_blocks, ocr)
+        if not merged:
+            continue
+        parts.append(f"## Page {idx + 1}\n\n{merged}")
+        pages_with_content += 1
+
+    return "\n\n".join(parts), pages_with_content or page_count
+
+
+# ---------------------------------------------------------------------------
 # Layer 4 — VLM escalation (Opus 4.7 vision)
 # ---------------------------------------------------------------------------
 
@@ -511,12 +674,20 @@ async def extract(
     max_pages: int = DEFAULT_MAX_PAGES,
     max_chars: int = DEFAULT_MAX_CHARS,
     job: Job | None = None,
+    hybrid_pages: bool = False,
 ) -> str:
     """Extract markdown from a local PDF path or a remote URL.
 
-    Tries pypdf → pdfplumber → Tesseract; escalates to the Opus 4.7 vision
-    tier only when ``RESEARCH_PDF_VLM_ESCALATION`` is truthy *and* every
+    With ``hybrid_pages=False`` (default), tries pypdf → pdfplumber →
+    Tesseract at document scope; escalates to the Opus 4.7 vision tier
+    only when ``RESEARCH_PDF_VLM_ESCALATION`` is truthy *and* every
     cheaper layer fails the density gate.
+
+    With ``hybrid_pages=True``, processes every page (up to ``max_pages``)
+    independently and merges text-layer + OCR content under ``## Page N``
+    headings (issue #374). Use this for documents that mix typed sections
+    with scanned inserts — FOIA responses, court exhibits, archival scans
+    — where document-scope extraction silently drops one half.
 
     Returns the empty string when every layer fails to produce usable text;
     callers decide whether to record a :class:`Source` or skip the document.
@@ -543,12 +714,14 @@ async def extract(
     try:
         return await asyncio.get_running_loop().run_in_executor(
             None,
-            _extract_sync,
-            path,
-            max_pages,
-            max_chars,
-            source_label,
-            job,
+            lambda: _extract_sync(
+                path,
+                max_pages,
+                max_chars,
+                source_label,
+                job,
+                hybrid_pages=hybrid_pages,
+            ),
         )
     finally:
         if cleanup_temp is not None:
@@ -564,13 +737,24 @@ def _extract_sync(
     max_chars: int,
     source_label: str,
     job: Job | None,
+    *,
+    hybrid_pages: bool = False,
 ) -> str:
     """Synchronous core of :func:`extract` — runs every layer in turn.
 
     Pulled out of ``extract`` so callers without an event loop (the smoke
     helper, unit tests for individual layers) can drive the same logic
     without spinning up asyncio.
+
+    When ``hybrid_pages`` is true, short-circuits to the per-page merge
+    pipeline before any document-scope layer fires. Falls back to the
+    layered document-scope pipeline if hybrid mode produced nothing.
     """
+    if hybrid_pages:
+        md, _pages = _extract_hybrid_pages(path, max_pages)
+        if md.strip():
+            return _truncate(md, max_chars)
+
     md, pages = _extract_pypdf(path, max_pages)
     if _text_density(md, pages):
         return _truncate(md, max_chars)
@@ -602,17 +786,26 @@ def extract_from_bytes(
     max_pages: int = DEFAULT_MAX_PAGES,
     max_chars: int = DEFAULT_MAX_CHARS,
     job: Job | None = None,
+    hybrid_pages: bool = False,
 ) -> str:
     """Run the layered pipeline against in-memory PDF bytes.
 
     Used by :mod:`web_fetch` when the upstream HTTP response was already a
     PDF — avoids re-downloading the document just to feed it to ``pypdf``.
+    ``hybrid_pages`` matches :func:`extract` semantics.
     """
     if not data:
         return ""
     tmp = _write_temp_pdf(data)
     try:
-        return _extract_sync(tmp, max_pages, max_chars, source_label, job)
+        return _extract_sync(
+            tmp,
+            max_pages,
+            max_chars,
+            source_label,
+            job,
+            hybrid_pages=hybrid_pages,
+        )
     finally:
         try:
             tmp.unlink()
@@ -626,12 +819,14 @@ def extract_sync(
     max_pages: int = DEFAULT_MAX_PAGES,
     max_chars: int = DEFAULT_MAX_CHARS,
     job: Job | None = None,
+    hybrid_pages: bool = False,
 ) -> str:
     """Blocking variant of :func:`extract` for code paths without asyncio.
 
     URLs are fetched via ``asyncio.run`` so this function works the same way
     from sync contexts (the CLI smoke verb, scripts) and async contexts
-    needing a one-shot blocking call.
+    needing a one-shot blocking call. ``hybrid_pages`` matches
+    :func:`extract` semantics.
     """
     raw = str(path_or_url)
     if _looks_like_url(raw):
@@ -642,7 +837,14 @@ def extract_sync(
             return ""
         tmp = _write_temp_pdf(data)
         try:
-            return _extract_sync(tmp, max_pages, max_chars, raw, job)
+            return _extract_sync(
+                tmp,
+                max_pages,
+                max_chars,
+                raw,
+                job,
+                hybrid_pages=hybrid_pages,
+            )
         finally:
             try:
                 tmp.unlink()
@@ -653,7 +855,14 @@ def extract_sync(
     if not path.exists():
         logger.warning("pdf path does not exist: %s", path)
         return ""
-    return _extract_sync(path, max_pages, max_chars, str(path), job)
+    return _extract_sync(
+        path,
+        max_pages,
+        max_chars,
+        str(path),
+        job,
+        hybrid_pages=hybrid_pages,
+    )
 
 
 # ---------------------------------------------------------------------------

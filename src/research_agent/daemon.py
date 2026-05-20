@@ -360,10 +360,13 @@ def _build_router(job: Job) -> Any:
     the cost of pulling the LLM stack just to launch a child.
     """
     from research_agent.llm.budgets import BudgetTracker
-    from research_agent.llm.router import Router, load_models_config
+    from research_agent.llm.router import (
+        Router,
+        load_models_config,
+        resolve_models_config_path,
+    )
 
-    config_path = os.environ.get("RESEARCH_MODELS_CONFIG", "config/models.yaml")
-    config = load_models_config(config_path)
+    config = load_models_config(resolve_models_config_path())
     pricing = config.get("pricing") or {}
     intake = job.intake or {}
     cap_usd = intake.get("budget_cap_usd")
