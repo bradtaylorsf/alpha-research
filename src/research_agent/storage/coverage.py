@@ -476,10 +476,11 @@ def update_from_extract_findings(
     written = 0
     if isinstance(result, dict):
         written = int(result.get("findings_written") or 0)
+    unit_status: CoverageStatus = "complete" if written > 0 else "pending"
     set_matching_units(
         job,
         dims,
-        "complete",
+        unit_status,
         attempt={**attempt, "reason": f"findings_written={written}"},
     )
 
@@ -553,6 +554,274 @@ def mark_task_failed(job: Job, task: dict[str, Any], reason: str) -> None:
     )
 
 
+def _pending_extract_source_ids(job: Job) -> set[int]:
+    """Return ``source_id`` values already queued for ``extract_findings``."""
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT payload_json FROM tasks
+            WHERE job_id = ? AND kind = 'extract_findings'
+              AND status IN ('pending', 'running')
+            """,
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    out: set[int] = set()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            sid = payload.get("source_id")
+            if isinstance(sid, int):
+                out.add(sid)
+    return out
+
+
+def enqueue_dossier_extract_tasks(job: Job, plan_version: int) -> list[int]:
+    """Enqueue ``extract_findings`` for every per-page local source (dossier jobs).
+
+    Runs after corpus index + ``declare_corpus_units`` so each indexed page
+    gets a dedicated extraction pass with a page-scoped sub-question instead
+    of relying on ``local_corpus_query`` top-K fan-out alone.
+    """
+    from research_agent.orchestrator.plan import TaskSpec
+    from research_agent.storage.sources import read_source_metadata
+    from research_agent.storage.tasks import enqueue
+
+    if not bool((job.intake or {}).get("corpus_dossier")):
+        return []
+
+    already = _pending_extract_source_ids(job)
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT s.id AS source_id, s.sha256 AS sha, s.title AS title
+            FROM sources s
+            JOIN job_sources js ON js.source_id = s.id
+            WHERE js.job_id = ? AND s.kind = ?
+            ORDER BY s.id ASC
+            """,
+            (job.id, "local"),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    specs: list[TaskSpec] = []
+    for row in rows:
+        source_id = int(row["source_id"])
+        if source_id in already:
+            continue
+        try:
+            meta = read_source_metadata(job, str(row["sha"]))
+        except FileNotFoundError:
+            continue
+        if meta.get("page_no") is None:
+            continue
+        parent = meta.get("parent_file") or row["title"] or "document"
+        page_no = int(meta["page_no"])
+        sub_question = (
+            f"Extract 2–6 structured findings from page {page_no} of this document "
+            f"(people, organizations, places, dates, incident/UAP details). "
+            f"File: {parent}"
+        )
+        specs.append(
+            TaskSpec(
+                kind="extract_findings",
+                payload={"source_id": source_id, "sub_question": sub_question},
+            )
+        )
+
+    if not specs:
+        return []
+    return enqueue(job, specs, plan_version)
+
+
+def declare_corpus_units(job: Job) -> list[CoverageUnit]:
+    """Declare one coverage unit per indexed corpus Source row (issue #356).
+
+    Reads every ``sources`` row linked to ``job`` whose ``kind='local'``
+    and whose JSON sidecar carries ``metadata.parent_file``, then
+    declares one unit per row with dimensions
+    ``{"file": parent_file, "page": page_no, "page_chunk": page_chunk}``.
+
+    Page-grain units (``page_no`` set) are the source of truth for
+    completion gating; HTML / MD / TXT rows ingest as a single unit per
+    chunk with ``page=null`` so :func:`file_status` still recognises
+    them. Rows with no sidecar metadata (legacy thematic-mode ingests
+    that pre-date dossier mode) are skipped — those jobs should not
+    have coverage units in the first place.
+
+    Idempotent via :func:`declare_coverage` upserts: existing statuses
+    and attempt histories are preserved, so a resume path can replay
+    this without clobbering progress.
+
+    Returns the full list of units now stored on the job (not just the
+    delta), matching :func:`declare_coverage` semantics.
+    """
+    from research_agent.storage.sources import read_source_metadata
+
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT s.sha256 AS sha, s.url AS url
+            FROM sources s
+            JOIN job_sources js ON js.source_id = s.id
+            WHERE js.job_id = ? AND s.kind = ?
+            ORDER BY s.id ASC
+            """,
+            (job.id, "local"),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    new_units: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            meta = read_source_metadata(job, row["sha"])
+        except FileNotFoundError:
+            continue
+        parent = meta.get("parent_file")
+        if not parent:
+            continue
+        page_no = meta.get("page_no")
+        page_chunk = meta.get("page_chunk")
+        dims: dict[str, Any] = {"file": parent}
+        if page_no is not None:
+            dims["page"] = int(page_no)
+        if page_chunk is not None:
+            dims["page_chunk"] = int(page_chunk)
+        new_units.append({"dimensions": dims, "status": "pending"})
+
+    if not new_units:
+        return list_units(job)
+    return declare_coverage(job, new_units)
+
+
+def declare_file_gap(
+    job: Job,
+    file_url: str,
+    reason: str,
+    *,
+    unblocker: str | None = None,
+) -> CoverageUnit:
+    """Declare a single ``confirmed_gap`` unit for an unreadable file.
+
+    Used by the dossier-mode indexer (issue #357) when
+    :func:`local_corpus.index` can't extract text from a corpus file —
+    e.g. a corrupt PDF, a truncated upload, an image-only scan with no
+    OCR yield. The unit dimensions are ``{"file": file_url}``; no page
+    dimension because the file produced zero pages.
+
+    The reason is recorded on the unit's ``recent_attempts`` so
+    ``research status`` can show *why* the gap was confirmed.
+    Idempotent: re-running on a job that already has a unit for the
+    same file flips its status to ``confirmed_gap`` (with the latest
+    reason) rather than duplicating it.
+
+    Returns the resulting :class:`CoverageUnit`.
+    """
+    if not isinstance(file_url, str) or not file_url:
+        raise ValueError("file_url must be a non-empty string")
+    reason_text = str(reason or "extraction_failed")
+
+    attempt = CoverageAttempt(
+        task_kind="local_corpus_index",
+        status="confirmed_gap",
+        reason=reason_text,
+    )
+
+    # Reuse declare_coverage's upsert path so existing units (and their
+    # attempt history) survive an idempotent rerun.
+    declared = declare_coverage(
+        job,
+        [
+            {
+                "dimensions": {"file": file_url},
+                "status": "confirmed_gap",
+                "recent_attempts": [attempt.model_dump(mode="json")],
+                "unblocker": unblocker,
+            }
+        ],
+    )
+    matching = [u for u in declared if u.dimensions.get("file") == file_url]
+    if not matching:
+        raise RuntimeError(
+            f"declare_file_gap did not write a unit for {file_url!r}"
+        )
+
+    # declare_coverage preserves prior status on conflict; force the gap
+    # by flipping the unit through upsert_unit_status, which also
+    # records the attempt.
+    target = matching[0]
+    return upsert_unit_status(
+        job,
+        target.dim_key,
+        "confirmed_gap",
+        attempt=attempt,
+        unblocker=unblocker,
+    )
+
+
+def file_status(job: Job, file_url: str) -> CoverageStatus:
+    """Roll up per-page unit statuses into a per-file coverage status.
+
+    File status is derived from the page units sharing the same
+    ``dims.file`` value. Rules (in evaluation order):
+
+    - No matching units → ``pending`` (caller may have declared the
+      file before any pages were declared).
+    - All page units :data:`TERMINAL_STATUSES`:
+
+      - all ``complete`` → ``complete``.
+      - all ``confirmed_gap`` → ``confirmed_gap``.
+      - all ``not_yet_public`` → ``not_yet_public``.
+      - mixed terminal statuses → ``complete`` (the file landed
+        something; gap pages stay visible as their own units).
+    - Any page in :data:`BLOCKING_STATUSES` with at least one other
+      page already terminal-complete / -gap / -not-yet-public, or with
+      any unit explicitly in ``in_progress``, or with attempt history
+      → ``in_progress``.
+    - Otherwise (every page still pending, no attempts) → ``pending``.
+    """
+    if not isinstance(file_url, str) or not file_url:
+        raise ValueError("file_url must be a non-empty string")
+
+    matching: list[CoverageUnit] = []
+    for unit in list_units(job):
+        if unit.dimensions.get("file") == file_url:
+            matching.append(unit)
+
+    if not matching:
+        return "pending"
+
+    statuses = {unit.status for unit in matching}
+    terminal_set = statuses & TERMINAL_STATUSES
+    blocking_set = statuses & BLOCKING_STATUSES
+
+    if not blocking_set:
+        if statuses == {"complete"}:
+            return "complete"
+        if statuses == {"confirmed_gap"}:
+            return "confirmed_gap"
+        if statuses == {"not_yet_public"}:
+            return "not_yet_public"
+        return "complete"
+
+    if (
+        terminal_set
+        or "in_progress" in statuses
+        or any(unit.recent_attempts for unit in matching)
+    ):
+        return "in_progress"
+    return "pending"
+
+
 def replan_context(job: Job) -> dict[str, Any] | None:
     if not has_coverage(job):
         return None
@@ -576,11 +845,15 @@ __all__ = [
     "CoverageStatus",
     "CoverageUnit",
     "blocking_units",
+    "declare_corpus_units",
+    "enqueue_dossier_extract_tasks",
     "declare_coverage",
+    "declare_file_gap",
     "declare_from_intake",
     "dim_key_for",
     "dimensions_from_source_id",
     "dimensions_from_task_and_row",
+    "file_status",
     "has_coverage",
     "is_coverage_complete",
     "list_units",

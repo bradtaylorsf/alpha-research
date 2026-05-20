@@ -195,6 +195,59 @@ def test_update_from_extract_findings_marks_page_complete(tmp_path: Path) -> Non
     assert units[0].status == "complete"
 
 
+def test_update_from_extract_findings_keeps_pending_when_zero_findings(
+    tmp_path: Path,
+) -> None:
+    """Empty extraction must not close dossier page units (#388)."""
+    job = _dossier_job(tmp_path)
+    parent = "file:///doc.pdf"
+    _seed_page_source(job, parent_file=parent, page_no=2, page_chunk=None)
+    coverage.declare_corpus_units(job)
+
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute("SELECT id FROM sources LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    source_id = int(row["id"])
+
+    task = {
+        "id": 99,
+        "kind": "extract_findings",
+        "payload": {"source_id": source_id},
+    }
+    coverage.update_from_task_result(job, task, {"findings_written": 0})
+
+    assert coverage.list_units(job)[0].status == "pending"
+    assert coverage.is_coverage_complete(job) is False
+
+
+def test_enqueue_dossier_extract_tasks(tmp_path: Path) -> None:
+    job = _dossier_job(tmp_path)
+    parent = "file:///a.pdf"
+    _seed_page_source(job, parent_file=parent, page_no=1, page_chunk=None)
+    _seed_page_source(job, parent_file=parent, page_no=2, page_chunk=None)
+    coverage.declare_corpus_units(job)
+
+    ids = coverage.enqueue_dossier_extract_tasks(job, plan_version=1)
+    assert len(ids) == 2
+
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT kind, payload_json FROM tasks WHERE job_id = ? ORDER BY id",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 2
+    for row in rows:
+        assert row["kind"] == "extract_findings"
+        payload = json.loads(row["payload_json"])
+        assert isinstance(payload.get("source_id"), int)
+        assert "page" in payload.get("sub_question", "")
+
+
 def test_mark_task_failed_uses_source_id_for_dossier_page(tmp_path: Path) -> None:
     job = _dossier_job(tmp_path)
     parent = "file:///doc.pdf"

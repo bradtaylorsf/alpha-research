@@ -1820,6 +1820,26 @@ async def _run_subgoal_status_pass(
         conn.close()
     findings_count = int(row["n"]) if row is not None else 0
 
+    if (
+        findings_count == 0
+        and bool((job.intake or {}).get("corpus_dossier"))
+        and coverage.has_coverage(job)
+        and coverage.blocking_units(job)
+    ):
+        emit(
+            job,
+            "WARN",
+            "synth",
+            "warning",
+            {
+                "stage": "subgoal_status_pass",
+                "skipped": True,
+                "reason": "no_findings_with_open_coverage",
+                "final": final,
+            },
+        )
+        return
+
     context = json.dumps(
         {
             "goal": job.goal,

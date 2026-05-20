@@ -1093,7 +1093,24 @@ async def run_daemon(
 
     if _loop._load_latest_plan(job) is None:
         try:
-            await _plan.initial_plan(job, router=router)
+            plan = await _plan.initial_plan(job, router=router)
+            if bool((job.intake or {}).get("corpus_dossier")):
+                from research_agent.storage import coverage as _coverage
+
+                enqueued = _coverage.enqueue_dossier_extract_tasks(job, plan.version)
+                if enqueued:
+                    emit(
+                        job,
+                        "INFO",
+                        "daemon",
+                        "warning",
+                        {
+                            "stage": "dossier_extract_enqueued",
+                            "plan_version": plan.version,
+                            "task_count": len(enqueued),
+                            "task_ids": enqueued,
+                        },
+                    )
         except Exception as exc:
             logger.exception("daemon: initial_plan failed for job %s", job.id)
             try:

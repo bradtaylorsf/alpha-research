@@ -49,6 +49,22 @@ def content_sha256(cleaned: str) -> str:
     return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
 
 
+def content_sha256_for_write(cleaned: str, metadata: dict[str, Any] | None) -> str:
+    """Dedup key for :func:`write_source`.
+
+    Per-page dossier rows include ``metadata.page_no`` in the hash so
+    identical boilerplate on different pages (e.g. repeated ``1.4(a)``)
+    still get distinct ``sources`` rows and coverage units.
+    """
+    if isinstance(metadata, dict) and metadata.get("page_no") is not None:
+        parent = str(metadata.get("parent_file") or "")
+        page = metadata.get("page_no")
+        chunk = metadata.get("page_chunk")
+        key = f"{parent}\0{page}\0{chunk}\0{cleaned}"
+        return content_sha256(key)
+    return content_sha256(cleaned)
+
+
 def write_source(
     job: Job,
     *,
@@ -100,7 +116,7 @@ def write_source(
     cleaned = clean_content(raw_content)
     if not cleaned:
         raise ValueError("raw_content cleans to an empty string")
-    sha = content_sha256(cleaned)
+    sha = content_sha256_for_write(cleaned, metadata)
     fetched = int(fetched_at) if fetched_at is not None else int(time.time())
     md_rel = f"sources/{sha}.md"
     json_rel = f"sources/{sha}.json"
