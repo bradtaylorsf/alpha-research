@@ -89,6 +89,87 @@ def test_extract_pypdf_returns_empty_for_image_pdf():
 
 
 # ---------------------------------------------------------------------------
+# Hybrid per-page mode (issue #374)
+# ---------------------------------------------------------------------------
+
+
+def test_merge_hybrid_page_body_both_layers_present():
+    """Both layers → text-layer + OCR sections with subheadings."""
+    merged = pdf._merge_hybrid_page_body(
+        "typed caption",
+        ["| A | B |\n|---|---|\n| 1 | 2 |"],
+        "scanned paragraph from OCR",
+    )
+    assert "### Text layer" in merged
+    assert "### OCR supplement" in merged
+    assert "typed caption" in merged
+    assert "| A | B |" in merged
+    assert "scanned paragraph from OCR" in merged
+
+
+def test_merge_hybrid_page_body_text_only():
+    """No OCR → no subheading, just the text-layer content."""
+    merged = pdf._merge_hybrid_page_body("typed only", [], "")
+    assert "### Text layer" not in merged
+    assert "### OCR supplement" not in merged
+    assert merged == "typed only"
+
+
+def test_merge_hybrid_page_body_ocr_only():
+    """No text layer → no subheading, just the OCR content."""
+    merged = pdf._merge_hybrid_page_body("", [], "scanned only")
+    assert "### Text layer" not in merged
+    assert "### OCR supplement" not in merged
+    assert merged == "scanned only"
+
+
+def test_merge_hybrid_page_body_empty_both():
+    """Neither layer produced content → empty string (caller drops the page)."""
+    assert pdf._merge_hybrid_page_body("", [], "") == ""
+
+
+def test_extract_hybrid_pages_merges_text_layer_and_ocr(monkeypatch):
+    """End-to-end: hybrid mode against the arxiv fixture surfaces both layers."""
+    monkeypatch.setattr(
+        pdf,
+        "_ocr_pages_texts",
+        lambda path, max_pages: ["OCR supplement visible only in scan " * 15],
+    )
+    text = pdf.extract_sync(ARXIV_PDF, hybrid_pages=True, max_pages=1)
+    assert "## Page 1" in text
+    assert "### Text layer" in text
+    assert "### OCR supplement" in text
+    assert "arxiv research paper text" in text
+    assert "OCR supplement visible" in text
+
+
+def test_extract_hybrid_pages_falls_back_to_layered_when_empty(monkeypatch):
+    """Hybrid returns empty → _extract_sync still tries the layered pipeline."""
+    monkeypatch.setattr(
+        pdf,
+        "_extract_hybrid_pages",
+        lambda path, max_pages: ("", 0),
+    )
+    text = pdf.extract_sync(ARXIV_PDF, hybrid_pages=True, max_pages=1)
+    # The layered pypdf path produces the arxiv body without the hybrid headers.
+    assert "arxiv research paper text" in text
+    assert "### Text layer" not in text
+
+
+def test_extract_hybrid_pages_caps_at_max_pages(monkeypatch):
+    """``max_pages`` clamps both the pypdf loop and the OCR pages list."""
+    captured_max: list[int] = []
+
+    def _spy_ocr(path, max_pages):
+        captured_max.append(max_pages)
+        return [""] * max_pages
+
+    monkeypatch.setattr(pdf, "_ocr_pages_texts", _spy_ocr)
+    pdf.extract_sync(ARXIV_PDF, hybrid_pages=True, max_pages=1)
+    assert captured_max == [1]
+
+
+# ---------------------------------------------------------------------------
 # Layer 2 — pdfplumber path
 # ---------------------------------------------------------------------------
 
