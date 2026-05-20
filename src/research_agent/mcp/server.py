@@ -39,6 +39,8 @@ class StartResearchJobInput(BaseModel):
     goal: str
     budget_usd: float | None = None
     time_cap: int | None = None
+    corpus: str | None = None
+    corpus_dossier: bool = False
     max_tasks: int | None = None
     local: bool = False
     fresh_reset: bool = False
