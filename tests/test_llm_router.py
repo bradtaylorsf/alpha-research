@@ -206,12 +206,16 @@ def test_load_models_config_ships_with_tier_table() -> None:
         "frontier_alt": "openrouter",
         "frontier_speed": "openrouter",
     }
+    # Model ids reflect the LM Studio lineup currently loaded on the
+    # operator's workstation (issue #375). When the lineup changes,
+    # update ``config/models.yaml`` *and* this assertion together so
+    # the configuration and the regression test stay coupled.
     expected_model = {
-        "fast": "qwen3-4b-instruct-q4_k_m",
-        "general": "qwen3-32b-instruct-q6_k",
-        "reasoner": "deepseek-r1-distill-32b-q6_k",
-        "vision": "qwen3-vl-8b-instruct",
-        "embeddings": "qwen3-embedding-4b",
+        "fast": "josiefied-qwen3-4b-instruct-2507-abliterated-v2",
+        "general": "qwen3.6-35b-a3b-holo3-qwopus-instruct-qx64-hi-mlx",
+        "reasoner": "deepseek-r1-distill-qwen-32b",
+        "vision": "deepseek-ocr-2",
+        "embeddings": "qwen3-embedding-4b-dwq",
         "frontier": "anthropic/claude-opus-4-7",
         "frontier_alt": "moonshotai/kimi-k2-1t",
         "frontier_speed": "anthropic/claude-haiku-4-5",
@@ -703,7 +707,9 @@ async def test_call_emits_llm_call_event_and_inserts_llm_calls_row(
     row = llm_rows[0]
     assert row["tier"] == "general"
     assert row["provider"] == "lmstudio"
-    assert row["model"] == "qwen3-32b-instruct-q6_k"
+    # Matches the LM Studio general-tier model in config/models.yaml; bumped
+    # together with the lineup refresh in issue #375.
+    assert row["model"] == "qwen3.6-35b-a3b-holo3-qwopus-instruct-qx64-hi-mlx"
     assert row["input_tokens"] == 12
     assert row["output_tokens"] == 34
     assert row["cached_tokens"] == 5
