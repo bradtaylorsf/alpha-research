@@ -267,9 +267,13 @@ def index(
 
     Returns a summary dict with ``files_indexed``, ``files_skipped``,
     ``chunks_indexed``, ``chunks_skipped``, ``pages_indexed``,
-    ``pages_skipped``, ``per_page``, and ``embed_dim``. Idempotent —
-    chunks already present in ``sources`` (matched by sha256) are linked
-    to the job without re-embedding.
+    ``pages_skipped``, ``per_page``, ``embed_dim``, and ``skipped``
+    (a list of ``{"file_url": str, "reason": str}`` records, one per
+    skipped file — issue #357). The daemon's dossier path turns each
+    skipped record into a ``confirmed_gap`` coverage unit so an
+    unreadable PDF doesn't block ``goal_complete`` forever.
+    Idempotent — chunks already present in ``sources`` (matched by
+    sha256) are linked to the job without re-embedding.
 
     When ``per_page=True``, PDFs use :func:`pdf.extract_pages_sync` and
     write one :class:`Source` row per page so the dossier extractor
@@ -295,6 +299,7 @@ def index(
     chunks_skipped = 0
     pages_indexed = 0
     pages_skipped = 0
+    skipped: list[dict[str, str]] = []
 
     for file_path in _walk_corpus(root):
         if per_page and file_path.suffix.lower() == ".pdf":
@@ -310,24 +315,31 @@ def index(
             chunks_skipped += stats["chunks_skipped"]
             pages_indexed += stats["pages_indexed"]
             pages_skipped += stats["pages_skipped"]
+            skipped.extend(stats.get("skipped", []))
             continue
 
+        file_url = file_path.as_uri()
         try:
             raw_text, _kind_hint = _extract_text(file_path)
         except Exception as exc:  # noqa: BLE001
             logger.warning("failed to extract %s: %s", file_path, exc)
             files_skipped += 1
+            skipped.append(
+                {"file_url": file_url, "reason": f"extraction_failed: {exc}"}
+            )
             continue
 
         cleaned_full = clean_content(raw_text) if raw_text else ""
         if not cleaned_full:
             logger.info("skipping empty file: %s", file_path)
             files_skipped += 1
+            skipped.append({"file_url": file_url, "reason": "empty_content"})
             continue
 
         chunks = _chunk_text(cleaned_full)
         if not chunks:
             files_skipped += 1
+            skipped.append({"file_url": file_url, "reason": "empty_content"})
             continue
 
         # Pre-check existing sources to avoid re-embedding what we already have.
@@ -347,7 +359,6 @@ def index(
             for chunk_idx, vec in zip(to_embed_idx, vectors, strict=True)
         }
 
-        file_url = file_path.as_uri()
         # Default path also stamps `parent_file` when per_page=True so
         # callers walking the coverage ledger can group HTML / MD / TXT
         # chunks under a single file unit. page_no stays None because
@@ -387,6 +398,7 @@ def index(
         "pages_skipped": pages_skipped,
         "per_page": per_page,
         "embed_dim": EMBED_DIM,
+        "skipped": skipped,
     }
 
 
@@ -410,27 +422,37 @@ def _index_pdf_per_page(
     """
     from research_agent.tools import pdf as pdf_mod  # lazy
 
-    empty_summary = {
+    empty_summary: dict[str, Any] = {
         "files_indexed": 0,
         "files_skipped": 0,
         "chunks_indexed": 0,
         "chunks_skipped": 0,
         "pages_indexed": 0,
         "pages_skipped": 0,
+        "skipped": [],
     }
 
+    file_url = file_path.as_uri()
     try:
         pages = pdf_mod.extract_pages_sync(file_path)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "pdf per-page extract failed for %s: %s", file_path, exc
         )
-        return {**empty_summary, "files_skipped": 1}
+        return {
+            **empty_summary,
+            "files_skipped": 1,
+            "skipped": [
+                {"file_url": file_url, "reason": f"extraction_failed: {exc}"}
+            ],
+        }
 
     if not pages:
-        return {**empty_summary, "files_skipped": 1}
-
-    file_url = file_path.as_uri()
+        return {
+            **empty_summary,
+            "files_skipped": 1,
+            "skipped": [{"file_url": file_url, "reason": "empty_content"}],
+        }
 
     # Materialise per-page sub-chunks first so we can batch-embed every
     # row produced by this file in a single embeddings call. Each entry
@@ -462,6 +484,7 @@ def _index_pdf_per_page(
             "files_skipped": 1,
             "pages_indexed": pages_indexed,
             "pages_skipped": pages_skipped,
+            "skipped": [{"file_url": file_url, "reason": "empty_content"}],
         }
 
     chunk_shas = [content_sha256(clean_content(c)) for _, _, c in page_chunks]
@@ -510,6 +533,7 @@ def _index_pdf_per_page(
         "chunks_skipped": chunks_skipped,
         "pages_indexed": pages_indexed,
         "pages_skipped": pages_skipped,
+        "skipped": [],
     }
 
 

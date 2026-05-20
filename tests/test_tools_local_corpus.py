@@ -292,6 +292,49 @@ def test_index_handles_empty_file(
     summary = local_corpus.index(corpus, job, models_config=stub_models_config)
     assert summary["files_indexed"] == 1
     assert summary["files_skipped"] == 1
+    skipped = summary["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["file_url"] == (corpus / "empty.txt").as_uri()
+    assert skipped[0]["reason"] == "empty_content"
+
+
+def test_index_skipped_field_default_empty(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """Healthy corpus -> ``skipped`` is present and empty (issue #357)."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "clean"
+    corpus.mkdir()
+    (corpus / "ok.txt").write_text("alpha beta gamma " * 40)
+
+    summary = local_corpus.index(corpus, job, models_config=stub_models_config)
+    assert summary["files_skipped"] == 0
+    assert summary["skipped"] == []
+
+
+def test_index_extraction_failure_records_reason(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """A raising ``_extract_text`` -> ``extraction_failed: <exc>`` in skipped."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "broken"
+    corpus.mkdir()
+    target = corpus / "broken.txt"
+    target.write_text("payload")
+
+    def _boom(path: Path):
+        raise RuntimeError("synthetic extract failure")
+
+    monkeypatch.setattr(local_corpus, "_extract_text", _boom)
+
+    summary = local_corpus.index(corpus, job, models_config=stub_models_config)
+    assert summary["files_indexed"] == 0
+    assert summary["files_skipped"] == 1
+    skipped = summary["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["file_url"] == target.as_uri()
+    assert "extraction_failed" in skipped[0]["reason"]
+    assert "synthetic extract failure" in skipped[0]["reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +672,8 @@ def test_index_per_page_unopenable_pdf_skips_file(
     _stub_embed(monkeypatch)
     corpus = tmp_path / "broken_pdf"
     corpus.mkdir()
-    (corpus / "broken.pdf").write_bytes(b"not actually a pdf")
+    pdf_path = corpus / "broken.pdf"
+    pdf_path.write_bytes(b"not actually a pdf")
 
     from research_agent.tools import pdf as pdf_mod
 
@@ -643,6 +687,64 @@ def test_index_per_page_unopenable_pdf_skips_file(
     assert summary["pages_indexed"] == 0
     assert summary["pages_skipped"] == 0
     assert summary["chunks_indexed"] == 0
+    skipped = summary["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["file_url"] == pdf_path.as_uri()
+    assert skipped[0]["reason"] == "empty_content"
+
+
+def test_index_per_page_pdf_extract_raises_records_reason(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """extract_pages_sync raising -> ``extraction_failed: <exc>`` (issue #357)."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "raising_pdf"
+    corpus.mkdir()
+    pdf_path = corpus / "raises.pdf"
+    pdf_path.write_bytes(b"%PDF-fake")
+
+    from research_agent.tools import pdf as pdf_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError("malformed xref table")
+
+    monkeypatch.setattr(pdf_mod, "extract_pages_sync", _boom)
+
+    summary = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert summary["files_skipped"] == 1
+    skipped = summary["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["file_url"] == pdf_path.as_uri()
+    assert "extraction_failed" in skipped[0]["reason"]
+    assert "malformed xref" in skipped[0]["reason"]
+
+
+def test_index_per_page_pdf_all_pages_empty_records_gap(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """Every page empty -> file-level ``empty_content`` gap (issue #357)."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "blank_pages"
+    corpus.mkdir()
+    pdf_path = corpus / "blank.pdf"
+    pdf_path.write_bytes(b"%PDF-fake")
+
+    from research_agent.tools import pdf as pdf_mod
+
+    monkeypatch.setattr(
+        pdf_mod, "extract_pages_sync", lambda *a, **k: [(1, ""), (2, "")]
+    )
+
+    summary = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert summary["files_skipped"] == 1
+    skipped = summary["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["file_url"] == pdf_path.as_uri()
+    assert skipped[0]["reason"] == "empty_content"
 
 
 def test_index_per_page_html_stamps_parent_file_and_null_page(

@@ -339,6 +339,85 @@ def test_file_status_rejects_empty_url(tmp_path: Path) -> None:
         coverage.file_status(job, "")
 
 
+# ---------------------------------------------------------------------------
+# declare_file_gap (issue #357)
+# ---------------------------------------------------------------------------
+
+
+def test_declare_file_gap_marks_file_confirmed_gap(tmp_path: Path) -> None:
+    """An unreadable file becomes a confirmed_gap unit, no page dimension."""
+    job = _dossier_job(tmp_path)
+
+    unit = coverage.declare_file_gap(
+        job, "file:///broken.pdf", "extraction_failed: malformed xref"
+    )
+
+    assert unit.status == "confirmed_gap"
+    assert unit.dimensions == {"file": "file:///broken.pdf"}
+    assert "page" not in unit.dimensions
+    assert unit.recent_attempts, "confirmed_gap unit must record an attempt"
+    assert unit.recent_attempts[-1].reason.startswith("extraction_failed")
+
+    listed = coverage.list_units(job)
+    assert len(listed) == 1
+    assert listed[0].status == "confirmed_gap"
+
+
+def test_declare_file_gap_is_idempotent(tmp_path: Path) -> None:
+    """Calling declare_file_gap twice on the same file does not duplicate."""
+    job = _dossier_job(tmp_path)
+
+    coverage.declare_file_gap(job, "file:///a.pdf", "extraction_failed: x")
+    coverage.declare_file_gap(job, "file:///a.pdf", "empty_content")
+
+    listed = [u for u in coverage.list_units(job) if u.dimensions == {"file": "file:///a.pdf"}]
+    assert len(listed) == 1
+    assert listed[0].status == "confirmed_gap"
+    # Latest attempt wins.
+    assert listed[0].recent_attempts[-1].reason == "empty_content"
+
+
+def test_declare_file_gap_does_not_block_coverage(tmp_path: Path) -> None:
+    """A pure-gap dossier (no page units) is coverage-complete (issue #357)."""
+    job = _dossier_job(tmp_path)
+
+    coverage.declare_file_gap(
+        job, "file:///broken1.pdf", "extraction_failed: foo"
+    )
+    coverage.declare_file_gap(job, "file:///broken2.pdf", "empty_content")
+
+    assert coverage.is_coverage_complete(job) is True
+
+
+def test_declare_file_gap_coexists_with_pending_pages(tmp_path: Path) -> None:
+    """A mix of gap + open page units stays not-complete until pages close."""
+    job = _dossier_job(tmp_path)
+
+    _seed_page_source(
+        job, parent_file="file:///good.pdf", page_no=1, page_chunk=None
+    )
+    coverage.declare_corpus_units(job)
+    coverage.declare_file_gap(
+        job, "file:///bad.pdf", "extraction_failed: corrupt"
+    )
+
+    assert coverage.is_coverage_complete(job) is False
+
+    page_units = [u for u in coverage.list_units(job) if "page" in u.dimensions]
+    for unit in page_units:
+        coverage.upsert_unit_status(job, unit.dim_key, "complete")
+
+    assert coverage.is_coverage_complete(job) is True
+
+
+def test_declare_file_gap_rejects_empty_url(tmp_path: Path) -> None:
+    import pytest
+
+    job = _dossier_job(tmp_path)
+    with pytest.raises(ValueError):
+        coverage.declare_file_gap(job, "", "reason")
+
+
 def test_goal_complete_gated_by_dossier_page_units(tmp_path: Path) -> None:
     """_is_goal_complete must return False while any page unit is open."""
     from research_agent.orchestrator.loop import _is_goal_complete

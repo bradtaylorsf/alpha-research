@@ -547,6 +547,71 @@ def declare_corpus_units(job: Job) -> list[CoverageUnit]:
     return declare_coverage(job, new_units)
 
 
+def declare_file_gap(
+    job: Job,
+    file_url: str,
+    reason: str,
+    *,
+    unblocker: str | None = None,
+) -> CoverageUnit:
+    """Declare a single ``confirmed_gap`` unit for an unreadable file.
+
+    Used by the dossier-mode indexer (issue #357) when
+    :func:`local_corpus.index` can't extract text from a corpus file —
+    e.g. a corrupt PDF, a truncated upload, an image-only scan with no
+    OCR yield. The unit dimensions are ``{"file": file_url}``; no page
+    dimension because the file produced zero pages.
+
+    The reason is recorded on the unit's ``recent_attempts`` so
+    ``research status`` can show *why* the gap was confirmed.
+    Idempotent: re-running on a job that already has a unit for the
+    same file flips its status to ``confirmed_gap`` (with the latest
+    reason) rather than duplicating it.
+
+    Returns the resulting :class:`CoverageUnit`.
+    """
+    if not isinstance(file_url, str) or not file_url:
+        raise ValueError("file_url must be a non-empty string")
+    reason_text = str(reason or "extraction_failed")
+
+    attempt = CoverageAttempt(
+        task_kind="local_corpus_index",
+        status="confirmed_gap",
+        reason=reason_text,
+    )
+
+    # Reuse declare_coverage's upsert path so existing units (and their
+    # attempt history) survive an idempotent rerun.
+    declared = declare_coverage(
+        job,
+        [
+            {
+                "dimensions": {"file": file_url},
+                "status": "confirmed_gap",
+                "recent_attempts": [attempt.model_dump(mode="json")],
+                "unblocker": unblocker,
+            }
+        ],
+    )
+    matching = [u for u in declared if u.dimensions.get("file") == file_url]
+    if not matching:
+        raise RuntimeError(
+            f"declare_file_gap did not write a unit for {file_url!r}"
+        )
+
+    # declare_coverage preserves prior status on conflict; force the gap
+    # by flipping the unit through upsert_unit_status, which also
+    # records the attempt.
+    target = matching[0]
+    return upsert_unit_status(
+        job,
+        target.dim_key,
+        "confirmed_gap",
+        attempt=attempt,
+        unblocker=unblocker,
+    )
+
+
 def file_status(job: Job, file_url: str) -> CoverageStatus:
     """Roll up per-page unit statuses into a per-file coverage status.
 
@@ -626,6 +691,7 @@ __all__ = [
     "blocking_units",
     "declare_corpus_units",
     "declare_coverage",
+    "declare_file_gap",
     "declare_from_intake",
     "dim_key_for",
     "dimensions_from_task_and_row",

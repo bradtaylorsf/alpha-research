@@ -647,7 +647,12 @@ def _processed_inbox_path(inbox_dir: Path, sha: str, filename: str) -> Path:
     return processed_dir / f"{sha}-{safe_name}"
 
 
-def _declare_dossier_coverage_units(job: Job, *, trigger: str) -> None:
+def _declare_dossier_coverage_units(
+    job: Job,
+    *,
+    trigger: str,
+    skipped: list[dict[str, str]] | None = None,
+) -> int:
     """Declare per-page coverage units after a dossier-mode index pass.
 
     Walks the ``sources`` rows already linked to the job and stamps one
@@ -655,16 +660,45 @@ def _declare_dossier_coverage_units(job: Job, *, trigger: str) -> None:
     :func:`coverage.declare_corpus_units`. Idempotent — re-running on a
     job with existing units preserves their statuses; only newly-added
     rows produce new units. Emits a ``coverage_declared`` event with
-    file_count + page_count so operators see when gating kicks in.
+    file_count + page_count + files_confirmed_gap so operators see
+    when gating kicks in and how many files were unreadable.
 
     ``trigger`` is the high-level event source (``"inbox"`` today;
     ``"corpus_walk"`` when the daemon's intake-corpus indexer lands).
+
+    ``skipped`` is the ``index()`` summary's ``skipped`` list — each
+    entry becomes a ``confirmed_gap`` coverage unit so the
+    extraction-failed PDF doesn't block ``goal_complete`` forever
+    (issue #357). Returns the number of confirmed-gap units declared.
     """
     from research_agent.storage import coverage
 
     units = coverage.declare_corpus_units(job)
     files = {unit.dimensions.get("file") for unit in units if unit.dimensions.get("file")}
     page_count = sum(1 for unit in units if "page" in unit.dimensions)
+
+    confirmed_gap_count = 0
+    for record in skipped or []:
+        file_url = record.get("file_url")
+        reason = record.get("reason") or "extraction_failed"
+        if not isinstance(file_url, str) or not file_url:
+            continue
+        try:
+            coverage.declare_file_gap(job, file_url, reason)
+        except Exception as exc:  # noqa: BLE001 — keep watcher alive on a bad row
+            logger.warning(
+                "failed to declare confirmed_gap for %s: %s", file_url, exc
+            )
+            continue
+        confirmed_gap_count += 1
+        emit(
+            job,
+            "WARN",
+            "daemon",
+            "corpus_file_gap",
+            {"file_url": file_url, "reason": reason, "trigger": trigger},
+        )
+
     emit(
         job,
         "INFO",
@@ -674,9 +708,11 @@ def _declare_dossier_coverage_units(job: Job, *, trigger: str) -> None:
             "trigger": trigger,
             "file_count": len(files),
             "page_count": page_count,
-            "total_units": len(units),
+            "total_units": len(units) + confirmed_gap_count,
+            "files_confirmed_gap": confirmed_gap_count,
         },
     )
+    return confirmed_gap_count
 
 
 async def _inbox_watcher(
@@ -731,6 +767,24 @@ async def _inbox_watcher(
                         )
                         + "\n",
                     )
+                    confirmed_gap_count = 0
+                    if per_page:
+                        confirmed_gap_count = _declare_dossier_coverage_units(
+                            job,
+                            trigger="inbox",
+                            skipped=indexed.get("skipped") or [],
+                        )
+                    # Strip the skipped detail list before fanning the
+                    # summary into the doc-added event — operators see
+                    # the per-file gap events separately and event
+                    # payloads should stay terse.
+                    doc_added_payload = {
+                        k: v for k, v in indexed.items() if k != "skipped"
+                    }
+                    if per_page:
+                        doc_added_payload["files_confirmed_gap"] = (
+                            confirmed_gap_count
+                        )
                     emit(
                         job,
                         "INFO",
@@ -742,11 +796,9 @@ async def _inbox_watcher(
                             "processed_path": str(processed_path.relative_to(job.root)),
                             "topic_guess": topic_guess,
                             "summary_chars": len(summary),
-                            **indexed,
+                            **doc_added_payload,
                         },
                     )
-                    if per_page:
-                        _declare_dossier_coverage_units(job, trigger="inbox")
                 except Exception as exc:  # noqa: BLE001 — keep watcher alive
                     logger.exception("inbox watcher failed for %s", file_path)
                     try:

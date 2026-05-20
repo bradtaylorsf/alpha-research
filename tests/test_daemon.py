@@ -1538,6 +1538,94 @@ async def test_inbox_watcher_declares_coverage_units_after_dossier_index(
     assert payload["file_count"] == 1
     assert payload["page_count"] == 3
     assert payload["total_units"] == 3
+    assert payload.get("files_confirmed_gap", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_inbox_watcher_dossier_records_confirmed_gap_for_skipped_file(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dossier-mode inbox runs with skipped file -> confirmed_gap unit + event."""
+    from research_agent.storage import coverage
+
+    seeded_job.intake = {**(seeded_job.intake or {}), "corpus_dossier": True}
+    (seeded_job.root / "intake.json").write_text(
+        json.dumps(seeded_job.intake), encoding="utf-8"
+    )
+
+    inbox = seeded_job.root / "inbox"
+    inbox.mkdir(exist_ok=True)
+    doc = inbox / "broken-scan.pdf"
+    doc.write_bytes(b"%PDF-corrupt")
+
+    def _fake_index(
+        path: Path, job: Job, *, per_page: bool = False
+    ) -> dict[str, object]:
+        return {
+            "files_indexed": 0,
+            "files_skipped": 1,
+            "chunks_indexed": 0,
+            "chunks_skipped": 0,
+            "pages_indexed": 0,
+            "pages_skipped": 0,
+            "per_page": per_page,
+            "embed_dim": 1024,
+            "skipped": [
+                {
+                    "file_url": f"file://{path}",
+                    "reason": "extraction_failed: pdf parse error",
+                }
+            ],
+        }
+
+    monkeypatch.setattr("research_agent.tools.local_corpus.index", _fake_index)
+    should_stop = asyncio.Event()
+    task = asyncio.create_task(
+        daemon._inbox_watcher(seeded_job, should_stop, interval_s=0.02)
+    )
+    try:
+        for _ in range(100):
+            if (seeded_job.root / "INBOX_REPLAN.json").exists():
+                should_stop.set()
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        should_stop.set()
+        if not task.done():
+            task.cancel()
+
+    units = coverage.list_units(seeded_job)
+    assert len(units) == 1
+    assert units[0].status == "confirmed_gap"
+    assert units[0].dimensions.get("file", "").endswith("broken-scan.pdf")
+    # Pure-gap dossier is coverage-complete by design (issue #357).
+    assert coverage.is_coverage_complete(seeded_job) is True
+
+    conn = db.connect(seeded_job.db_path)
+    try:
+        gap_rows = conn.execute(
+            "SELECT payload_json FROM events WHERE job_id = ? AND kind = ?",
+            (seeded_job.id, "corpus_file_gap"),
+        ).fetchall()
+        coverage_rows = conn.execute(
+            "SELECT payload_json FROM events WHERE job_id = ? AND kind = ?",
+            (seeded_job.id, "coverage_declared"),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(gap_rows) == 1
+    gap_payload = json.loads(gap_rows[0]["payload_json"])
+    assert gap_payload["reason"].startswith("extraction_failed")
+    assert gap_payload["trigger"] == "inbox"
+    assert gap_payload["file_url"].endswith("broken-scan.pdf")
+
+    assert len(coverage_rows) == 1
+    cov_payload = json.loads(coverage_rows[0]["payload_json"])
+    assert cov_payload["files_confirmed_gap"] == 1
+    assert cov_payload["page_count"] == 0
+    assert cov_payload["total_units"] == 1
 
 
 # ---------------------------------------------------------------------------
