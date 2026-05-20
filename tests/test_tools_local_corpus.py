@@ -179,6 +179,93 @@ def test_extract_text_html_lazy_unstructured(tmp_path: Path, monkeypatch) -> Non
 
 
 # ---------------------------------------------------------------------------
+# PDF delegation to the layered pipeline (issue #376)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_text_pdf_delegates_to_layered_pipeline(tmp_path: Path, monkeypatch) -> None:
+    """PDFs flow through ``tools.pdf.extract_sync`` with resolved caps."""
+    from research_agent.tools import pdf as pdf_mod
+
+    captured: dict[str, Any] = {}
+
+    def _fake_extract_sync(path, **kwargs):
+        captured["path"] = path
+        captured.update(kwargs)
+        return "DELEGATED MARKDOWN"
+
+    monkeypatch.setattr(pdf_mod, "extract_sync", _fake_extract_sync)
+
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4\n")
+    text, kind = local_corpus._extract_text(f)
+    assert kind == "pdf"
+    assert text == "DELEGATED MARKDOWN"
+    assert captured["hybrid_pages"] is False
+    assert captured["max_pages"] == pdf_mod.CORPUS_MAX_PAGES
+    assert captured["max_chars"] == pdf_mod.CORPUS_MAX_CHARS
+
+
+def test_extract_text_pdf_forwards_intake_knobs(tmp_path: Path, monkeypatch) -> None:
+    """``job.intake`` values flow through the resolvers into ``extract_sync``."""
+    from research_agent.tools import pdf as pdf_mod
+
+    captured: dict[str, Any] = {}
+
+    def _fake_extract_sync(path, **kwargs):
+        captured.update(kwargs)
+        return ""
+
+    monkeypatch.setattr(pdf_mod, "extract_sync", _fake_extract_sync)
+
+    class _StubJob:
+        intake = {
+            "pdf_hybrid_pages": True,
+            "pdf_max_pages": 50,
+            "pdf_max_chars": 12345,
+        }
+
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4\n")
+    local_corpus._extract_text(f, job=_StubJob())  # type: ignore[arg-type]
+
+    assert captured["hybrid_pages"] is True
+    assert captured["max_pages"] == 50
+    assert captured["max_chars"] == 12345
+
+
+def test_clamp_pdf_max_pages_enforces_hard_cap() -> None:
+    """Misconfigured intake values can't push extraction beyond the hard cap."""
+    from research_agent.tools.pdf import MAX_PAGES_HARD_CAP
+
+    assert local_corpus._clamp_pdf_max_pages(0) == 1
+    assert local_corpus._clamp_pdf_max_pages(-5) == 1
+    assert local_corpus._clamp_pdf_max_pages(MAX_PAGES_HARD_CAP) == MAX_PAGES_HARD_CAP
+    assert (
+        local_corpus._clamp_pdf_max_pages(MAX_PAGES_HARD_CAP + 1000) == MAX_PAGES_HARD_CAP
+    )
+
+
+def test_resolve_pdf_hybrid_pages_priority() -> None:
+    """Explicit kwarg > intake > default False."""
+
+    class _StubJob:
+        intake = {"pdf_hybrid_pages": True}
+
+    assert local_corpus._resolve_pdf_hybrid_pages(None, None) is False
+    assert local_corpus._resolve_pdf_hybrid_pages(_StubJob(), None) is True  # type: ignore[arg-type]
+    assert local_corpus._resolve_pdf_hybrid_pages(_StubJob(), False) is False  # type: ignore[arg-type]
+
+
+def test_embed_dim_matches_qwen3_embedding_4b_dwq() -> None:
+    """The 768-d setting must move in lock-step with the embeddings model
+    in ``config/models.yaml`` (issue #375). Tripping this assertion means
+    someone changed the embedding model without re-indexing or vice versa.
+    """
+    assert local_corpus.EMBED_DIM == 768
+
+
+# ---------------------------------------------------------------------------
 # index() — happy path with stubbed embeddings
 # ---------------------------------------------------------------------------
 
