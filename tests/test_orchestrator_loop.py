@@ -1780,7 +1780,9 @@ async def test_drain_replan_respects_cap(
         follow_up_questions: list[str] | None = None,
     ) -> Plan:
         next_version = prior_plan.version + 1
-        template = [TaskSpec(kind="web_search", payload={"q": "more"})]
+        template = [
+            TaskSpec(kind="web_search", payload={"q": f"more-v{next_version}"})
+        ]
         new = Plan(
             version=next_version,
             objective=prior_plan.objective,
@@ -1864,6 +1866,67 @@ async def test_drain_replan_break_on_empty_template(
     assert result["tasks_done"] == 1
     events = _read_event_kinds(db_path, job.id)
     assert events.count("drain_replan") == 1
+
+
+@pytest.mark.asyncio
+async def test_drain_replan_stops_when_only_duplicate_templates(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replan that repeats the prior plan signatures does not continue (#390)."""
+    _seed_tasks(job, ["web_search"])
+    duplicate_spec = plan.task_template[0]
+
+    async def fake_tactical_replan(
+        job_arg: Job,
+        prior_plan: Plan,
+        recent_results: list[dict[str, Any]],
+        *,
+        router: Any,
+        findings: list[dict[str, Any]] | None = None,
+        synthesis_md: str | None = None,
+        follow_up_questions: list[str] | None = None,
+        **kwargs: Any,
+    ) -> Plan:
+        next_version = prior_plan.version + 1
+        new = Plan(
+            version=next_version,
+            objective=prior_plan.objective,
+            subgoals=prior_plan.subgoals,
+            task_template=[duplicate_spec],
+            expected_iterations=prior_plan.expected_iterations,
+        )
+        write_plan(job_arg, new.model_dump())
+        return new
+
+    monkeypatch.setattr(plan_module, "tactical_replan", fake_tactical_replan)
+
+    result = await run_loop(
+        job,
+        router=None,
+        plan=plan,
+        handlers={"web_search": _ok_handler()},
+        retry_waits=(0,),
+    )
+
+    assert result["drain_replans"] == 1
+    assert result["tasks_done"] == 1
+    events = _read_event_kinds(db_path, job.id)
+    assert events.count("drain_replan") == 1
+    conn = db.connect(db_path)
+    try:
+        warn_rows = conn.execute(
+            "SELECT payload_json FROM events WHERE job_id = ? AND kind = 'warning'",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert any(
+        json.loads(r["payload_json"]).get("drain_replan_no_productive_tasks") is True
+        for r in warn_rows
+    )
 
 
 @pytest.mark.asyncio
@@ -2247,7 +2310,9 @@ def _make_constant_replan(monkeypatch: pytest.MonkeyPatch) -> None:
         follow_up_questions: list[str] | None = None,
     ) -> Plan:
         next_version = prior_plan.version + 1
-        template = [TaskSpec(kind="web_search", payload={"q": "more"})]
+        template = [
+            TaskSpec(kind="web_search", payload={"q": f"more-v{next_version}"})
+        ]
         new = Plan(
             version=next_version,
             objective=prior_plan.objective,

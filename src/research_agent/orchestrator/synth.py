@@ -1140,6 +1140,24 @@ def _candidate_from_final_subgoal_status_section(raw: str) -> _StatusCandidate |
     )
 
 
+def _candidate_from_subgoal_status_json_fence(raw: str) -> _StatusCandidate | None:
+    """Pick the first ```json fence whose body carries subgoal_status (issue #389).
+
+    Whole-report synthesis puts hypothesis_updates in the *last* fence, so the
+    legacy trailing-fence matcher alone would read the wrong block.
+    """
+    for match in _ANY_JSON_FENCE_RE.finditer(raw):
+        body = match.group(1).strip()
+        if not _TRAILING_STATUS_KEY_RE.search(body):
+            continue
+        return _StatusCandidate(
+            body=body,
+            stripped_md=_stripped_with_trailer_removed(raw, match.start()),
+            source="subgoal_status_json_fence",
+        )
+    return None
+
+
 def _candidate_from_trailing_fence(raw: str) -> _StatusCandidate | None:
     match = _SUBGOAL_STATUS_FENCE_RE.search(raw)
     if match is None:
@@ -1179,6 +1197,7 @@ def _candidate_from_raw_trailing_json(raw: str) -> _StatusCandidate | None:
 def _find_structured_status_candidate(raw: str) -> _StatusCandidate | None:
     return (
         _candidate_from_final_subgoal_status_section(raw)
+        or _candidate_from_subgoal_status_json_fence(raw)
         or _candidate_from_trailing_fence(raw)
         or _candidate_from_raw_trailing_json(raw)
     )
@@ -1777,6 +1796,69 @@ async def _run_fragment_llm(
     return output
 
 
+async def _run_subgoal_status_pass(
+    job: Job,
+    plan: Plan,
+    *,
+    router: Router,
+    final: bool = False,
+) -> None:
+    """Close open subgoals after fragment assembly (issue #389 / epic #386)."""
+    open_subgoals = [sg for sg in plan.subgoals if not sg.done]
+    if not open_subgoals:
+        return
+
+    from research_agent.storage import coverage
+
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM findings WHERE job_id = ?",
+            (job.id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    findings_count = int(row["n"]) if row is not None else 0
+
+    context = json.dumps(
+        {
+            "goal": job.goal,
+            "subgoals": [sg.model_dump() for sg in plan.subgoals],
+            "coverage_state": coverage.replan_context(job),
+            "findings_count": findings_count,
+            "final": final,
+            "corpus_dossier": bool((job.intake or {}).get("corpus_dossier")),
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+    prompt_meta = load_prompt_meta("subgoal_status", job=job)
+    tier = prompt_meta.model_tier
+    try:
+        rendered = load_prompt("subgoal_status", job=job, goal=job.goal)
+        agent = Agent(router.model_for(tier), output_type=str, system_prompt=rendered)
+        result = await router.call(tier, agent, context)
+        raw = result.output if isinstance(result.output, str) else str(result.output)
+    except Exception as exc:  # noqa: BLE001 — must not break fragment synth
+        emit(
+            job,
+            "WARN",
+            "synth",
+            "warning",
+            {"stage": "subgoal_status_pass", "error": str(exc), "final": final},
+        )
+        return
+
+    _, status_map = _extract_subgoal_status(
+        job,
+        raw,
+        subgoal_ids=[sg.id for sg in plan.subgoals],
+    )
+    if status_map:
+        _apply_subgoal_status(job, plan, status_map)
+
+
 async def _run_fragment_synth(
     job: Job,
     plan: Plan,
@@ -1917,6 +1999,9 @@ async def _run_fragment_synth(
             "final": final,
         },
     )
+
+    if updated or final:
+        await _run_subgoal_status_pass(job, plan, router=router, final=final)
 
     return SynthesisOutput(
         version=version,

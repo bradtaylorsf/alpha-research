@@ -929,14 +929,21 @@ def _productive_task_count(
     plan: Plan,
     *,
     failed_signatures: set[tuple[str, str]],
+    prior_plan_signatures: set[tuple[str, str]] | None = None,
 ) -> int:
-    """Count replan tasks that are not repeats of already-failed signatures."""
+    """Count replan tasks that are not repeats of failed or prior-plan signatures."""
+    prior = prior_plan_signatures or set()
     count = 0
     for spec in plan.task_template:
-        if _task_signature(spec.kind, spec.payload) in failed_signatures:
+        sig = _task_signature(spec.kind, spec.payload)
+        if sig in failed_signatures or sig in prior:
             continue
         count += 1
     return count
+
+
+def _plan_task_signatures(plan: Plan) -> set[tuple[str, str]]:
+    return {_task_signature(spec.kind, spec.payload) for spec in plan.task_template}
 
 
 def _latest_inconclusive_subgoal_ids(job: Job, plan: Plan) -> set[int]:
@@ -1576,6 +1583,7 @@ async def _drain_replan(
         replan_kwargs: dict[str, Any] = {}
         if inconclusive_context:
             replan_kwargs["inconclusive_subgoals"] = inconclusive_context
+        prior_plan_signatures = _plan_task_signatures(plan)
         new_plan = await tactical_replan(
             job,
             plan,
@@ -1596,17 +1604,30 @@ async def _drain_replan(
         )
         return _DrainReplanOutcome(plan=None, productive_task_count=None, should_continue=False)
 
-    productive_count = _productive_task_count(new_plan, failed_signatures=failed_signatures)
-    if not new_plan.task_template:
-        return _DrainReplanOutcome(
-            plan=new_plan,
-            productive_task_count=productive_count,
-            should_continue=False,
+    productive_count = _productive_task_count(
+        new_plan,
+        failed_signatures=failed_signatures,
+        prior_plan_signatures=prior_plan_signatures,
+    )
+    should_continue = bool(new_plan.task_template) and productive_count > 0
+    if not should_continue and new_plan.task_template:
+        emit(
+            job,
+            "INFO",
+            "loop",
+            "warning",
+            {
+                "drain_replan_no_productive_tasks": True,
+                "from_plan_version": plan.version,
+                "new_plan_version": new_plan.version,
+                "template_count": len(new_plan.task_template),
+                "productive_task_count": productive_count,
+            },
         )
     return _DrainReplanOutcome(
         plan=new_plan,
         productive_task_count=productive_count,
-        should_continue=True,
+        should_continue=should_continue,
     )
 
 

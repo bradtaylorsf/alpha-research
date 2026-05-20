@@ -409,19 +409,87 @@ def _extract_dimensions_from_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
 def dimensions_from_task_and_row(
     task: dict[str, Any],
     row: dict[str, Any] | None = None,
+    *,
+    job: Job | None = None,
 ) -> dict[str, Any]:
     payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
     dims = _extract_dimensions_from_mapping(payload)
     if row:
         dims.update(_extract_dimensions_from_mapping(row))
+    source_id = payload.get("source_id")
+    if not dims and isinstance(source_id, int) and job is not None:
+        dims.update(dimensions_from_source_id(job, source_id))
     kind = str(task.get("kind") or "")
     dims.setdefault("source_type", _SOURCE_TYPE_BY_KIND.get(kind))
     return {k: v for k, v in dims.items() if v not in (None, "", [])}
 
 
+def dimensions_from_source_id(job: Job, source_id: int) -> dict[str, Any]:
+    """Resolve dossier page dimensions from a linked ``sources`` row id."""
+    from research_agent.storage.sources import read_source_metadata
+
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute(
+            "SELECT sha256 FROM sources WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {}
+    try:
+        meta = read_source_metadata(job, str(row["sha256"]))
+    except FileNotFoundError:
+        return {}
+    dims: dict[str, Any] = {}
+    parent = meta.get("parent_file")
+    if isinstance(parent, str) and parent:
+        dims["file"] = parent
+    page_no = meta.get("page_no")
+    if page_no is not None:
+        dims["page"] = int(page_no)
+    page_chunk = meta.get("page_chunk")
+    if page_chunk is not None:
+        dims["page_chunk"] = int(page_chunk)
+    return dims
+
+
+def update_from_extract_findings(
+    job: Job,
+    task: dict[str, Any],
+    result: dict[str, Any] | None,
+) -> None:
+    """Mark dossier page units complete after a successful extraction task."""
+    payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
+    source_id = payload.get("source_id")
+    if not isinstance(source_id, int):
+        return
+    dims = dimensions_from_source_id(job, source_id)
+    if not dims:
+        return
+    attempt = {
+        "task_id": task.get("id"),
+        "task_kind": task.get("kind"),
+        "status": "done",
+    }
+    written = 0
+    if isinstance(result, dict):
+        written = int(result.get("findings_written") or 0)
+    set_matching_units(
+        job,
+        dims,
+        "complete",
+        attempt={**attempt, "reason": f"findings_written={written}"},
+    )
+
+
 def update_from_task_result(job: Job, task: dict[str, Any], result: dict[str, Any] | None) -> None:
     """Best-effort coverage update from connector task output."""
     if not has_coverage(job):
+        return
+    if str(task.get("kind") or "") == "extract_findings":
+        update_from_extract_findings(job, task, result)
         return
     attempt_base = {
         "task_id": task.get("id"),
@@ -444,7 +512,7 @@ def update_from_task_result(job: Job, task: dict[str, Any], result: dict[str, An
                 )
         return
     if isinstance(rows, list) and not rows:
-        dims = dimensions_from_task_and_row(task)
+        dims = dimensions_from_task_and_row(task, job=job)
         if dims:
             empty_status = payload.get("empty_coverage_status")
             status: CoverageStatus = (
@@ -469,7 +537,7 @@ def update_from_task_result(job: Job, task: dict[str, Any], result: dict[str, An
 def mark_task_failed(job: Job, task: dict[str, Any], reason: str) -> None:
     if not has_coverage(job):
         return
-    dims = dimensions_from_task_and_row(task)
+    dims = dimensions_from_task_and_row(task, job=job)
     if not dims:
         return
     set_matching_units(
@@ -511,6 +579,7 @@ __all__ = [
     "declare_coverage",
     "declare_from_intake",
     "dim_key_for",
+    "dimensions_from_source_id",
     "dimensions_from_task_and_row",
     "has_coverage",
     "is_coverage_complete",
@@ -519,6 +588,7 @@ __all__ = [
     "replan_context",
     "set_matching_units",
     "units_from_intake",
+    "update_from_extract_findings",
     "update_from_task_result",
     "upsert_unit_status",
 ]

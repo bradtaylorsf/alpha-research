@@ -1523,10 +1523,13 @@ async def test_index_intake_corpus_calls_local_corpus_with_hybrid_pages(
 
     captured: dict[str, Any] = {}
 
-    def _fake_index(path: Path, job: Job, *, hybrid_pages: bool = False) -> dict[str, int]:
+    def _fake_index(
+        path: Path, job: Job, *, hybrid_pages: bool = False, per_page: bool = False
+    ) -> dict[str, int]:
         captured["path"] = path
         captured["job_id"] = job.id
         captured["hybrid_pages"] = hybrid_pages
+        captured["per_page"] = per_page
         return {
             "files_indexed": 1,
             "files_skipped": 0,
@@ -1547,6 +1550,81 @@ async def test_index_intake_corpus_calls_local_corpus_with_hybrid_pages(
 
 
 @pytest.mark.asyncio
+async def test_index_intake_corpus_dossier_declares_coverage_corpus_walk(
+    seeded_job: Job,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``corpus_dossier`` routes per_page index + ``coverage_declared`` (issue #387)."""
+    from research_agent.storage import coverage
+    from research_agent.storage.sources import write_source
+
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    (corpus_dir / "evidence.pdf").write_bytes(b"%PDF-stub")
+
+    _update_intake(seeded_job, corpus=str(corpus_dir), corpus_dossier=True)
+
+    def _fake_index(
+        path: Path, job: Job, *, hybrid_pages: bool = False, per_page: bool = False
+    ) -> dict[str, object]:
+        write_source(
+            job,
+            url=f"file://{path}/evidence.pdf",
+            title="evidence.pdf",
+            raw_content="page one",
+            kind="local",
+            metadata={
+                "parent_file": f"file://{path}/evidence.pdf",
+                "page_no": 1,
+                "page_chunk": None,
+            },
+        )
+        return {
+            "files_indexed": 1,
+            "files_skipped": 0,
+            "chunks_indexed": 1,
+            "chunks_skipped": 0,
+            "pages_indexed": 1,
+            "pages_skipped": 0,
+            "per_page": per_page,
+            "embed_dim": 768,
+            "skipped": [],
+        }
+
+    captured: dict[str, bool] = {}
+
+    def _spy_index(
+        path: Path, job: Job, *, hybrid_pages: bool = False, per_page: bool = False
+    ) -> dict[str, object]:
+        captured["per_page"] = per_page
+        return _fake_index(path, job, hybrid_pages=hybrid_pages, per_page=per_page)
+
+    monkeypatch.setattr("research_agent.tools.local_corpus.index", _spy_index)
+
+    result = await daemon._index_intake_corpus(seeded_job)
+
+    assert result is not None
+    assert captured["per_page"] is True
+    units = coverage.list_units(seeded_job)
+    assert len(units) == 1
+    assert units[0].status == "pending"
+
+    conn = db.connect(seeded_job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM events WHERE job_id = ? AND kind = ?",
+            (seeded_job.id, "coverage_declared"),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["trigger"] == "corpus_walk"
+    assert payload["page_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_run_daemon_indexes_intake_corpus_on_startup(
     seeded_job: Job,
     tmp_path: Path,
@@ -1561,7 +1639,9 @@ async def test_run_daemon_indexes_intake_corpus_on_startup(
 
     index_calls: list[Path] = []
 
-    def _fake_index(path: Path, job: Job, *, hybrid_pages: bool = False) -> dict[str, int]:
+    def _fake_index(
+        path: Path, job: Job, *, hybrid_pages: bool = False, per_page: bool = False
+    ) -> dict[str, int]:
         index_calls.append(path)
         return {
             "files_indexed": 1,

@@ -167,3 +167,51 @@ def test_state_election_row_carries_state_ballot_qualified_source_type(tmp_path:
 
     [reloaded] = coverage.list_units(job)
     assert reloaded.status == "complete"
+
+
+def test_update_from_extract_findings_marks_page_complete(tmp_path: Path) -> None:
+    """Successful extract_findings closes the matching dossier page unit (#388)."""
+    job = _dossier_job(tmp_path)
+    parent = "file:///doc.pdf"
+    _seed_page_source(job, parent_file=parent, page_no=2, page_chunk=None)
+    coverage.declare_corpus_units(job)
+
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute("SELECT id FROM sources LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    source_id = int(row["id"])
+
+    task = {
+        "id": 99,
+        "kind": "extract_findings",
+        "payload": {"source_id": source_id, "sub_question": "entities"},
+    }
+    coverage.update_from_task_result(job, task, {"findings_written": 3})
+
+    units = coverage.list_units(job)
+    assert len(units) == 1
+    assert units[0].status == "complete"
+
+
+def test_mark_task_failed_uses_source_id_for_dossier_page(tmp_path: Path) -> None:
+    job = _dossier_job(tmp_path)
+    parent = "file:///doc.pdf"
+    _seed_page_source(job, parent_file=parent, page_no=1, page_chunk=None)
+    coverage.declare_corpus_units(job)
+
+    conn = db.connect(job.db_path)
+    try:
+        row = conn.execute("SELECT id FROM sources LIMIT 1").fetchone()
+    finally:
+        conn.close()
+
+    task = {
+        "id": 100,
+        "kind": "extract_findings",
+        "payload": {"source_id": int(row["id"])},
+    }
+    coverage.mark_task_failed(job, task, "yaml parse failed")
+
+    assert coverage.list_units(job)[0].status == "failed"

@@ -852,6 +852,17 @@ async def tactical_replan(
     if coverage_state is not None:
         payload["coverage_state"] = coverage_state
 
+    if (job.intake or {}).get("corpus_dossier") and coverage.has_coverage(job):
+        if coverage.is_coverage_complete(job):
+            payload["dossier_coverage_complete"] = True
+            payload["dossier_replan_hint"] = (
+                "Corpus dossier page coverage is complete (or confirmed_gap for "
+                "unreadable files). Do not re-emit the same generic "
+                "local_corpus_query template batch; advance to file rollup, "
+                "entity/geo-temporal analysis, contradictions, and narrative "
+                "synthesis tasks aligned with open subgoals."
+            )
+
     # issue #179: include a bounded view of the running ``findings`` so the
     # planner can drill into named claims (Schedule F, WOTUS, mifepristone)
     # rather than re-emitting the same per-department generic queries. Cap to

@@ -522,9 +522,13 @@ def test_synthesize_fragments_writes_updates_and_events(
     out = asyncio.run(synth_module.synthesize_fragments(job, plan, router=router))
 
     assert out.model == "fragment_assembly"
-    assert [call[0] for call in router.calls] == ["frontier"]
-    assert _StubAgent.instances[-1].system_prompt is not None
-    assert "section-fragment synthesizer" in _StubAgent.instances[-1].system_prompt
+    assert [call[0] for call in router.calls] == ["frontier", "general"]
+    fragment_prompts = [
+        a.system_prompt
+        for a in _StubAgent.instances
+        if a.system_prompt and "section-fragment synthesizer" in a.system_prompt
+    ]
+    assert len(fragment_prompts) == 1
     fragment = latest_fragment(job, "timeline")
     assert fragment is not None
     assert fragment["content"] == "## Timeline\n\n- Timeline claim [1].\n"
@@ -553,6 +557,80 @@ def test_synthesize_fragments_writes_updates_and_events(
     written_payload = json.loads(written["payload_json"])
     assert written_payload["mode"] == "fragments"
     assert written_payload["fragment_versions"] == {"timeline": 1}
+
+
+def test_synthesize_fragments_applies_subgoal_status(
+    job: Job,
+    db_path: Path,
+    plan: Plan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fragment synth runs the subgoal-status pass (#389)."""
+    write_finding(job, "Timeline claim", 0.9, [1], target_fragments=["timeline"])
+    applied: list[dict[int, str]] = []
+
+    async def _fake_pass(
+        job_arg: Job,
+        plan_arg: Plan,
+        *,
+        router: Any,
+        final: bool = False,
+    ) -> None:
+        applied.append({1: "confirmed"})
+
+    monkeypatch.setattr(synth_module, "_run_subgoal_status_pass", _fake_pass)
+    router = _StubRouter(content="## Timeline\n\n- Timeline claim [1].\n")
+    asyncio.run(synth_module.synthesize_fragments(job, plan, router=router))
+    assert applied == [{1: "confirmed"}]
+
+
+def test_run_subgoal_status_pass_closes_subgoals(
+    job: Job,
+    db_path: Path,
+) -> None:
+    """Subgoal-status LLM output persists via update_subgoal_done."""
+    plan = Plan(
+        version=1,
+        objective="Investigate the target",
+        subgoals=[
+            Subgoal(id=1, description="Gather", done=False),
+            Subgoal(id=2, description="Analyze", done=False),
+        ],
+        task_template=[TaskSpec(kind="web_search")],
+        expected_iterations=3,
+    )
+    write_plan(job, plan.model_dump())
+    router = _StubRouter(
+        content=(
+            '```json\n{"subgoal_status": {"1": "confirmed", "2": "inconclusive"}}\n```\n'
+            '```json\n{"hypothesis_updates": []}\n```\n'
+        ),
+        tiers={
+            "general": {"model": "test/general", "provider": "test"},
+            "frontier": {"model": "test/frontier", "provider": "test"},
+        },
+    )
+    asyncio.run(
+        synth_module._run_subgoal_status_pass(job, plan, router=router, final=True)
+    )
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM plans WHERE job_id = ? ORDER BY version DESC LIMIT 1",
+            (job.id,),
+        ).fetchone()
+        events = conn.execute(
+            "SELECT kind FROM events WHERE job_id = ? AND kind = ?",
+            (job.id, "plan_subgoals_updated"),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert row is not None
+    payload = json.loads(row["payload_json"])
+    done_by_id = {sg["id"]: sg["done"] for sg in payload["subgoals"]}
+    assert done_by_id[1] is True
+    assert done_by_id[2] is False
+    assert len(events) == 1
 
 
 def test_synthesize_fragments_rotates_prior_report(
@@ -632,14 +710,14 @@ def test_synthesize_fragments_second_pass_without_new_findings_is_noop(
     router = _StubRouter(content="## Timeline\n\n- Timeline claim [1].\n")
 
     first = asyncio.run(synth_module.synthesize_fragments(job, plan, router=router))
-    assert [call[0] for call in router.calls] == ["frontier"]
+    assert [call[0] for call in router.calls] == ["frontier", "general"]
     assert latest_fragment(job, "timeline")["version"] == 1
 
     # No new evidence landed — the second pass must select nothing and
     # leave the prior fragment version untouched (no extra LLM calls).
     second = asyncio.run(synth_module.synthesize_fragments(job, plan, router=router))
 
-    assert [call[0] for call in router.calls] == ["frontier"]
+    assert [call[0] for call in router.calls] == ["frontier", "general"]
     assert second.model == "fragment_assembly"
     assert latest_fragment(job, "timeline")["version"] == 1
     assert (job.root / "report.md").read_text(encoding="utf-8") == second.content
