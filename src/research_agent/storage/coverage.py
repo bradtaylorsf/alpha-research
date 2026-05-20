@@ -485,6 +485,122 @@ def mark_task_failed(job: Job, task: dict[str, Any], reason: str) -> None:
     )
 
 
+def declare_corpus_units(job: Job) -> list[CoverageUnit]:
+    """Declare one coverage unit per indexed corpus Source row (issue #356).
+
+    Reads every ``sources`` row linked to ``job`` whose ``kind='local'``
+    and whose JSON sidecar carries ``metadata.parent_file``, then
+    declares one unit per row with dimensions
+    ``{"file": parent_file, "page": page_no, "page_chunk": page_chunk}``.
+
+    Page-grain units (``page_no`` set) are the source of truth for
+    completion gating; HTML / MD / TXT rows ingest as a single unit per
+    chunk with ``page=null`` so :func:`file_status` still recognises
+    them. Rows with no sidecar metadata (legacy thematic-mode ingests
+    that pre-date dossier mode) are skipped — those jobs should not
+    have coverage units in the first place.
+
+    Idempotent via :func:`declare_coverage` upserts: existing statuses
+    and attempt histories are preserved, so a resume path can replay
+    this without clobbering progress.
+
+    Returns the full list of units now stored on the job (not just the
+    delta), matching :func:`declare_coverage` semantics.
+    """
+    from research_agent.storage.sources import read_source_metadata
+
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT s.sha256 AS sha, s.url AS url
+            FROM sources s
+            JOIN job_sources js ON js.source_id = s.id
+            WHERE js.job_id = ? AND s.kind = ?
+            ORDER BY s.id ASC
+            """,
+            (job.id, "local"),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    new_units: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            meta = read_source_metadata(job, row["sha"])
+        except FileNotFoundError:
+            continue
+        parent = meta.get("parent_file")
+        if not parent:
+            continue
+        page_no = meta.get("page_no")
+        page_chunk = meta.get("page_chunk")
+        dims: dict[str, Any] = {"file": parent}
+        if page_no is not None:
+            dims["page"] = int(page_no)
+        if page_chunk is not None:
+            dims["page_chunk"] = int(page_chunk)
+        new_units.append({"dimensions": dims, "status": "pending"})
+
+    if not new_units:
+        return list_units(job)
+    return declare_coverage(job, new_units)
+
+
+def file_status(job: Job, file_url: str) -> CoverageStatus:
+    """Roll up per-page unit statuses into a per-file coverage status.
+
+    File status is derived from the page units sharing the same
+    ``dims.file`` value. Rules (in evaluation order):
+
+    - No matching units → ``pending`` (caller may have declared the
+      file before any pages were declared).
+    - All page units :data:`TERMINAL_STATUSES`:
+
+      - all ``complete`` → ``complete``.
+      - all ``confirmed_gap`` → ``confirmed_gap``.
+      - all ``not_yet_public`` → ``not_yet_public``.
+      - mixed terminal statuses → ``complete`` (the file landed
+        something; gap pages stay visible as their own units).
+    - Any page in :data:`BLOCKING_STATUSES` with at least one other
+      page already terminal-complete / -gap / -not-yet-public, or with
+      any unit explicitly in ``in_progress``, or with attempt history
+      → ``in_progress``.
+    - Otherwise (every page still pending, no attempts) → ``pending``.
+    """
+    if not isinstance(file_url, str) or not file_url:
+        raise ValueError("file_url must be a non-empty string")
+
+    matching: list[CoverageUnit] = []
+    for unit in list_units(job):
+        if unit.dimensions.get("file") == file_url:
+            matching.append(unit)
+
+    if not matching:
+        return "pending"
+
+    statuses = {unit.status for unit in matching}
+    terminal_set = statuses & TERMINAL_STATUSES
+    blocking_set = statuses & BLOCKING_STATUSES
+
+    if not blocking_set:
+        if statuses == {"complete"}:
+            return "complete"
+        if statuses == {"confirmed_gap"}:
+            return "confirmed_gap"
+        if statuses == {"not_yet_public"}:
+            return "not_yet_public"
+        return "complete"
+
+    if (
+        terminal_set
+        or "in_progress" in statuses
+        or any(unit.recent_attempts for unit in matching)
+    ):
+        return "in_progress"
+    return "pending"
+
+
 def replan_context(job: Job) -> dict[str, Any] | None:
     if not has_coverage(job):
         return None
@@ -508,10 +624,12 @@ __all__ = [
     "CoverageStatus",
     "CoverageUnit",
     "blocking_units",
+    "declare_corpus_units",
     "declare_coverage",
     "declare_from_intake",
     "dim_key_for",
     "dimensions_from_task_and_row",
+    "file_status",
     "has_coverage",
     "is_coverage_complete",
     "list_units",

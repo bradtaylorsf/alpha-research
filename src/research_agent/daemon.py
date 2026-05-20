@@ -647,6 +647,38 @@ def _processed_inbox_path(inbox_dir: Path, sha: str, filename: str) -> Path:
     return processed_dir / f"{sha}-{safe_name}"
 
 
+def _declare_dossier_coverage_units(job: Job, *, trigger: str) -> None:
+    """Declare per-page coverage units after a dossier-mode index pass.
+
+    Walks the ``sources`` rows already linked to the job and stamps one
+    coverage unit per page (or per non-paginated chunk) via
+    :func:`coverage.declare_corpus_units`. Idempotent — re-running on a
+    job with existing units preserves their statuses; only newly-added
+    rows produce new units. Emits a ``coverage_declared`` event with
+    file_count + page_count so operators see when gating kicks in.
+
+    ``trigger`` is the high-level event source (``"inbox"`` today;
+    ``"corpus_walk"`` when the daemon's intake-corpus indexer lands).
+    """
+    from research_agent.storage import coverage
+
+    units = coverage.declare_corpus_units(job)
+    files = {unit.dimensions.get("file") for unit in units if unit.dimensions.get("file")}
+    page_count = sum(1 for unit in units if "page" in unit.dimensions)
+    emit(
+        job,
+        "INFO",
+        "daemon",
+        "coverage_declared",
+        {
+            "trigger": trigger,
+            "file_count": len(files),
+            "page_count": page_count,
+            "total_units": len(units),
+        },
+    )
+
+
 async def _inbox_watcher(
     job: Job,
     should_stop: asyncio.Event,
@@ -713,6 +745,8 @@ async def _inbox_watcher(
                             **indexed,
                         },
                     )
+                    if per_page:
+                        _declare_dossier_coverage_units(job, trigger="inbox")
                 except Exception as exc:  # noqa: BLE001 — keep watcher alive
                     logger.exception("inbox watcher failed for %s", file_path)
                     try:
