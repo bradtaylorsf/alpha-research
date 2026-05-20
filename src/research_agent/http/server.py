@@ -31,6 +31,7 @@ class StartJobRequest(BaseModel):
     budget_usd: float | None = None
     time_cap: int | None = None
     corpus: str | None = None
+    corpus_dossier: bool = False
     disk_cap_gb: float = 10.0
     max_tasks: int | None = None
     local: bool = False

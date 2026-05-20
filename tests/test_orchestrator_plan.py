@@ -186,6 +186,53 @@ def test_subgoal_forbids_extra_keys() -> None:
         Subgoal.model_validate({"id": 1, "description": "do thing", "extra": True})
 
 
+def test_subgoal_stage_defaults_to_one() -> None:
+    """No-stage Subgoals (legacy plans) deserialise as stage=1 (issue #358)."""
+    sg = Subgoal(id=1, description="do thing")
+    assert sg.stage == 1
+
+
+def test_subgoal_stage_round_trips_explicit_value() -> None:
+    sg = Subgoal(id=2, description="entity rollup", stage=3)
+    assert sg.stage == 3
+    dumped = sg.model_dump()
+    assert dumped["stage"] == 3
+    assert Subgoal.model_validate(dumped) == sg
+
+
+def test_subgoal_stage_legacy_payload_backward_compat() -> None:
+    """A pre-#358 plan payload (no stage key) loads with stage=1."""
+    legacy_payload = {"id": 7, "description": "before stages existed"}
+    sg = Subgoal.model_validate(legacy_payload)
+    assert sg.stage == 1
+
+
+def test_subgoal_stage_rejects_zero_and_negative() -> None:
+    with pytest.raises(ValidationError):
+        Subgoal(id=1, description="x", stage=0)
+    with pytest.raises(ValidationError):
+        Subgoal(id=1, description="x", stage=-2)
+
+
+def test_subgoal_stage_yaml_round_trip_via_plan() -> None:
+    """A Plan that carries staged subgoals round-trips through model_dump."""
+    plan = Plan(
+        version=1,
+        objective="dossier ladder",
+        subgoals=[
+            Subgoal(id=1, description="per-file extract", stage=1),
+            Subgoal(id=2, description="entity rollup", stage=2),
+            Subgoal(id=3, description="narrative", stage=5),
+        ],
+        task_template=[
+            TaskSpec(kind="local_corpus_query", payload={"q": "intake"}),
+        ],
+        expected_iterations=4,
+    )
+    rebuilt = Plan.model_validate(plan.model_dump())
+    assert [sg.stage for sg in rebuilt.subgoals] == [1, 2, 5]
+
+
 # ---------------------------------------------------------------------------
 # Plan
 # ---------------------------------------------------------------------------

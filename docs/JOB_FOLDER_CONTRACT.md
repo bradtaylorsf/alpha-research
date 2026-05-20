@@ -5,8 +5,16 @@ consumers such as MCP servers, Python embedders, and future UIs should read
 from this folder through `research_agent.contract` and must not infer state
 from daemon internals.
 
-`job.json` has `schema_version: 1`. Any incompatible change to stable files
+`job.json` has `schema_version: 2`. Any incompatible change to stable files
 below requires bumping that version in the same PR.
+
+Schema version history:
+
+- `2` — issue #358: `plan/NNNN.json` subgoals now carry an integer
+  `stage` field (default `1`) so the dossier stage ladder can detect
+  premature subgoal closure. Plans written under schema 1 deserialise
+  unchanged (every subgoal becomes `stage=1`).
+- `1` — initial stable contract.
 
 ## Stability
 
@@ -76,7 +84,7 @@ Canonical disk metadata for one job.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "2026-05-16-investigate-widget-co",
   "goal": "Investigate Widget Co",
   "domain": "general",
@@ -141,6 +149,18 @@ Raw planner payload. Current top-level fields are planner-defined and may
 include `tasks`, `subgoals`, `scope_class`, `active_strategies`, and
 `cornerstone_url`. Consumers should treat the JSON sidecar as structured
 planner state and the markdown as display text.
+
+Each entry in `subgoals` carries (schema 2+):
+
+- `id` integer.
+- `description` string.
+- `done` boolean.
+- `gap_reason`, `gap_status` optional strings (planner-documented gaps).
+- `stage` integer ≥ 1 (default `1`). Groups subgoals into ordered phases
+  for the dossier stage ladder; the synth guard refuses to close a
+  stage `N+k` subgoal while any stage `N` subgoal is still open. Plans
+  loaded from schema 1 jobs deserialise with `stage=1` for every
+  subgoal.
 
 ### `findings/NNNNNN.md`
 

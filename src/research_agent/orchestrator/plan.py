@@ -145,7 +145,18 @@ ScopeClass = Literal["narrow", "medium", "broad", "comprehensive"]
 
 
 class Subgoal(BaseModel):
-    """A single subgoal within a Plan. ``done=True`` retires it from the loop."""
+    """A single subgoal within a Plan. ``done=True`` retires it from the loop.
+
+    ``stage`` (issue #358) groups subgoals into ordered phases for the
+    dossier ladder — e.g. ``stage=1`` per-file extraction, ``stage=2``
+    entity rollup, ``stage=3`` geo/temporal, ``stage=4`` contradictions,
+    ``stage=5`` narrative. Plans written before this field existed (or
+    written by a planner that omits it) default to ``stage=1`` so legacy
+    plan rows continue to round-trip cleanly through ``model_validate``.
+    The M3 synth guard will consult this field to refuse closing a
+    stage N+k subgoal while a stage N subgoal is still open; this PR
+    only lands the field + persistence + migration.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -154,6 +165,7 @@ class Subgoal(BaseModel):
     done: bool = False
     gap_reason: str | None = None
     gap_status: str | None = None
+    stage: int = Field(default=1, ge=1)
 
 
 class TaskSpec(BaseModel):

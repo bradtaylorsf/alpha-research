@@ -64,6 +64,57 @@ def test_http_lifecycle_routes_delegate_to_programmatic_api(
     assert not (jobs_root / job_id / "STOP").exists()
 
 
+def test_http_start_job_accepts_corpus_dossier_field(
+    tmp_path: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /jobs accepts corpus_dossier=True; persists into intake.json."""
+    import json as _json
+
+    jobs_root = tmp_path / "jobs"
+    monkeypatch.setattr(daemon_mod, "spawn_daemon", lambda _job_id, **_kw: 4242)
+    monkeypatch.setattr(daemon_mod, "is_daemon_alive", lambda *_a, **_kw: False)
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    client = TestClient(server.create_app(jobs_root=jobs_root, db_path=db_path))
+
+    started = client.post(
+        "/jobs",
+        json={
+            "goal": "HTTP dossier round-trip",
+            "corpus": str(corpus_dir),
+            "corpus_dossier": True,
+        },
+    )
+    assert started.status_code == 200, started.text
+    job_id = started.json()["job_id"]
+    intake_data = _json.loads(
+        (jobs_root / job_id / "intake.json").read_text(encoding="utf-8")
+    )
+    assert intake_data["corpus_dossier"] is True
+    assert intake_data["corpus"] == str(corpus_dir)
+
+
+def test_http_start_job_corpus_dossier_without_corpus_returns_400(
+    tmp_path: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """corpus_dossier with no corpus surfaces InvalidGoal (HTTP 400)."""
+    jobs_root = tmp_path / "jobs"
+    monkeypatch.setattr(daemon_mod, "spawn_daemon", lambda _job_id, **_kw: 4242)
+    monkeypatch.setattr(daemon_mod, "is_daemon_alive", lambda *_a, **_kw: False)
+    client = TestClient(server.create_app(jobs_root=jobs_root, db_path=db_path))
+
+    failed = client.post(
+        "/jobs",
+        json={"goal": "HTTP dossier no corpus", "corpus_dossier": True},
+    )
+    assert failed.status_code == 400, failed.text
+    assert "corpus" in (failed.json().get("detail") or "")
+
+
 def test_http_read_search_and_export_routes_use_fixture_job(
     tmp_path: Path,
     db_path: Path,
