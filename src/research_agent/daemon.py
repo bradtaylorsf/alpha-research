@@ -660,6 +660,9 @@ async def _inbox_watcher(
     inbox_dir = job.root / "inbox"
     inbox_dir.mkdir(parents=True, exist_ok=True)
     (inbox_dir / "processed").mkdir(parents=True, exist_ok=True)
+    # Dossier mode: opted-in jobs index per-page so the dossier rollup
+    # (epic #359) can group findings by file. Off by default.
+    per_page = bool((job.intake or {}).get("corpus_dossier"))
 
     try:
         while not should_stop.is_set():
@@ -674,7 +677,7 @@ async def _inbox_watcher(
                     sha = _file_sha256(file_path)
                     summary = _inbox_summary(file_path)
                     topic_guess = _inbox_topic_guess(file_path)
-                    indexed = local_corpus.index(file_path, job)
+                    indexed = local_corpus.index(file_path, job, per_page=per_page)
                     processed_path = _processed_inbox_path(inbox_dir, sha, file_path.name)
                     os.replace(file_path, processed_path)
                     note = (
