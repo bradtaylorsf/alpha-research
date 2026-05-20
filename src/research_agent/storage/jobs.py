@@ -36,7 +36,11 @@ from typing import Any
 from research_agent.storage import db
 
 DEFAULT_JOBS_ROOT = Path("jobs")
-JOB_SCHEMA_VERSION = 1
+JOB_SCHEMA_VERSION = 2
+"""Bumped to 2 for issue #358: ``Subgoal.stage`` field added to plan
+documents. Backward compatible — plans written under schema 1 deserialise
+with ``stage=1`` for every subgoal — but new jobs declare 2 so the rest
+of the stack can detect when a plan can be expected to carry stages."""
 RESUME_REPLAN_FILE = "RESUME_REPLAN.json"
 INBOX_REPLAN_FILE = "INBOX_REPLAN.json"
 
