@@ -302,11 +302,11 @@ hardcode model names elsewhere — pick a tier.
 
 | Tier | Model ID | Purpose |
 |---|---|---|
-| `fast` | `qwen3-4b-instruct-q4_k_m` | Classification, dedup, language detection. |
-| `general` | `qwen3-32b-instruct-q6_k` | Worker default — query rewriting, extraction, summarization. |
-| `reasoner` | `deepseek-r1-distill-32b-q6_k` | Hypothesis ranking, contradiction detection. |
-| `vision` | `qwen3-vl-8b-instruct` | PDF page screenshots, chart reading. |
-| `embeddings` | `qwen3-embedding-4b` | Semantic search across findings + sources. |
+| `fast` | `josiefied-qwen3-4b-instruct-2507-abliterated-v2` | Classification, dedup, language detection. |
+| `general` | `qwen3.6-35b-a3b-holo3-qwopus-instruct-qx64-hi-mlx` | Worker default — query rewriting, extraction, summarization. |
+| `reasoner` | `deepseek-r1-distill-qwen-32b` | Hypothesis ranking, contradiction detection. |
+| `vision` | `deepseek-ocr-2` | PDF page screenshots, chart reading. |
+| `embeddings` | `qwen3-embedding-4b-dwq` | Semantic search across findings + sources (768-d output). |
 
 After downloading, start the LM Studio local server (Developer tab →
 Server → Start). The default port is `1234` and the OpenAI-compatible
@@ -316,8 +316,12 @@ LAN).
 
 `embeddings` intentionally has no cloud fallback — a stall surfaces as a
 hard error rather than silently rerouting to a chat model. Keep
-`qwen3-embedding-4b` loaded any time you plan to use `research search` or
-the daemon's hybrid retrieval.
+`qwen3-embedding-4b-dwq` loaded any time you plan to use `research search`
+or the daemon's hybrid retrieval. After upgrading from a release that
+shipped the older 1024-d `qwen3-embedding-4b` model, drop
+`data/index.sqlite` or re-index any job with persisted embeddings — the
+new model emits 768-d vectors and existing rows will mis-shape on
+read-back.
 
 ## OpenRouter
 

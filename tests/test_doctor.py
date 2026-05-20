@@ -17,6 +17,9 @@ def _scrub_env(monkeypatch):
         "RESEARCH_USER_AGENT",
         "RESEARCH_HEADFUL",
         "LMSTUDIO_BASE_URL",
+        # Issue #373: resolve_models_config_path() honors this; tests
+        # assume the default lookup so clear any host ``.env`` override.
+        "RESEARCH_MODELS_CONFIG",
     ):
         monkeypatch.delenv(key, raising=False)
     config.reset_for_tests()
