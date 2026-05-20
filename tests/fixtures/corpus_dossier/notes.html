@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Dossier Smoke HTML</title>
+  <style>body { font-family: sans-serif; }</style>
+</head>
+<body>
+  <h1>Corpus dossier smoke fixture (HTML)</h1>
+  <p>
+    This file exists so the dossier-mode ingestion smoke test
+    (issue #354) can prove that the per-page ingestion pipeline
+    handles formats that have no page concept. Every chunk
+    written for this file should carry
+    <code>metadata.parent_file</code> pointing at this file's URI
+    and leave <code>metadata.page_no</code> set to <code>null</code>.
+  </p>
+  <p>
+    The body is deliberately verbose so that
+    <code>local_corpus._chunk_text</code> still emits at least one
+    chunk after whitespace normalization. We mention a few keywords
+    that the assertions can grep for if useful:
+    <strong>alpha</strong>, <strong>beta</strong>,
+    <strong>gamma</strong>. The integration test should not depend
+    on any single phrase, only on the metadata shape.
+  </p>
+</body>
+</html>

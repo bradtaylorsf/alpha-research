@@ -1,21 +1,60 @@
 """Source ingestion with content-hash dedup across jobs.
 
 Implements the §4 layout: per-job ``sources/<sha256>.md`` (cleaned content)
-plus ``<sha256>.json`` sidecar (url, fetched_at, archive_url, kind), and the
-§10 schema's ``sources`` + ``job_sources`` tables. The same content fetched
-by two different jobs collapses to a single ``sources`` row with two
-``job_sources`` links — the canonical markdown lives under the first job
-that wrote it.
+plus ``<sha256>.json`` sidecar (url, fetched_at, archive_url, kind, metadata),
+and the §10 schema's ``sources`` + ``job_sources`` tables. The same content
+fetched by two different jobs collapses to a single ``sources`` row with two
+``job_sources`` links — the markdown + sidecar are materialised under
+**every** job that touched the source (so a job folder is self-contained on
+disk; see ``write_source``).
 
 Cleaning is intentionally minimal in v1 (line-ending normalization,
 horizontal whitespace collapse, strip). Richer extraction — readability,
 boilerplate stripping — belongs in the fetch tool layer (``tools/web_fetch``)
 upstream of this module.
+
+Metadata round-trip (issue #353)
+--------------------------------
+
+``write_source(metadata=...)`` persists the supplied dict to the per-job
+JSON sidecar (``sources/<sha>.json`` under ``metadata``). The shape is
+open-ended — any extractor / connector / orchestrator pass may stash
+provenance there — but the codebase has converged on these key
+conventions:
+
+- ``parent_file`` (str): canonical URI of the source file the row belongs
+  to. Set by the per-page corpus ingester (issue #352) and by connectors
+  that ingest a single document as multiple chunks so the dossier rollup
+  (epic #359) can group rows by file.
+- ``page_no`` (int | None): 1-based page number when the row came from a
+  per-page PDF extraction. ``None`` for HTML / MD / TXT / other formats
+  that have no page concept.
+- ``page_chunk`` (int | None): 1-based sub-chunk index inside a single
+  page when a page exceeds the chunk-target token budget. ``None`` when
+  the whole page fits in one chunk. The chunker never crosses pages, so
+  ``(parent_file, page_no, page_chunk)`` uniquely identifies a chunk
+  within its file.
+- ``cornerstone_*`` (issue #206): cornerstone-document provenance —
+  breadcrumb path, section index, span char offsets — set by
+  ``index_cornerstone_source``.
+- ``connector_*``: connector-specific provenance (FEC committee id,
+  CourtListener docket id, etc.) — used by the connectors themselves
+  for filtering / dedup.
+
+Last-writer wins inside a single job: re-writing the same content under
+the same job with a different ``metadata`` dict overwrites the sidecar
+file. Across jobs each job's sidecar reflects that job's writer call;
+the SQLite row is shared.
+
+:func:`read_source_sidecar` is the canonical reader for the sidecar
+JSON and the only blessed way to recover ``metadata`` for a source row
+that downstream consumers (the dossier rollup, coverage ledger) need.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 from typing import Any
@@ -77,6 +116,13 @@ def write_source(
     ``cornerstone_chunk`` — back to the parent document it was chunked
     from, so retrieval can filter by the cornerstone PDF without
     matching arbitrary other sources whose embedding happens to be near.
+
+    ``metadata`` (issue #353) is an open-ended JSON-serialisable dict
+    persisted to the per-job sidecar at ``sources/<sha>.json`` under
+    the ``metadata`` key. The dossier mode pipeline (epic #359) reads
+    ``metadata.{parent_file, page_no, page_chunk}`` via
+    :func:`read_source_sidecar`. See the module docstring for the full
+    list of known keys.
     """
     if not isinstance(raw_content, str) or not raw_content:
         raise ValueError("raw_content must be a non-empty string")
@@ -179,8 +225,58 @@ def write_source(
     return source_id
 
 
+def read_source_sidecar(job: Job, sha: str) -> dict[str, Any]:
+    """Return the per-job JSON sidecar for ``sha`` parsed into a dict.
+
+    The sidecar lives at ``<job.root>/sources/<sha>.json`` and carries
+    everything :func:`write_source` recorded — ``sha256``, ``url``,
+    ``title``, ``fetched_at``, ``archive_url``, ``kind``, ``md_path``,
+    and ``metadata``. The ``metadata`` value is always returned as a
+    ``dict`` (or an empty dict when none was written); callers must
+    never see the raw JSON string.
+
+    Raises :class:`FileNotFoundError` when the sidecar is missing, e.g.
+    a freshly-pruned job that never re-materialised the file. Callers
+    that expect a possibly-missing sidecar should catch and treat the
+    metadata as empty.
+    """
+    if not isinstance(sha, str) or not sha:
+        raise ValueError("sha must be a non-empty string")
+    path = job.root / "sources" / f"{sha}.json"
+    raw = path.read_text(encoding="utf-8")
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"sidecar at {path} is not a JSON object; got {type(data).__name__}"
+        )
+    metadata = data.get("metadata")
+    if metadata is None:
+        data["metadata"] = {}
+    elif not isinstance(metadata, dict):
+        raise ValueError(
+            f"sidecar at {path} has non-dict metadata; got {type(metadata).__name__}"
+        )
+    return data
+
+
+def read_source_metadata(job: Job, sha: str) -> dict[str, Any]:
+    """Convenience: return just the ``metadata`` dict from the sidecar.
+
+    Equivalent to ``read_source_sidecar(job, sha)["metadata"]`` but
+    keeps call sites that only care about provenance free of the wider
+    sidecar shape. Returns an empty dict when the sidecar carries no
+    metadata (rather than the legacy default-dict pattern, so callers
+    can use ``meta.get("page_no")`` without checking for ``None``).
+    """
+    sidecar = read_source_sidecar(job, sha)
+    metadata = sidecar.get("metadata") or {}
+    return dict(metadata)
+
+
 __all__ = [
     "clean_content",
     "content_sha256",
+    "read_source_metadata",
+    "read_source_sidecar",
     "write_source",
 ]

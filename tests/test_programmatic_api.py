@@ -97,6 +97,56 @@ def test_start_stop_resume_entry_points_use_plain_args(
     assert not (jobs_root / started.job_id / "STOP").exists()
 
 
+def test_start_job_corpus_dossier_round_trips_through_intake(
+    tmp_path: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic start_job(corpus_dossier=True) persists into intake.json."""
+    import json as _json
+
+    jobs_root = tmp_path / "jobs"
+    monkeypatch.setattr(daemon_mod, "spawn_daemon", lambda _job_id, **_kw: 4242)
+    monkeypatch.setattr(daemon_mod, "is_daemon_alive", lambda *_a, **_kw: False)
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+
+    started = start_job(
+        "Programmatic dossier mode",
+        corpus=str(corpus_dir),
+        corpus_dossier=True,
+        jobs_root=jobs_root,
+        db_path=db_path,
+    )
+
+    intake_data = _json.loads(
+        (jobs_root / started.job_id / "intake.json").read_text(encoding="utf-8")
+    )
+    assert intake_data["corpus_dossier"] is True
+    assert intake_data["corpus"] == str(corpus_dir)
+
+
+def test_start_job_corpus_dossier_without_corpus_raises(
+    tmp_path: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """start_job(corpus_dossier=True) without a corpus is rejected up front."""
+    from research_agent.errors import InvalidGoal
+
+    jobs_root = tmp_path / "jobs"
+    monkeypatch.setattr(daemon_mod, "spawn_daemon", lambda _job_id, **_kw: 4242)
+    monkeypatch.setattr(daemon_mod, "is_daemon_alive", lambda *_a, **_kw: False)
+
+    with pytest.raises(InvalidGoal):
+        start_job(
+            "No corpus dossier",
+            corpus_dossier=True,
+            jobs_root=jobs_root,
+            db_path=db_path,
+        )
+
+
 def test_start_job_local_passes_env_to_daemon_without_mutating_process(
     tmp_path: Path,
     db_path: Path,

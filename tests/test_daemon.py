@@ -1348,7 +1348,9 @@ async def test_inbox_watcher_indexes_moves_and_requests_replan(
     doc.write_text("# FOIA\n\nContract award file from the clerk.\n", encoding="utf-8")
     calls: list[Path] = []
 
-    def _fake_index(path: Path, job: Job) -> dict[str, int]:
+    def _fake_index(
+        path: Path, job: Job, *, per_page: bool = False
+    ) -> dict[str, int]:
         calls.append(path)
         return {
             "files_indexed": 1,
@@ -1400,6 +1402,230 @@ async def test_inbox_watcher_indexes_moves_and_requests_replan(
     assert payload["files_indexed"] == 1
     assert payload["chunks_indexed"] == 1
 
+
+@pytest.mark.asyncio
+async def test_inbox_watcher_respects_corpus_dossier_intake_flag(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """intake.corpus_dossier=True routes inbox indexing through per_page=True."""
+    seeded_job.intake = {**(seeded_job.intake or {}), "corpus_dossier": True}
+    (seeded_job.root / "intake.json").write_text(
+        json.dumps(seeded_job.intake), encoding="utf-8"
+    )
+
+    inbox = seeded_job.root / "inbox"
+    inbox.mkdir(exist_ok=True)
+    doc = inbox / "dossier-evidence.md"
+    doc.write_text("# Dossier evidence\n\nbody body body\n", encoding="utf-8")
+    per_page_calls: list[bool] = []
+
+    def _fake_index(
+        path: Path, job: Job, *, per_page: bool = False
+    ) -> dict[str, int]:
+        per_page_calls.append(per_page)
+        return {
+            "files_indexed": 1,
+            "files_skipped": 0,
+            "chunks_indexed": 1,
+            "chunks_skipped": 0,
+            "pages_indexed": 1,
+            "pages_skipped": 0,
+            "per_page": per_page,
+            "embed_dim": 1024,
+        }
+
+    monkeypatch.setattr("research_agent.tools.local_corpus.index", _fake_index)
+    should_stop = asyncio.Event()
+    task = asyncio.create_task(
+        daemon._inbox_watcher(seeded_job, should_stop, interval_s=0.02)
+    )
+    try:
+        for _ in range(100):
+            if (seeded_job.root / "INBOX_REPLAN.json").exists():
+                should_stop.set()
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        should_stop.set()
+        if not task.done():
+            task.cancel()
+
+    assert per_page_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_inbox_watcher_declares_coverage_units_after_dossier_index(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dossier-mode inbox runs declare per-page coverage + emit coverage_declared."""
+    from research_agent.storage import coverage
+    from research_agent.storage.sources import write_source
+
+    seeded_job.intake = {**(seeded_job.intake or {}), "corpus_dossier": True}
+    (seeded_job.root / "intake.json").write_text(
+        json.dumps(seeded_job.intake), encoding="utf-8"
+    )
+
+    inbox = seeded_job.root / "inbox"
+    inbox.mkdir(exist_ok=True)
+    doc = inbox / "page-evidence.pdf"
+    doc.write_bytes(b"%PDF-1.4 stub")
+
+    def _fake_index(
+        path: Path, job: Job, *, per_page: bool = False
+    ) -> dict[str, int]:
+        # Simulate the M0.2 per-page path: write three page sources
+        # with dossier-mode metadata.
+        for page_no in (1, 2, 3):
+            write_source(
+                job,
+                url=f"file://{path}",
+                title=path.name,
+                raw_content=f"page {page_no} body content",
+                kind="local",
+                metadata={
+                    "parent_file": f"file://{path}",
+                    "page_no": page_no,
+                    "page_chunk": None,
+                },
+            )
+        return {
+            "files_indexed": 1,
+            "files_skipped": 0,
+            "chunks_indexed": 3,
+            "chunks_skipped": 0,
+            "pages_indexed": 3,
+            "pages_skipped": 0,
+            "per_page": per_page,
+            "embed_dim": 1024,
+        }
+
+    monkeypatch.setattr("research_agent.tools.local_corpus.index", _fake_index)
+    should_stop = asyncio.Event()
+    task = asyncio.create_task(
+        daemon._inbox_watcher(seeded_job, should_stop, interval_s=0.02)
+    )
+    try:
+        for _ in range(100):
+            if (seeded_job.root / "INBOX_REPLAN.json").exists():
+                should_stop.set()
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        should_stop.set()
+        if not task.done():
+            task.cancel()
+
+    # 3 page units declared and gating active.
+    units = coverage.list_units(seeded_job)
+    assert len(units) == 3
+    assert coverage.is_coverage_complete(seeded_job) is False
+
+    # coverage_declared event emitted with file_count + page_count.
+    conn = db.connect(seeded_job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM events WHERE job_id = ? AND kind = ?",
+            (seeded_job.id, "coverage_declared"),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["trigger"] == "inbox"
+    assert payload["file_count"] == 1
+    assert payload["page_count"] == 3
+    assert payload["total_units"] == 3
+    assert payload.get("files_confirmed_gap", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_inbox_watcher_dossier_records_confirmed_gap_for_skipped_file(
+    seeded_job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dossier-mode inbox runs with skipped file -> confirmed_gap unit + event."""
+    from research_agent.storage import coverage
+
+    seeded_job.intake = {**(seeded_job.intake or {}), "corpus_dossier": True}
+    (seeded_job.root / "intake.json").write_text(
+        json.dumps(seeded_job.intake), encoding="utf-8"
+    )
+
+    inbox = seeded_job.root / "inbox"
+    inbox.mkdir(exist_ok=True)
+    doc = inbox / "broken-scan.pdf"
+    doc.write_bytes(b"%PDF-corrupt")
+
+    def _fake_index(
+        path: Path, job: Job, *, per_page: bool = False
+    ) -> dict[str, object]:
+        return {
+            "files_indexed": 0,
+            "files_skipped": 1,
+            "chunks_indexed": 0,
+            "chunks_skipped": 0,
+            "pages_indexed": 0,
+            "pages_skipped": 0,
+            "per_page": per_page,
+            "embed_dim": 1024,
+            "skipped": [
+                {
+                    "file_url": f"file://{path}",
+                    "reason": "extraction_failed: pdf parse error",
+                }
+            ],
+        }
+
+    monkeypatch.setattr("research_agent.tools.local_corpus.index", _fake_index)
+    should_stop = asyncio.Event()
+    task = asyncio.create_task(
+        daemon._inbox_watcher(seeded_job, should_stop, interval_s=0.02)
+    )
+    try:
+        for _ in range(100):
+            if (seeded_job.root / "INBOX_REPLAN.json").exists():
+                should_stop.set()
+                break
+            await asyncio.sleep(0.02)
+        await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        should_stop.set()
+        if not task.done():
+            task.cancel()
+
+    units = coverage.list_units(seeded_job)
+    assert len(units) == 1
+    assert units[0].status == "confirmed_gap"
+    assert units[0].dimensions.get("file", "").endswith("broken-scan.pdf")
+    # Pure-gap dossier is coverage-complete by design (issue #357).
+    assert coverage.is_coverage_complete(seeded_job) is True
+
+    conn = db.connect(seeded_job.db_path)
+    try:
+        gap_rows = conn.execute(
+            "SELECT payload_json FROM events WHERE job_id = ? AND kind = ?",
+            (seeded_job.id, "corpus_file_gap"),
+        ).fetchall()
+        coverage_rows = conn.execute(
+            "SELECT payload_json FROM events WHERE job_id = ? AND kind = ?",
+            (seeded_job.id, "coverage_declared"),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(gap_rows) == 1
+    gap_payload = json.loads(gap_rows[0]["payload_json"])
+    assert gap_payload["reason"].startswith("extraction_failed")
+    assert gap_payload["trigger"] == "inbox"
+    assert gap_payload["file_url"].endswith("broken-scan.pdf")
+
+    assert len(coverage_rows) == 1
+    cov_payload = json.loads(coverage_rows[0]["payload_json"])
+    assert cov_payload["files_confirmed_gap"] == 1
+    assert cov_payload["page_count"] == 0
+    assert cov_payload["total_units"] == 1
 
 
 # ---------------------------------------------------------------------------

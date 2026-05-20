@@ -297,6 +297,88 @@ def test_start_fragments_flag_sets_env_and_intake(
     assert intake_data["fragments"] is True
 
 
+def test_start_corpus_dossier_flag_persists_intake(
+    isolated_jobs_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--corpus-dossier --corpus path/ writes intake.corpus_dossier=True."""
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 12345)
+    corpus_dir = isolated_jobs_repo / "corpus" / "dossier"
+    corpus_dir.mkdir(parents=True)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        [
+            "start",
+            "--skip-intake",
+            "--goal",
+            "Dossier mode target",
+            "--corpus",
+            str(corpus_dir),
+            "--corpus-dossier",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    job_root = isolated_jobs_repo / "jobs" / f"{today}-dossier-mode-target"
+    intake_data = json.loads((job_root / "intake.json").read_text(encoding="utf-8"))
+    assert intake_data["corpus_dossier"] is True
+    assert intake_data["corpus"] == str(corpus_dir)
+
+
+def test_start_corpus_dossier_without_corpus_exits_2(
+    isolated_jobs_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--corpus-dossier without --corpus exits with code 2 and a clear error."""
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 12345)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        [
+            "start",
+            "--skip-intake",
+            "--goal",
+            "Dossier mode no corpus",
+            "--corpus-dossier",
+        ],
+    )
+
+    assert result.exit_code == 2
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "--corpus-dossier" in combined
+    assert "--corpus" in combined
+
+
+def test_start_no_dossier_flag_leaves_intake_clean(
+    isolated_jobs_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without --corpus-dossier, intake.corpus_dossier is absent (legacy path)."""
+    monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 12345)
+    corpus_dir = isolated_jobs_repo / "corpus" / "thematic"
+    corpus_dir.mkdir(parents=True)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.app,
+        [
+            "start",
+            "--skip-intake",
+            "--goal",
+            "Thematic mode default",
+            "--corpus",
+            str(corpus_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    job_root = isolated_jobs_repo / "jobs" / f"{today}-thematic-mode-default"
+    intake_data = json.loads((job_root / "intake.json").read_text(encoding="utf-8"))
+    assert intake_data.get("corpus_dossier") in (None, False)
+
+
 def test_start_inbox_flag_is_persisted(isolated_jobs_repo: Path, monkeypatch) -> None:
     monkeypatch.setattr(cli.daemon, "spawn_daemon", lambda _job_id: 12345)
 
@@ -386,8 +468,16 @@ def test_start_runs_intake_when_not_skipped(isolated_jobs_repo: Path, monkeypatc
 
     captured: dict[str, object] = {}
 
-    def _fake_run_intake(*, corpus=None, budget_usd=None, time_cap=None, fragments=False):
+    def _fake_run_intake(
+        *,
+        corpus=None,
+        corpus_dossier=False,
+        budget_usd=None,
+        time_cap=None,
+        fragments=False,
+    ):
         captured["corpus"] = corpus
+        captured["corpus_dossier"] = corpus_dossier
         captured["budget_usd"] = budget_usd
         captured["time_cap"] = time_cap
         captured["fragments"] = fragments

@@ -292,6 +292,49 @@ def test_index_handles_empty_file(
     summary = local_corpus.index(corpus, job, models_config=stub_models_config)
     assert summary["files_indexed"] == 1
     assert summary["files_skipped"] == 1
+    skipped = summary["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["file_url"] == (corpus / "empty.txt").as_uri()
+    assert skipped[0]["reason"] == "empty_content"
+
+
+def test_index_skipped_field_default_empty(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """Healthy corpus -> ``skipped`` is present and empty (issue #357)."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "clean"
+    corpus.mkdir()
+    (corpus / "ok.txt").write_text("alpha beta gamma " * 40)
+
+    summary = local_corpus.index(corpus, job, models_config=stub_models_config)
+    assert summary["files_skipped"] == 0
+    assert summary["skipped"] == []
+
+
+def test_index_extraction_failure_records_reason(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """A raising ``_extract_text`` -> ``extraction_failed: <exc>`` in skipped."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "broken"
+    corpus.mkdir()
+    target = corpus / "broken.txt"
+    target.write_text("payload")
+
+    def _boom(path: Path):
+        raise RuntimeError("synthetic extract failure")
+
+    monkeypatch.setattr(local_corpus, "_extract_text", _boom)
+
+    summary = local_corpus.index(corpus, job, models_config=stub_models_config)
+    assert summary["files_indexed"] == 0
+    assert summary["files_skipped"] == 1
+    skipped = summary["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["file_url"] == target.as_uri()
+    assert "extraction_failed" in skipped[0]["reason"]
+    assert "synthetic extract failure" in skipped[0]["reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +460,403 @@ def test_write_source_persists_embedding_blob(job: Job) -> None:
 
     assert row["embedding"] == blob
     assert len(row["embedding"]) == local_corpus.EMBED_DIM * 4
+
+
+# ---------------------------------------------------------------------------
+# Per-page ingestion (issue #352 — dossier mode, epic #359)
+# ---------------------------------------------------------------------------
+
+
+def _read_sidecar(job: Job, sha: str) -> dict:
+    """Read the JSON sidecar a `write_source` call materialised under ``job``."""
+    import json
+
+    path = job.root / "sources" / f"{sha}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_index_per_page_default_is_unchanged(
+    job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """per_page omitted/False must keep the legacy behaviour byte-for-byte."""
+    _stub_embed(monkeypatch)
+    baseline = local_corpus.index(
+        FIXTURE_CORPUS, job, models_config=stub_models_config
+    )
+    assert "pages_indexed" in baseline
+    assert "pages_skipped" in baseline
+    assert baseline["pages_indexed"] == 0
+    assert baseline["pages_skipped"] == 0
+    assert baseline["per_page"] is False
+
+
+def test_index_per_page_pdf_writes_one_source_per_page(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """PDF in per_page=True mode: N pages -> N Source rows, page_no stamped."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "pdf_only"
+    corpus.mkdir()
+    pdf_path = corpus / "filing.pdf"
+    pdf_path.write_bytes(b"%PDF-fake")
+
+    fake_pages = [
+        (1, "Page one of the filing about Alpha topics. " * 30),
+        (2, "Page two covers Beta procurement detail. " * 30),
+        (3, "Page three pivots to Gamma incidents. " * 30),
+    ]
+
+    def _fake_extract_pages_sync(path, **_kwargs):
+        return list(fake_pages)
+
+    from research_agent.tools import pdf as pdf_mod
+
+    monkeypatch.setattr(pdf_mod, "extract_pages_sync", _fake_extract_pages_sync)
+
+    summary = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+
+    assert summary["files_indexed"] == 1
+    assert summary["files_skipped"] == 0
+    assert summary["pages_indexed"] == 3
+    assert summary["pages_skipped"] == 0
+    assert summary["chunks_indexed"] == 3
+    assert summary["per_page"] is True
+
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT s.sha256, s.url, s.title FROM sources s"
+            " JOIN job_sources js ON js.source_id = s.id"
+            " WHERE js.job_id = ?"
+            " ORDER BY s.id ASC",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 3
+    page_nos: list[int] = []
+    parent_files: set[str] = set()
+    for row in rows:
+        sidecar = _read_sidecar(job, row["sha256"])
+        meta = sidecar["metadata"]
+        assert meta["parent_file"] == pdf_path.as_uri()
+        assert meta["page_chunk"] is None
+        page_nos.append(meta["page_no"])
+        parent_files.add(meta["parent_file"])
+    assert page_nos == [1, 2, 3]
+    assert parent_files == {pdf_path.as_uri()}
+
+
+def test_index_per_page_oversize_page_subchunks_within_page(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """Page text > chunk target: emit multiple Sources with same page_no, distinct page_chunk."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "big_pdf"
+    corpus.mkdir()
+    pdf_path = corpus / "big.pdf"
+    pdf_path.write_bytes(b"%PDF-fake")
+
+    oversize = " ".join(f"tok{i}" for i in range(local_corpus.CHUNK_TARGET_TOKENS * 2 + 100))
+    fake_pages = [
+        (1, "Small page one body alpha. " * 30),
+        (2, oversize),  # forces sub-chunking
+        (3, "Small page three body gamma. " * 30),
+    ]
+
+    def _fake_extract_pages_sync(path, **_kwargs):
+        return list(fake_pages)
+
+    from research_agent.tools import pdf as pdf_mod
+
+    monkeypatch.setattr(pdf_mod, "extract_pages_sync", _fake_extract_pages_sync)
+
+    summary = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert summary["pages_indexed"] == 3
+    assert summary["chunks_indexed"] >= 4  # 1 + (>=2 subchunks) + 1
+
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT s.sha256 FROM sources s"
+            " JOIN job_sources js ON js.source_id = s.id"
+            " WHERE js.job_id = ?"
+            " ORDER BY s.id ASC",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    by_page: dict[int, list[int | None]] = {}
+    for row in rows:
+        meta = _read_sidecar(job, row["sha256"])["metadata"]
+        by_page.setdefault(meta["page_no"], []).append(meta["page_chunk"])
+
+    assert set(by_page.keys()) == {1, 2, 3}
+    # Pages 1 and 3 fit in one chunk apiece -> page_chunk = None.
+    assert by_page[1] == [None]
+    assert by_page[3] == [None]
+    # Page 2 is sub-chunked: distinct 1-based page_chunk values, all >= 2 chunks.
+    assert all(isinstance(c, int) and c >= 1 for c in by_page[2])
+    assert len(by_page[2]) >= 2
+    assert sorted(by_page[2]) == sorted(set(by_page[2]))  # distinct
+
+
+def test_index_per_page_empty_pages_count_as_skipped(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """Pages whose text is empty are counted under pages_skipped, not pages_indexed."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "sparse_pdf"
+    corpus.mkdir()
+    pdf_path = corpus / "sparse.pdf"
+    pdf_path.write_bytes(b"%PDF-fake")
+
+    fake_pages = [
+        (1, "Real content alpha alpha. " * 30),
+        (2, ""),
+        (3, "Real content gamma gamma. " * 30),
+        (4, ""),
+    ]
+
+    def _fake_extract_pages_sync(path, **_kwargs):
+        return list(fake_pages)
+
+    from research_agent.tools import pdf as pdf_mod
+
+    monkeypatch.setattr(pdf_mod, "extract_pages_sync", _fake_extract_pages_sync)
+
+    summary = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert summary["pages_indexed"] == 2
+    assert summary["pages_skipped"] == 2
+    assert summary["files_indexed"] == 1
+    assert summary["chunks_indexed"] == 2
+
+
+def test_index_per_page_pdf_with_no_extractable_text_skips_file(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """Every page empty -> the file itself counts as skipped (pages_indexed=0)."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "blank_pdf"
+    corpus.mkdir()
+    pdf_path = corpus / "blank.pdf"
+    pdf_path.write_bytes(b"%PDF-fake")
+
+    def _fake_extract_pages_sync(path, **_kwargs):
+        return [(1, ""), (2, "")]
+
+    from research_agent.tools import pdf as pdf_mod
+
+    monkeypatch.setattr(pdf_mod, "extract_pages_sync", _fake_extract_pages_sync)
+
+    summary = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert summary["files_indexed"] == 0
+    assert summary["files_skipped"] == 1
+    assert summary["pages_indexed"] == 0
+    assert summary["pages_skipped"] == 2
+
+
+def test_index_per_page_unopenable_pdf_skips_file(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """extract_pages_sync returning [] (unopenable) -> file counted as skipped."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "broken_pdf"
+    corpus.mkdir()
+    pdf_path = corpus / "broken.pdf"
+    pdf_path.write_bytes(b"not actually a pdf")
+
+    from research_agent.tools import pdf as pdf_mod
+
+    monkeypatch.setattr(pdf_mod, "extract_pages_sync", lambda *a, **k: [])
+
+    summary = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert summary["files_indexed"] == 0
+    assert summary["files_skipped"] == 1
+    assert summary["pages_indexed"] == 0
+    assert summary["pages_skipped"] == 0
+    assert summary["chunks_indexed"] == 0
+    skipped = summary["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["file_url"] == pdf_path.as_uri()
+    assert skipped[0]["reason"] == "empty_content"
+
+
+def test_index_per_page_pdf_extract_raises_records_reason(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """extract_pages_sync raising -> ``extraction_failed: <exc>`` (issue #357)."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "raising_pdf"
+    corpus.mkdir()
+    pdf_path = corpus / "raises.pdf"
+    pdf_path.write_bytes(b"%PDF-fake")
+
+    from research_agent.tools import pdf as pdf_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError("malformed xref table")
+
+    monkeypatch.setattr(pdf_mod, "extract_pages_sync", _boom)
+
+    summary = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert summary["files_skipped"] == 1
+    skipped = summary["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["file_url"] == pdf_path.as_uri()
+    assert "extraction_failed" in skipped[0]["reason"]
+    assert "malformed xref" in skipped[0]["reason"]
+
+
+def test_index_per_page_pdf_all_pages_empty_records_gap(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """Every page empty -> file-level ``empty_content`` gap (issue #357)."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "blank_pages"
+    corpus.mkdir()
+    pdf_path = corpus / "blank.pdf"
+    pdf_path.write_bytes(b"%PDF-fake")
+
+    from research_agent.tools import pdf as pdf_mod
+
+    monkeypatch.setattr(
+        pdf_mod, "extract_pages_sync", lambda *a, **k: [(1, ""), (2, "")]
+    )
+
+    summary = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert summary["files_skipped"] == 1
+    skipped = summary["skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["file_url"] == pdf_path.as_uri()
+    assert skipped[0]["reason"] == "empty_content"
+
+
+def test_index_per_page_html_stamps_parent_file_and_null_page(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """HTML in per_page=True: existing chunking, metadata.page_no = None, parent_file set."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "html_only"
+    corpus.mkdir()
+    html_path = corpus / "page.html"
+    body = "html body section " * 80
+    html_path.write_text(f"<html><body><p>{body}</p></body></html>")
+
+    summary = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert summary["files_indexed"] == 1
+    assert summary["chunks_indexed"] >= 1
+    # HTML has no pages so the page counters stay at zero even in per_page mode.
+    assert summary["pages_indexed"] == 0
+    assert summary["pages_skipped"] == 0
+
+    conn = db.connect(job.db_path)
+    try:
+        rows = conn.execute(
+            "SELECT s.sha256 FROM sources s"
+            " JOIN job_sources js ON js.source_id = s.id"
+            " WHERE js.job_id = ?",
+            (job.id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for row in rows:
+        meta = _read_sidecar(job, row["sha256"])["metadata"]
+        assert meta["parent_file"] == html_path.as_uri()
+        assert meta["page_no"] is None
+        assert meta["page_chunk"] is None
+
+
+def test_index_per_page_is_idempotent(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """Re-running per_page=True over the same PDF must skip re-embedding."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "rerun_pdf"
+    corpus.mkdir()
+    pdf_path = corpus / "rerun.pdf"
+    pdf_path.write_bytes(b"%PDF-fake")
+
+    fake_pages = [
+        (1, "Idempotent page one alpha. " * 30),
+        (2, "Idempotent page two beta. " * 30),
+    ]
+
+    from research_agent.tools import pdf as pdf_mod
+
+    monkeypatch.setattr(
+        pdf_mod, "extract_pages_sync", lambda *a, **k: list(fake_pages)
+    )
+
+    first = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert first["chunks_indexed"] == 2
+
+    # Reject any further embeddings call on the second pass.
+    def _no_embed(chunks, base_url, model):  # noqa: ARG001
+        raise AssertionError("re-embedded an already-indexed page chunk")
+
+    monkeypatch.setattr(local_corpus, "_embed_chunks_sync", _no_embed)
+
+    second = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert second["chunks_indexed"] == 0
+    assert second["chunks_skipped"] == 2
+    assert second["pages_indexed"] == 2
+
+
+def test_index_per_page_real_pdf_fixture_smoke(
+    tmp_path: Path, job: Job, monkeypatch, stub_models_config: dict
+) -> None:
+    """Integration: a real PDF fixture goes through extract_pages_sync end-to-end."""
+    _stub_embed(monkeypatch)
+    corpus = tmp_path / "real_pdf"
+    corpus.mkdir()
+    fixture = Path(__file__).parent / "fixtures" / "arxiv_paper.pdf"
+    destination = corpus / "arxiv.pdf"
+    destination.write_bytes(fixture.read_bytes())
+
+    summary = local_corpus.index(
+        corpus, job, models_config=stub_models_config, per_page=True
+    )
+    assert summary["files_indexed"] == 1
+    assert summary["pages_indexed"] >= 1
+    assert summary["chunks_indexed"] >= 1
+
+    conn = db.connect(job.db_path)
+    try:
+        sha = conn.execute(
+            "SELECT s.sha256 FROM sources s"
+            " JOIN job_sources js ON js.source_id = s.id"
+            " WHERE js.job_id = ?"
+            " ORDER BY s.id ASC LIMIT 1",
+            (job.id,),
+        ).fetchone()["sha256"]
+    finally:
+        conn.close()
+    meta = _read_sidecar(job, sha)["metadata"]
+    assert meta["parent_file"] == destination.as_uri()
+    assert meta["page_no"] == 1
 
 
 # ---------------------------------------------------------------------------

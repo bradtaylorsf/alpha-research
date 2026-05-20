@@ -82,6 +82,7 @@ def test_run_intake_happy_path(mocker):
         "output_orientation",
         "aggressiveness",
         "corpus_path",
+        "corpus_dossier",
         "fragments",
         "followup_qa",
     }
@@ -93,6 +94,8 @@ def test_run_intake_happy_path(mocker):
     assert result["output_orientation"] == "internal brief"
     assert result["aggressiveness"] == "balanced"
     assert result["corpus_path"] is None
+    # No corpus path → dossier prompt is hidden, defaults to False.
+    assert result["corpus_dossier"] is False
     assert result["fragments"] is False
     assert result["followup_qa"] == []
 
@@ -187,7 +190,9 @@ def test_run_intake_prefills_from_cli_flags(mocker):
             "internal brief",
             "balanced",
         ],
-        confirm=[True],
+        # Corpus path "./x" is non-empty so the dossier prompt fires
+        # (step 8b). First confirm = dossier, second = final summary.
+        confirm=[False, True],
     )
 
     result = intake.run_intake(corpus="./x", budget_usd=25.0, time_cap=12)
@@ -205,8 +210,79 @@ def test_run_intake_prefills_from_cli_flags(mocker):
     assert corpus_call[1].get("default") == "./x"
 
     assert result["corpus_path"] == "./x"
+    assert result["corpus_dossier"] is False
     assert result["time_cap"] == 12
     assert result["budget_usd"] == 25.0
+
+
+def test_run_intake_dossier_prompt_only_when_corpus_supplied(mocker):
+    """With no corpus path the dossier confirm() prompt is hidden."""
+    mocker.patch("research_agent.intake._collect_followups", return_value=[])
+    _, _, confirm_s = _patch_questionary(
+        mocker,
+        text=["goal", "answer", ""],  # step 8 corpus blank → no dossier prompt
+        select=[
+            "Political / corruption",
+            "4h",
+            "$5",
+            "internal brief",
+            "balanced",
+        ],
+        confirm=[True],
+    )
+
+    result = intake.run_intake()
+
+    # Exactly one confirm — the final summary; no dossier prompt fired.
+    assert len(confirm_s.calls) == 1
+    assert result["corpus_dossier"] is False
+
+
+def test_run_intake_dossier_prompt_records_yes(mocker):
+    """When corpus is supplied and operator says yes, dossier flag is True."""
+    mocker.patch("research_agent.intake._collect_followups", return_value=[])
+    _, _, confirm_s = _patch_questionary(
+        mocker,
+        text=["goal", "answer", "./corpus"],
+        select=[
+            "Political / corruption",
+            "4h",
+            "$5",
+            "internal brief",
+            "balanced",
+        ],
+        confirm=[True, True],  # dossier=yes, summary=yes
+    )
+
+    result = intake.run_intake(corpus="./corpus")
+
+    # The dossier confirm was offered (and accepted), then the summary confirm.
+    assert len(confirm_s.calls) == 2
+    assert result["corpus_dossier"] is True
+
+
+def test_run_intake_dossier_prompt_default_follows_cli_flag(mocker):
+    """CLI --corpus-dossier pre-sets the dossier confirm() default to True."""
+    mocker.patch("research_agent.intake._collect_followups", return_value=[])
+    _, _, confirm_s = _patch_questionary(
+        mocker,
+        text=["goal", "answer", "./corpus"],
+        select=[
+            "Political / corruption",
+            "4h",
+            "$5",
+            "internal brief",
+            "balanced",
+        ],
+        confirm=[True, True],
+    )
+
+    intake.run_intake(corpus="./corpus", corpus_dossier=True)
+
+    dossier_call = next(
+        c for c in confirm_s.calls if c[0] and "dossier" in c[0][0].lower()
+    )
+    assert dossier_call[1].get("default") is True
 
 
 def test_run_intake_other_domain_prompts_freetext(mocker):

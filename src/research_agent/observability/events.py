@@ -63,6 +63,8 @@ EventKind = Literal[
     "low_yield_connector",
     "hypothesis_updated",
     "corpus_doc_added",
+    "corpus_file_gap",
+    "coverage_declared",
     "llm_call",
     "lmstudio_degraded",
     "lmstudio_recovered",
