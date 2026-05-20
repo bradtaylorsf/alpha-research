@@ -193,7 +193,7 @@ def _resolve_embedding_endpoint(
     models_config: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Return ``(base_url, model_name)`` for the embeddings tier."""
-    cfg = models_config or load_models_config(Path("config/models.yaml"))
+    cfg = models_config or load_models_config()
     tiers = cfg.get("tiers") or {}
     spec = tiers.get("embeddings")
     if not spec:
